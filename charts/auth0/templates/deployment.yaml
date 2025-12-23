@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "auth0.fullname" . }}
+  labels:
+    {{- include "auth0.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "auth0.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "auth0.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+      - name: auth0
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: {{ .Values.config.port }}
+          protocol: TCP
+        env:
+        - name: ISSUER
+          value: {{ .Values.config.issuer | quote }}
+        - name: AUDIENCE
+          value: {{ .Values.config.audience | quote }}
+        - name: PORT
+          value: {{ .Values.config.port | quote }}
+        {{- if .Values.config.corsOrigins }}
+        - name: CORSORIGINS
+          value: {{ join "," .Values.config.corsOrigins | quote }}
+        {{- end }}
+        {{- if .Values.customLogin.enabled }}
+        volumeMounts:
+        - name: custom-login
+          mountPath: /config
+        {{- end }}
+      {{- if .Values.customLogin.enabled }}
+      volumes:
+      - name: custom-login
+        configMap:
+          name: {{ include "auth0.fullname" . }}-login
+      {{- end }}

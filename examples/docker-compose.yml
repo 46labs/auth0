@@ -1,0 +1,11 @@
+services:
+  auth0:
+    image: ghcr.io/46labs/auth0:latest
+    ports:
+      - "3000:3000"
+    environment:
+      ISSUER: https://auth.46labs.test/
+      AUDIENCE: https://api.46labs.test
+      CORSORIGINS: https://app.46labs.test,https://admin.46labs.test
+    volumes:
+      - ./custom-login.html:/config/login.html:ro

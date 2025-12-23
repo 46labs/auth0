@@ -1,0 +1,6 @@
+apiVersion: v2
+name: auth0
+description: OIDC provider for local development
+type: application
+version: 0.1.0
+appVersion: "latest"

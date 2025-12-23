@@ -1,0 +1,65 @@
+# Example: Deploy auth0 with Helm
+# helm install auth0 ./charts/auth0 -f values.yaml
+
+# Or use kubectl directly:
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: auth0
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth0
+  namespace: auth0
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth0
+  template:
+    metadata:
+      labels:
+        app: auth0
+    spec:
+      containers:
+      - name: auth0
+        image: ghcr.io/46labs/auth0:latest
+        ports:
+        - containerPort: 3000
+        env:
+        - name: ISSUER
+          value: "https://auth.46labs.test/"
+        - name: AUDIENCE
+          value: "https://api.46labs.test"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth0
+  namespace: auth0
+spec:
+  type: ClusterIP
+  ports:
+  - port: 3000
+    targetPort: 3000
+  selector:
+    app: auth0
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: auth0
+  namespace: auth0
+spec:
+  rules:
+  - host: auth.46labs.test
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: auth0
+            port:
+              number: 3000
