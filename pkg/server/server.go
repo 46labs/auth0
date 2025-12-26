@@ -60,7 +60,7 @@ func (s *Server) Start() error {
 
 func (s *Server) generateID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return base64.URLEncoding.EncodeToString(b)
 }
 

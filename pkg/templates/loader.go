@@ -22,9 +22,9 @@ func New(cfg *config.Config) (*Loader, error) {
 	var tmpl *template.Template
 	var err error
 
-	if _, err := os.Stat("/config/login.html"); err == nil {
+	if _, statErr := os.Stat("/config/login.html"); statErr == nil {
 		tmpl, err = template.ParseFiles("/config/login.html")
-	} else if _, err := os.Stat("templates/default.html"); err == nil {
+	} else if _, statErr := os.Stat("templates/default.html"); statErr == nil {
 		tmpl, err = template.ParseFiles("templates/default.html")
 	} else {
 		tmpl, err = template.New("default").Parse(defaultTemplate)

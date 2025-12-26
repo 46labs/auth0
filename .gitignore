@@ -3,3 +3,6 @@
 .env
 dist/
 vendor/
+dev/certs/*.crt
+dev/certs/*.key
+!dev/certs/.gitignore

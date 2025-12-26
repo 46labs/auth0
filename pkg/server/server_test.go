@@ -79,7 +79,7 @@ func TestOIDCDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Discovery failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		t.Fatalf("Expected 200, got %d", resp.StatusCode)
@@ -133,7 +133,7 @@ func TestCompleteOAuth2PKCEFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get auth page: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 
@@ -155,7 +155,7 @@ func TestCompleteOAuth2PKCEFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to submit code: %v", err)
 	}
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 
 	if resp2.StatusCode != 302 {
 		t.Fatalf("Expected 302, got %d", resp2.StatusCode)
@@ -182,7 +182,7 @@ func TestCompleteOAuth2PKCEFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Token exchange failed: %v", err)
 	}
-	defer resp3.Body.Close()
+	defer func() { _ = resp3.Body.Close() }()
 
 	if resp3.StatusCode != 200 {
 		body, _ := io.ReadAll(resp3.Body)
@@ -246,7 +246,7 @@ func TestLogoutEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Logout failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 302 {
 		t.Fatalf("Expected 302, got %d", resp.StatusCode)
@@ -281,7 +281,7 @@ func TestCORSHeaders(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Request failed: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		corsHeader := resp.Header.Get("Access-Control-Allow-Origin")
 		if corsHeader == "" {
@@ -314,7 +314,7 @@ func TestUserInfoEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UserInfo request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		t.Fatalf("Expected 200, got %d", resp.StatusCode)
@@ -347,7 +347,7 @@ func TestInvalidAuthorizationCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == 200 {
 		t.Fatal("Expected error for invalid code")
@@ -379,7 +379,7 @@ func TestWrongVerificationCode(t *testing.T) {
 
 	resp, _ := client.Get(authURL)
 	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	re := regexp.MustCompile(`value="([^"]*)"`)
 	matches := re.FindStringSubmatch(string(body))
@@ -395,7 +395,7 @@ func TestWrongVerificationCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 
 	if resp2.StatusCode == 302 {
 		t.Fatal("Expected error for wrong code")
@@ -414,7 +414,7 @@ func TestMissingBearerToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 401 {
 		t.Fatalf("Expected 401, got %d", resp.StatusCode)
@@ -434,7 +434,7 @@ func TestInvalidBearerToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 401 {
 		t.Fatalf("Expected 401, got %d", resp.StatusCode)

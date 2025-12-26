@@ -16,18 +16,18 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w, r)
 	w.Header().Set("Content-Type", "application/json")
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"issuer":                 s.cfg.Issuer,
-		"authorization_endpoint": s.cfg.Issuer + "authorize",
-		"token_endpoint":         s.cfg.Issuer + "oauth/token",
-		"userinfo_endpoint":      s.cfg.Issuer + "userinfo",
-		"jwks_uri":              s.cfg.Issuer + ".well-known/jwks.json",
-		"end_session_endpoint":   s.cfg.Issuer + "v2/logout",
-		"response_types_supported": []string{"code"},
-		"grant_types_supported":    []string{"authorization_code"},
-		"subject_types_supported":  []string{"public"},
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"issuer":                                s.cfg.Issuer,
+		"authorization_endpoint":                s.cfg.Issuer + "authorize",
+		"token_endpoint":                        s.cfg.Issuer + "oauth/token",
+		"userinfo_endpoint":                     s.cfg.Issuer + "userinfo",
+		"jwks_uri":                              s.cfg.Issuer + ".well-known/jwks.json",
+		"end_session_endpoint":                  s.cfg.Issuer + "v2/logout",
+		"response_types_supported":              []string{"code"},
+		"grant_types_supported":                 []string{"authorization_code"},
+		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
-		"scopes_supported": []string{"openid", "profile", "email"},
+		"scopes_supported":                      []string{"openid", "profile", "email"},
 	})
 }
 
@@ -45,7 +45,7 @@ func (s *Server) handleJWKS(w http.ResponseWriter, r *http.Request) {
 		"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes()),
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"keys": []interface{}{jwk},
 	})
 }
@@ -61,12 +61,12 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		}
 
 		w.Header().Set("Content-Type", "text/html")
-		s.templates.Execute(w, data)
+		_ = s.templates.Execute(w, data)
 		return
 	}
 
 	if r.Method == "POST" {
-		r.ParseForm()
+		_ = r.ParseForm()
 		sessionID := r.FormValue("session_id")
 		phone := r.FormValue("phone")
 		code := r.FormValue("code")
@@ -102,7 +102,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 					redirectURL.RawQuery = query.Encode()
 
 					delete(s.pending, sessionID)
-					http.Redirect(w, r, redirectURL.String(), 302)
+					http.Redirect(w, r, redirectURL.String(), http.StatusFound)
 					return
 				}
 			}
@@ -115,7 +115,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			"Branding":  s.cfg.Branding,
 		}
 		w.Header().Set("Content-Type", "text/html")
-		s.templates.Execute(w, data)
+		_ = s.templates.Execute(w, data)
 	}
 }
 
@@ -128,7 +128,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.ParseForm()
+	_ = r.ParseForm()
 	code := r.FormValue("code")
 	clientID := r.FormValue("client_id")
 
@@ -140,17 +140,17 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	idClaims := jwt.MapClaims{
-		"sub":                  user.ID,
-		"email":                user.Email,
-		"email_verified":       true,
-		"name":                 user.Name,
-		"phone_number":         user.Phone,
+		"sub":                   user.ID,
+		"email":                 user.Email,
+		"email_verified":        true,
+		"name":                  user.Name,
+		"phone_number":          user.Phone,
 		"phone_number_verified": true,
-		"iss":                  s.cfg.Issuer,
-		"aud":                  clientID,
-		"exp":                  now.Add(time.Hour).Unix(),
-		"iat":                  now.Unix(),
-		"auth_time":            now.Unix(),
+		"iss":                   s.cfg.Issuer,
+		"aud":                   clientID,
+		"exp":                   now.Add(time.Hour).Unix(),
+		"iat":                   now.Unix(),
+		"auth_time":             now.Unix(),
 	}
 
 	if nonce, ok := s.nonces[code]; ok {
@@ -195,7 +195,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	delete(s.nonces, code)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"access_token": accessTokenString,
 		"id_token":     idTokenString,
 		"token_type":   "Bearer",
@@ -206,7 +206,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
 	if len(auth) < 7 || auth[:7] != "Bearer " {
-		http.Error(w, "Invalid authorization", 401)
+		http.Error(w, "Invalid authorization", http.StatusUnauthorized)
 		return
 	}
 
@@ -216,13 +216,13 @@ func (s *Server) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err != nil || !token.Valid {
-		http.Error(w, "Invalid token", 401)
+		http.Error(w, "Invalid token", http.StatusUnauthorized)
 		return
 	}
 
 	claims := token.Claims.(jwt.MapClaims)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"sub":          claims["sub"],
 		"email":        claims["email"],
 		"name":         claims["name"],
@@ -235,5 +235,5 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if returnTo == "" {
 		returnTo = strings.TrimSuffix(s.cfg.Issuer, "/")
 	}
-	http.Redirect(w, r, returnTo, 302)
+	http.Redirect(w, r, returnTo, http.StatusFound)
 }

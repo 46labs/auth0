@@ -21,7 +21,7 @@ func init() {
 	viper.AddConfigPath("/config")
 	viper.AddConfigPath(".")
 
-	viper.ReadInConfig()
+	_ = viper.ReadInConfig()
 }
 
 type Option func(*Config)
