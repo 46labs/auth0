@@ -27,17 +27,65 @@ func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
 		CORSOrigins: []string{"*"},
 		Users: []config.User{
 			{
-				ID:    "test_user_1",
-				Phone: "+14155551234",
-				Email: "test@46labs.test",
-				Name:  "Test User",
+				ID:            "test_user_1",
+				Phone:         "+14155551234",
+				Email:         "test@example.test",
+				Name:          "Test User",
+				EmailVerified: true,
+				AuthMethod:    "sms",
+				AppMetadata: config.AppMetadata{
+					TenantID: "org_test",
+					Role:     "admin",
+				},
+				Organizations: []string{"org_test"},
 			},
+			{
+				ID:            "test_user_2",
+				Email:         "email@example.test",
+				Name:          "Email User",
+				EmailVerified: true,
+				AuthMethod:    "email",
+				AppMetadata: config.AppMetadata{
+					TenantID: "org_test",
+					Role:     "member",
+				},
+				Organizations: []string{"org_test"},
+			},
+		},
+		Organizations: []config.Organization{
+			{
+				ID:          "org_test",
+				Name:        "test-org",
+				DisplayName: "Test Organization",
+			},
+		},
+		Connections: []config.Connection{
+			{
+				ID:             "con_sms",
+				Name:           "sms",
+				Strategy:       "sms",
+				DisplayName:    "SMS",
+				Organizations:  []string{"org_test"},
+				EnabledClients: []string{"*"},
+			},
+			{
+				ID:             "con_email",
+				Name:           "email",
+				Strategy:       "email",
+				DisplayName:    "Email",
+				Organizations:  []string{"org_test"},
+				EnabledClients: []string{"*"},
+			},
+		},
+		Members: []config.OrganizationMember{
+			{UserID: "test_user_1", OrgID: "org_test", Role: "admin"},
+			{UserID: "test_user_2", OrgID: "org_test", Role: "member"},
 		},
 		Branding: config.Branding{
 			ServiceName:  "Test Auth",
 			PrimaryColor: "#3b82f6",
 			Title:        "Sign In",
-			Subtitle:     "Enter your phone number",
+			Subtitle:     "Enter your identifier",
 		},
 	}
 
@@ -46,15 +94,7 @@ func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/.well-known/openid-configuration", srv.handleDiscovery)
-	mux.HandleFunc("/.well-known/jwks.json", srv.handleJWKS)
-	mux.HandleFunc("/authorize", srv.handleAuthorize)
-	mux.HandleFunc("/oauth/token", srv.handleToken)
-	mux.HandleFunc("/userinfo", srv.handleUserInfo)
-	mux.HandleFunc("/v2/logout", srv.handleLogout)
-
-	ts := httptest.NewServer(mux)
+	ts := httptest.NewServer(srv.Handler())
 	srv.cfg.Issuer = ts.URL + "/"
 
 	return srv, ts
@@ -441,4 +481,273 @@ func TestInvalidBearerToken(t *testing.T) {
 	}
 
 	t.Log("Invalid token rejected")
+}
+
+func TestEmailAuthentication(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+
+	redirectURI := "http://localhost:3000/callback"
+	clientID := "test_client"
+	email := "email@example.test"
+	code := "123456"
+
+	_, codeChallenge := generatePKCE()
+	state := "test_state"
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	authURL := fmt.Sprintf("%s/authorize?response_type=code&client_id=%s&redirect_uri=%s&state=%s&code_challenge=%s&code_challenge_method=S256",
+		ts.URL, clientID, url.QueryEscape(redirectURI), state, codeChallenge)
+
+	resp, _ := client.Get(authURL)
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	re := regexp.MustCompile(`value="([^"]*)"`)
+	matches := re.FindStringSubmatch(string(body))
+	sessionID := matches[1]
+
+	formData := url.Values{
+		"session_id": {sessionID},
+		"identifier": {email},
+		"code":       {code},
+	}
+
+	resp2, err := client.PostForm(ts.URL+"/authorize", formData)
+	if err != nil {
+		t.Fatalf("Failed to submit code: %v", err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+
+	if resp2.StatusCode != 302 {
+		t.Fatalf("Expected 302, got %d", resp2.StatusCode)
+	}
+
+	location := resp2.Header.Get("Location")
+	redirectURL, _ := url.Parse(location)
+	authCode := redirectURL.Query().Get("code")
+
+	if authCode == "" {
+		t.Fatalf("No authorization code in redirect")
+	}
+
+	user := srv.findUser(email)
+	if user == nil {
+		t.Fatal("User not found by email")
+	}
+
+	if user.Email != email {
+		t.Errorf("Expected email %s, got %s", email, user.Email)
+	}
+
+	t.Log("Email authentication passed")
+}
+
+func TestCustomClaimsInToken(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+
+	redirectURI := "http://localhost:3000/callback"
+	clientID := "test_client"
+	phone := "+14155551234"
+	smsCode := "123456"
+
+	codeVerifier, codeChallenge := generatePKCE()
+	state := "test_state"
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	authURL := fmt.Sprintf("%s/authorize?response_type=code&client_id=%s&redirect_uri=%s&scope=openid+profile+email&state=%s&code_challenge=%s&code_challenge_method=S256",
+		ts.URL, clientID, url.QueryEscape(redirectURI), state, codeChallenge)
+
+	resp, _ := client.Get(authURL)
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	re := regexp.MustCompile(`value="([^"]*)"`)
+	matches := re.FindStringSubmatch(string(body))
+	sessionID := matches[1]
+
+	formData := url.Values{
+		"session_id": {sessionID},
+		"phone":      {phone},
+		"code":       {smsCode},
+	}
+
+	resp2, _ := client.PostForm(ts.URL+"/authorize", formData)
+	location := resp2.Header.Get("Location")
+	_ = resp2.Body.Close()
+
+	redirectURL, _ := url.Parse(location)
+	authCode := redirectURL.Query().Get("code")
+
+	tokenData := url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {clientID},
+		"code":          {authCode},
+		"redirect_uri":  {redirectURI},
+		"code_verifier": {codeVerifier},
+	}
+
+	resp3, _ := client.PostForm(ts.URL+"/oauth/token", tokenData)
+	defer func() { _ = resp3.Body.Close() }()
+
+	var tokenResp map[string]interface{}
+	_ = json.NewDecoder(resp3.Body).Decode(&tokenResp)
+
+	ctx := context.Background()
+	provider, _ := oidc.NewProvider(ctx, srv.cfg.Issuer)
+	verifier := provider.Verifier(&oidc.Config{ClientID: clientID})
+	idToken, _ := verifier.Verify(ctx, tokenResp["id_token"].(string))
+
+	var claims map[string]interface{}
+	_ = idToken.Claims(&claims)
+
+	expectedClaims := map[string]string{
+		srv.cfg.Issuer + "tenant_id": "org_test",
+		srv.cfg.Issuer + "role":      "admin",
+	}
+
+	for claimKey, expectedValue := range expectedClaims {
+		if claims[claimKey] == nil {
+			t.Errorf("Missing custom claim: %s", claimKey)
+		} else if claims[claimKey].(string) != expectedValue {
+			t.Errorf("Expected %s=%s, got %s", claimKey, expectedValue, claims[claimKey])
+		}
+	}
+
+	t.Log("Custom claims verification passed")
+}
+
+func TestManagementAPIOrganizations(t *testing.T) {
+	_, ts := setupTestServer(t)
+	defer ts.Close()
+
+	t.Run("ListOrganizations", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/api/v2/organizations")
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != 200 {
+			t.Fatalf("Expected 200, got %d", resp.StatusCode)
+		}
+
+		var result map[string]interface{}
+		_ = json.NewDecoder(resp.Body).Decode(&result)
+
+		orgs := result["organizations"].([]interface{})
+		if len(orgs) == 0 {
+			t.Error("Expected at least one organization")
+		}
+	})
+
+	t.Run("GetOrganization", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/api/v2/organizations/org_test")
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != 200 {
+			t.Fatalf("Expected 200, got %d", resp.StatusCode)
+		}
+
+		var org config.Organization
+		_ = json.NewDecoder(resp.Body).Decode(&org)
+
+		if org.ID != "org_test" {
+			t.Errorf("Expected org_test, got %s", org.ID)
+		}
+	})
+
+	t.Run("CreateOrganization", func(t *testing.T) {
+		newOrg := config.Organization{
+			Name:        "new-org",
+			DisplayName: "New Org",
+		}
+
+		body, _ := json.Marshal(newOrg)
+		resp, err := http.Post(ts.URL+"/api/v2/organizations", "application/json", strings.NewReader(string(body)))
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != 201 {
+			t.Fatalf("Expected 201, got %d", resp.StatusCode)
+		}
+
+		var createdOrg config.Organization
+		_ = json.NewDecoder(resp.Body).Decode(&createdOrg)
+
+		if createdOrg.ID == "" {
+			t.Error("Expected generated ID")
+		}
+	})
+}
+
+func TestManagementAPIUsers(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+
+	t.Run("GetUser", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/api/v2/users/test_user_1")
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != 200 {
+			t.Fatalf("Expected 200, got %d", resp.StatusCode)
+		}
+
+		var user config.User
+		_ = json.NewDecoder(resp.Body).Decode(&user)
+
+		if user.ID != "test_user_1" {
+			t.Errorf("Expected test_user_1, got %s", user.ID)
+		}
+	})
+
+	t.Run("UpdateUser", func(t *testing.T) {
+		updates := map[string]interface{}{
+			"app_metadata": map[string]interface{}{
+				"tenant_id": "org_updated",
+				"role":      "member",
+			},
+		}
+
+		body, _ := json.Marshal(updates)
+		req, _ := http.NewRequest("PATCH", ts.URL+"/api/v2/users/test_user_1", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != 200 {
+			t.Fatalf("Expected 200, got %d", resp.StatusCode)
+		}
+
+		user := srv.getUserByID("test_user_1")
+		if user.AppMetadata.TenantID != "org_updated" {
+			t.Errorf("Expected tenant_id=org_updated, got %s", user.AppMetadata.TenantID)
+		}
+		if user.AppMetadata.Role != "member" {
+			t.Errorf("Expected role=member, got %s", user.AppMetadata.Role)
+		}
+	})
 }

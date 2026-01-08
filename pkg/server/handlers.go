@@ -68,7 +68,13 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		_ = r.ParseForm()
 		sessionID := r.FormValue("session_id")
-		phone := r.FormValue("phone")
+		identifier := r.FormValue("identifier")
+		if identifier == "" {
+			identifier = r.FormValue("phone")
+		}
+		if identifier == "" {
+			identifier = r.FormValue("email")
+		}
 		code := r.FormValue("code")
 
 		originalQuery, exists := s.pending[sessionID]
@@ -79,7 +85,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 		if code != "" {
 			if code == "123456" {
-				user := s.findUser(phone)
+				user := s.findUser(identifier)
 				if user != nil {
 					params, _ := url.ParseQuery(originalQuery)
 					authCode := s.generateID()
@@ -139,18 +145,27 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
+	ns := strings.TrimSuffix(s.cfg.Issuer, "/") + "/"
+
 	idClaims := jwt.MapClaims{
-		"sub":                   user.ID,
-		"email":                 user.Email,
-		"email_verified":        true,
-		"name":                  user.Name,
-		"phone_number":          user.Phone,
-		"phone_number_verified": true,
-		"iss":                   s.cfg.Issuer,
-		"aud":                   clientID,
-		"exp":                   now.Add(time.Hour).Unix(),
-		"iat":                   now.Unix(),
-		"auth_time":             now.Unix(),
+		"sub":            user.ID,
+		"email":          user.Email,
+		"email_verified": user.EmailVerified,
+		"name":           user.Name,
+		"iss":            s.cfg.Issuer,
+		"aud":            clientID,
+		"exp":            now.Add(time.Hour).Unix(),
+		"iat":            now.Unix(),
+		"auth_time":      now.Unix(),
+	}
+
+	if user.Phone != "" {
+		idClaims["phone_number"] = user.Phone
+		idClaims["phone_number_verified"] = true
+	}
+
+	if user.Picture != "" {
+		idClaims["picture"] = user.Picture
 	}
 
 	if nonce, ok := s.nonces[code]; ok {
@@ -165,17 +180,33 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		idClaims["family_name"] = nameParts[1]
 	}
 
+	if user.AppMetadata.TenantID != "" {
+		idClaims[ns+"tenant_id"] = user.AppMetadata.TenantID
+	}
+	if user.AppMetadata.Role != "" {
+		idClaims[ns+"role"] = user.AppMetadata.Role
+	}
+
 	idToken := jwt.NewWithClaims(jwt.SigningMethodRS256, idClaims)
 	idToken.Header["kid"] = "key-1"
 
-	accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+	accessClaims := jwt.MapClaims{
 		"sub":   user.ID,
 		"iss":   s.cfg.Issuer,
 		"aud":   s.cfg.Audience,
 		"exp":   now.Add(time.Hour).Unix(),
 		"iat":   now.Unix(),
 		"scope": "openid profile email",
-	})
+	}
+
+	if user.AppMetadata.TenantID != "" {
+		accessClaims[ns+"tenant_id"] = user.AppMetadata.TenantID
+	}
+	if user.AppMetadata.Role != "" {
+		accessClaims[ns+"role"] = user.AppMetadata.Role
+	}
+
+	accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
 	accessToken.Header["kid"] = "key-1"
 
 	idTokenString, err := idToken.SignedString(s.privateKey)

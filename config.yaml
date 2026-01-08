@@ -1,0 +1,91 @@
+issuer: "https://auth.nextel.test/"
+audience: "https://api.nextel.test"
+port: 3001
+corsOrigins:
+  - "*"
+
+branding:
+  serviceName: "Nextel"
+  primaryColor: "#FFD100"
+  title: "Welcome to Nextel"
+  subtitle: "Sign in to your account"
+
+users:
+  - user_id: "auth0|user_devone"
+    email: "dev.one@nextel.test"
+    phone: "+14695550001"
+    name: "Dev One"
+    email_verified: true
+    auth_method: "sms"
+    app_metadata:
+      tenant_id: "org_nextel_test"
+      role: "admin"
+    organizations:
+      - "org_nextel_test"
+
+  - user_id: "auth0|user_devtwo"
+    email: "dev.two@nextel.test"
+    phone: "+17135550002"
+    name: "Dev Two"
+    email_verified: true
+    auth_method: "email"
+    app_metadata:
+      tenant_id: "org_nextel_test"
+      role: "member"
+    organizations:
+      - "org_nextel_test"
+
+  - user_id: "auth0|user_devthree"
+    email: "dev.three@nextel.test"
+    phone: "+12105550003"
+    name: "Dev Three"
+    email_verified: true
+    auth_method: "sms"
+    app_metadata:
+      tenant_id: "org_nextel_test"
+      role: "member"
+    organizations:
+      - "org_nextel_test"
+
+organizations:
+  - id: "org_nextel_test"
+    name: "nextel-test"
+    display_name: "Nextel Test Organization"
+    branding:
+      primary_color: "#FFD100"
+    metadata:
+      tenant_id: "tenant_abc123"
+
+connections:
+  - id: "con_sms"
+    name: "sms"
+    strategy: "sms"
+    display_name: "SMS"
+    is_domain_connection: false
+    enabled_clients:
+      - "*"
+    organizations:
+      - "org_nextel_test"
+
+  - id: "con_email"
+    name: "email"
+    strategy: "email"
+    display_name: "Email"
+    is_domain_connection: false
+    enabled_clients:
+      - "*"
+    organizations:
+      - "org_nextel_test"
+
+members:
+  - user_id: "auth0|user_devone"
+    org_id: "org_nextel_test"
+    role: "admin"
+
+  - user_id: "auth0|user_devtwo"
+    org_id: "org_nextel_test"
+    role: "member"
+
+  - user_id: "auth0|user_devthree"
+    org_id: "org_nextel_test"
+    role: "member"

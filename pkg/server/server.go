@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
+	"sync"
 
 	"github.com/46labs/auth0/pkg/config"
 	"github.com/46labs/auth0/pkg/templates"
@@ -17,10 +19,18 @@ type Server struct {
 	cfg        *config.Config
 	privateKey *rsa.PrivateKey
 	templates  *templates.Loader
-	pending    map[string]string
-	verified   map[string]config.User
-	verifiers  map[string]string
-	nonces     map[string]string
+
+	pending   map[string]string
+	verified  map[string]config.User
+	verifiers map[string]string
+	nonces    map[string]string
+
+	users         map[string]*config.User
+	organizations map[string]*config.Organization
+	connections   map[string]*config.Connection
+	members       map[string][]config.OrganizationMember
+
+	mu sync.RWMutex
 }
 
 func New(cfg *config.Config) (*Server, error) {
@@ -34,28 +44,69 @@ func New(cfg *config.Config) (*Server, error) {
 		return nil, err
 	}
 
+	users := make(map[string]*config.User)
+	for i := range cfg.Users {
+		users[cfg.Users[i].ID] = &cfg.Users[i]
+	}
+
+	organizations := make(map[string]*config.Organization)
+	for i := range cfg.Organizations {
+		organizations[cfg.Organizations[i].ID] = &cfg.Organizations[i]
+	}
+
+	connections := make(map[string]*config.Connection)
+	for i := range cfg.Connections {
+		connections[cfg.Connections[i].ID] = &cfg.Connections[i]
+	}
+
+	members := make(map[string][]config.OrganizationMember)
+	for _, member := range cfg.Members {
+		members[member.OrgID] = append(members[member.OrgID], member)
+	}
+
 	return &Server{
-		cfg:        cfg,
-		privateKey: key,
-		templates:  tmpl,
-		pending:    make(map[string]string),
-		verified:   make(map[string]config.User),
-		verifiers:  make(map[string]string),
-		nonces:     make(map[string]string),
+		cfg:           cfg,
+		privateKey:    key,
+		templates:     tmpl,
+		pending:       make(map[string]string),
+		verified:      make(map[string]config.User),
+		verifiers:     make(map[string]string),
+		nonces:        make(map[string]string),
+		users:         users,
+		organizations: organizations,
+		connections:   connections,
+		members:       members,
 	}, nil
 }
 
-func (s *Server) Start() error {
-	http.HandleFunc("/.well-known/openid-configuration", s.handleDiscovery)
-	http.HandleFunc("/.well-known/jwks.json", s.handleJWKS)
-	http.HandleFunc("/authorize", s.handleAuthorize)
-	http.HandleFunc("/oauth/token", s.handleToken)
-	http.HandleFunc("/userinfo", s.handleUserInfo)
-	http.HandleFunc("/v2/logout", s.handleLogout)
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", s.handleDiscovery)
+	mux.HandleFunc("/.well-known/jwks.json", s.handleJWKS)
+	mux.HandleFunc("/authorize", s.handleAuthorize)
+	mux.HandleFunc("/oauth/token", s.handleToken)
+	mux.HandleFunc("/userinfo", s.handleUserInfo)
+	mux.HandleFunc("/v2/logout", s.handleLogout)
 
+	mux.HandleFunc("/api/v2/organizations", s.handleOrganizations)
+	mux.HandleFunc("/api/v2/organizations/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/members") {
+			s.handleOrganizationMembers(w, r)
+		} else {
+			s.handleOrganization(w, r)
+		}
+	})
+	mux.HandleFunc("/api/v2/connections", s.handleConnections)
+	mux.HandleFunc("/api/v2/users/", s.handleUser)
+
+	return mux
+}
+
+func (s *Server) Start() error {
 	addr := fmt.Sprintf(":%d", s.cfg.Port)
 	log.Printf("Starting server on %s (issuer: %s)", addr, s.cfg.Issuer)
-	return http.ListenAndServe(addr, nil)
+	log.Printf("Management API available at /api/v2/*")
+	return http.ListenAndServe(addr, s.Handler())
 }
 
 func (s *Server) generateID() string {
@@ -64,12 +115,50 @@ func (s *Server) generateID() string {
 	return base64.URLEncoding.EncodeToString(b)
 }
 
-func (s *Server) findUser(phone string) *config.User {
-	for _, u := range s.cfg.Users {
-		if u.Phone == phone {
-			return &u
+func (s *Server) findUser(identifier string) *config.User {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, u := range s.users {
+		if u.Phone == identifier || u.Email == identifier {
+			return u
 		}
 	}
+	return nil
+}
+
+func (s *Server) getUserByID(userID string) *config.User {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if user, ok := s.users[userID]; ok {
+		return user
+	}
+	return nil
+}
+
+func (s *Server) updateUserMetadata(userID string, appMetadata *config.AppMetadata, userMetadata map[string]interface{}) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, ok := s.users[userID]
+	if !ok {
+		return fmt.Errorf("user not found")
+	}
+
+	if appMetadata != nil {
+		user.AppMetadata = *appMetadata
+	}
+
+	if userMetadata != nil {
+		if user.UserMetadata == nil {
+			user.UserMetadata = make(map[string]interface{})
+		}
+		for k, v := range userMetadata {
+			user.UserMetadata[k] = v
+		}
+	}
+
 	return nil
 }
 
