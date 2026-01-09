@@ -209,9 +209,6 @@ func (s *Server) addOrganizationMember(w http.ResponseWriter, r *http.Request, o
 		return
 	}
 
-	// Response to return member details
-	addedMembers := []config.OrganizationMember{}
-
 	for _, userID := range req.Members {
 		// Validate that the user exists
 		user, exists := s.users[userID]
@@ -244,8 +241,6 @@ func (s *Server) addOrganizationMember(w http.ResponseWriter, r *http.Request, o
 		if !hasOrg {
 			user.Organizations = append(user.Organizations, orgID)
 		}
-
-		addedMembers = append(addedMembers, member)
 	}
 
 	// Return 204 No Content (Auth0 API behavior for AddMembers)
