@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/auth0/go-auth0/management"
 )
@@ -87,4 +88,17 @@ func (c *Client) ListOrganizations(ctx context.Context) ([]*management.Organizat
 	}
 
 	return orgs.Organizations, nil
+}
+
+func (c *Client) AddUserToOrganization(ctx context.Context, orgID, userID, role string) error {
+	log.Printf("Adding user %s to organization %s with role %s", userID, orgID, role)
+
+	members := []string{userID}
+
+	if err := c.mgmt.Organization.AddMembers(ctx, orgID, members); err != nil {
+		return fmt.Errorf("adding user to organization: %w", err)
+	}
+
+	log.Printf("Successfully added user %s to organization %s", userID, orgID)
+	return nil
 }

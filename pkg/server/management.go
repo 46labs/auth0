@@ -193,7 +193,10 @@ func (s *Server) listOrganizationMembers(w http.ResponseWriter, r *http.Request,
 
 func (s *Server) addOrganizationMember(w http.ResponseWriter, r *http.Request, orgID string) {
 	var req struct {
-		Members []string `json:"members"`
+		Members []struct {
+			UserID string   `json:"user_id"`
+			Roles  []string `json:"roles"`
+		} `json:"members"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid_body"}`, http.StatusBadRequest)
@@ -203,28 +206,62 @@ func (s *Server) addOrganizationMember(w http.ResponseWriter, r *http.Request, o
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Validate that the organization exists
 	if _, exists := s.organizations[orgID]; !exists {
 		http.Error(w, `{"error":"organization_not_found"}`, http.StatusNotFound)
 		return
 	}
 
-	for _, userID := range req.Members {
-		if user, exists := s.users[userID]; exists {
-			member := config.OrganizationMember{
-				UserID: userID,
-				OrgID:  orgID,
-				Role:   user.AppMetadata.Role,
-			}
-			s.members[orgID] = append(s.members[orgID], member)
+	// Response to return member details
+	addedMembers := []config.OrganizationMember{}
 
-			if user.Organizations == nil {
-				user.Organizations = []string{}
+	for _, memberReq := range req.Members {
+		// Validate that the user exists
+		user, exists := s.users[memberReq.UserID]
+		if !exists {
+			continue // Skip non-existent users
+		}
+
+		// Determine the primary role (use first role from array, or fall back to user's app_metadata role)
+		role := ""
+		if len(memberReq.Roles) > 0 {
+			role = memberReq.Roles[0]
+		} else if user.AppMetadata.Role != "" {
+			role = user.AppMetadata.Role
+		}
+
+		// Create the organization member
+		member := config.OrganizationMember{
+			UserID: memberReq.UserID,
+			OrgID:  orgID,
+			Role:   role,
+		}
+
+		// Add to organization's member list
+		s.members[orgID] = append(s.members[orgID], member)
+
+		// Update user's organization list
+		if user.Organizations == nil {
+			user.Organizations = []string{}
+		}
+		// Avoid duplicate organization entries
+		hasOrg := false
+		for _, existingOrgID := range user.Organizations {
+			if existingOrgID == orgID {
+				hasOrg = true
+				break
 			}
+		}
+		if !hasOrg {
 			user.Organizations = append(user.Organizations, orgID)
 		}
+
+		addedMembers = append(addedMembers, member)
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	// Return 201 Created with member details
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(addedMembers)
 }
 
 func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
