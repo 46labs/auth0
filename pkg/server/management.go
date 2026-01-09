@@ -167,6 +167,8 @@ func (s *Server) handleOrganizationMembers(w http.ResponseWriter, r *http.Reques
 		s.listOrganizationMembers(w, r, orgID)
 	case "POST":
 		s.addOrganizationMember(w, r, orgID)
+	case "DELETE":
+		s.deleteOrganizationMembers(w, r, orgID)
 	case "OPTIONS":
 		return
 	default:
@@ -244,6 +246,53 @@ func (s *Server) addOrganizationMember(w http.ResponseWriter, r *http.Request, o
 	}
 
 	// Return 204 No Content (Auth0 API behavior for AddMembers)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) deleteOrganizationMembers(w http.ResponseWriter, r *http.Request, orgID string) {
+	var req struct {
+		Members []string `json:"members"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid_body"}`, http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Validate that the organization exists
+	if _, exists := s.organizations[orgID]; !exists {
+		http.Error(w, `{"error":"organization_not_found"}`, http.StatusNotFound)
+		return
+	}
+
+	// Remove members from organization
+	for _, userID := range req.Members {
+		// Remove from organization's member list
+		if members, exists := s.members[orgID]; exists {
+			filtered := make([]config.OrganizationMember, 0)
+			for _, member := range members {
+				if member.UserID != userID {
+					filtered = append(filtered, member)
+				}
+			}
+			s.members[orgID] = filtered
+		}
+
+		// Remove organization from user's organization list
+		if user, exists := s.users[userID]; exists && user.Organizations != nil {
+			filtered := make([]string, 0)
+			for _, existingOrgID := range user.Organizations {
+				if existingOrgID != orgID {
+					filtered = append(filtered, existingOrgID)
+				}
+			}
+			user.Organizations = filtered
+		}
+	}
+
+	// Return 204 No Content (Auth0 API behavior for DeleteMembers)
 	w.WriteHeader(http.StatusNoContent)
 }
 

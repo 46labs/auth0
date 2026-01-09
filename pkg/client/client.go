@@ -110,3 +110,34 @@ func (c *Client) AddUserToOrganization(ctx context.Context, orgID, userID, role 
 	log.Printf("Successfully added user %s to organization %s with role %s", userID, orgID, role)
 	return nil
 }
+
+func (c *Client) ListOrganizationMembers(ctx context.Context, orgID string) ([]management.OrganizationMember, error) {
+	members, err := c.mgmt.Organization.Members(ctx, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("listing organization members: %w", err)
+	}
+
+	return members.Members, nil
+}
+
+func (c *Client) UpdateUserAppMetadata(ctx context.Context, userID string, appMetadata map[string]interface{}) error {
+	user := &management.User{
+		AppMetadata: &appMetadata,
+	}
+
+	if err := c.mgmt.User.Update(ctx, userID, user); err != nil {
+		return fmt.Errorf("updating user app_metadata: %w", err)
+	}
+
+	return nil
+}
+
+func (c *Client) RemoveUserFromOrganization(ctx context.Context, orgID, userID string) error {
+	members := []string{userID}
+	if err := c.mgmt.Organization.DeleteMembers(ctx, orgID, members); err != nil {
+		return fmt.Errorf("removing user from organization: %w", err)
+	}
+
+	log.Printf("Successfully removed user %s from organization %s", userID, orgID)
+	return nil
+}

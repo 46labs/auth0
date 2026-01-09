@@ -142,4 +142,62 @@ func TestClientAgainstMock(t *testing.T) {
 
 		t.Log("Successfully added user to organization with role")
 	})
+
+	t.Run("ListOrganizationMembers", func(t *testing.T) {
+		members, err := client.ListOrganizationMembers(ctx, "org_test")
+		if err != nil {
+			t.Fatalf("Failed to list organization members: %v", err)
+		}
+
+		if len(members) == 0 {
+			t.Error("Expected at least one member")
+		}
+
+		t.Logf("Listed %d organization members", len(members))
+	})
+
+	t.Run("UpdateUserAppMetadata", func(t *testing.T) {
+		appMetadata := map[string]interface{}{
+			"role":      "admin",
+			"tenant_id": "org_test",
+		}
+
+		err := client.UpdateUserAppMetadata(ctx, "test_user_new", appMetadata)
+		if err != nil {
+			t.Fatalf("Failed to update user app_metadata: %v", err)
+		}
+
+		t.Log("Successfully updated user app_metadata")
+	})
+
+	t.Run("RemoveUserFromOrganization", func(t *testing.T) {
+		// First add a user we can remove
+		srv.SetUser("test_user_remove", &config.User{
+			ID:            "test_user_remove",
+			Email:         "remove@test.example",
+			Name:          "User To Remove",
+			EmailVerified: true,
+		})
+
+		err := client.AddUserToOrganization(ctx, "org_test", "test_user_remove", "member")
+		if err != nil {
+			t.Fatalf("Failed to add user: %v", err)
+		}
+
+		// Now remove the user
+		err = client.RemoveUserFromOrganization(ctx, "org_test", "test_user_remove")
+		if err != nil {
+			t.Fatalf("Failed to remove user from organization: %v", err)
+		}
+
+		// Verify the user was removed
+		members := srv.GetOrgMembers("org_test")
+		for _, member := range members {
+			if member.UserID == "test_user_remove" {
+				t.Error("User should have been removed from organization")
+			}
+		}
+
+		t.Log("Successfully removed user from organization")
+	})
 }
