@@ -141,3 +141,12 @@ func (c *Client) RemoveUserFromOrganization(ctx context.Context, orgID, userID s
 	log.Printf("Successfully removed user %s from organization %s", userID, orgID)
 	return nil
 }
+
+func (c *Client) GetUser(ctx context.Context, userID string) (*management.User, error) {
+	user, err := c.mgmt.User.Read(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("reading user: %w", err)
+	}
+
+	return user, nil
+}
