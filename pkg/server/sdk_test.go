@@ -177,3 +177,69 @@ func TestSDKTokenExchange(t *testing.T) {
 		t.Log("Token endpoint compatible with OAuth2 SDK")
 	})
 }
+
+// TestSDKWithClientCredentials tests the Management API SDK with client_credentials flow
+func TestSDKWithClientCredentials(t *testing.T) {
+	_, ts := setupTestServer(t)
+	defer ts.Close()
+
+	// Create management client using client_credentials flow
+	m, err := management.New(
+		ts.URL,
+		management.WithClientCredentials(
+			context.Background(),
+			"mgmt_client_test",
+			"mgmt_secret_test",
+		),
+		management.WithInsecure(),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create management client with client_credentials: %v", err)
+	}
+
+	t.Run("ListOrganizations", func(t *testing.T) {
+		orgs, err := m.Organization.List(context.Background())
+		if err != nil {
+			t.Fatalf("Failed to list organizations: %v", err)
+		}
+
+		if len(orgs.Organizations) == 0 {
+			t.Error("Expected at least one organization")
+		}
+
+		t.Logf("Successfully listed %d organizations via client_credentials", len(orgs.Organizations))
+	})
+
+	t.Run("GetOrganization", func(t *testing.T) {
+		org, err := m.Organization.Read(context.Background(), "org_test")
+		if err != nil {
+			t.Fatalf("Failed to get organization: %v", err)
+		}
+
+		if org.GetID() != "org_test" {
+			t.Errorf("Expected org_test, got %s", org.GetID())
+		}
+
+		t.Logf("Successfully read organization via client_credentials")
+	})
+
+	t.Run("CreateOrganization", func(t *testing.T) {
+		name := "m2m-test-org"
+		displayName := "M2M Test Org"
+		newOrg := &management.Organization{
+			Name:        &name,
+			DisplayName: &displayName,
+		}
+
+		err := m.Organization.Create(context.Background(), newOrg)
+		if err != nil {
+			t.Fatalf("Failed to create organization: %v", err)
+		}
+
+		if newOrg.GetID() == "" {
+			t.Error("Expected generated ID")
+		}
+
+		t.Logf("Successfully created organization via client_credentials: %s", newOrg.GetID())
+	})
+}

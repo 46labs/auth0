@@ -24,7 +24,7 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 		"jwks_uri":                              s.cfg.Issuer + ".well-known/jwks.json",
 		"end_session_endpoint":                  s.cfg.Issuer + "v2/logout",
 		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code"},
+		"grant_types_supported":                 []string{"authorization_code", "client_credentials"},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      []string{"openid", "profile", "email"},
@@ -135,9 +135,53 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = r.ParseForm()
-	code := r.FormValue("code")
+	grantType := r.FormValue("grant_type")
 	clientID := r.FormValue("client_id")
 
+	// Handle client_credentials flow for M2M
+	if grantType == "client_credentials" {
+		clientSecret := r.FormValue("client_secret")
+		audience := r.FormValue("audience")
+
+		// For dev/mock, accept any client_id/client_secret combo
+		if clientID == "" || clientSecret == "" {
+			http.Error(w, `{"error":"invalid_client"}`, 400)
+			return
+		}
+
+		now := time.Now()
+		accessClaims := jwt.MapClaims{
+			"sub":       clientID,
+			"iss":       s.cfg.Issuer,
+			"aud":       audience,
+			"exp":       now.Add(24 * time.Hour).Unix(),
+			"iat":       now.Unix(),
+			"scope":     "read:organizations write:organizations read:users write:users",
+			"gty":       "client-credentials",
+			"client_id": clientID,
+		}
+
+		accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
+		accessToken.Header["kid"] = "key-1"
+
+		accessTokenString, err := accessToken.SignedString(s.privateKey)
+		if err != nil {
+			http.Error(w, "Token generation failed", 500)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": accessTokenString,
+			"token_type":   "Bearer",
+			"expires_in":   86400,
+			"scope":        "read:organizations write:organizations read:users write:users",
+		})
+		return
+	}
+
+	// Handle authorization_code flow (existing logic)
+	code := r.FormValue("code")
 	user, exists := s.verified[code]
 	if !exists {
 		http.Error(w, "Invalid code", 400)
