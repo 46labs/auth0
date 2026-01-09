@@ -36,7 +36,7 @@ func setupTestServer(t *testing.T) (*server.Server, *httptest.Server) {
 }
 
 func TestClientAgainstMock(t *testing.T) {
-	_, ts := setupTestServer(t)
+	srv, ts := setupTestServer(t)
 	defer ts.Close()
 
 	// Create client pointing to test server
@@ -106,5 +106,40 @@ func TestClientAgainstMock(t *testing.T) {
 		}
 
 		t.Log("Successfully updated organization metadata")
+	})
+
+	t.Run("AddUserToOrganization", func(t *testing.T) {
+		// Create a test user in the mock server
+		srv.SetUser("test_user_new", &config.User{
+			ID:            "test_user_new",
+			Email:         "newuser@test.example",
+			Name:          "New Test User",
+			EmailVerified: true,
+		})
+
+		// Add user to organization with admin role using SDK client
+		err := client.AddUserToOrganization(ctx, "org_test", "test_user_new", "admin")
+		if err != nil {
+			t.Fatalf("Failed to add user to organization: %v", err)
+		}
+
+		// Verify the user was added by checking the member list
+		members := srv.GetOrgMembers("org_test")
+		found := false
+		for _, member := range members {
+			if member.UserID == "test_user_new" {
+				found = true
+				if member.Role != "admin" {
+					t.Errorf("Expected role=admin, got %s", member.Role)
+				}
+				break
+			}
+		}
+
+		if !found {
+			t.Error("User was not added to organization")
+		}
+
+		t.Log("Successfully added user to organization with role")
 	})
 }

@@ -193,10 +193,7 @@ func (s *Server) listOrganizationMembers(w http.ResponseWriter, r *http.Request,
 
 func (s *Server) addOrganizationMember(w http.ResponseWriter, r *http.Request, orgID string) {
 	var req struct {
-		Members []struct {
-			UserID string   `json:"user_id"`
-			Roles  []string `json:"roles"`
-		} `json:"members"`
+		Members []string `json:"members"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid_body"}`, http.StatusBadRequest)
@@ -215,26 +212,18 @@ func (s *Server) addOrganizationMember(w http.ResponseWriter, r *http.Request, o
 	// Response to return member details
 	addedMembers := []config.OrganizationMember{}
 
-	for _, memberReq := range req.Members {
+	for _, userID := range req.Members {
 		// Validate that the user exists
-		user, exists := s.users[memberReq.UserID]
+		user, exists := s.users[userID]
 		if !exists {
 			continue // Skip non-existent users
 		}
 
-		// Determine the primary role (use first role from array, or fall back to user's app_metadata role)
-		role := ""
-		if len(memberReq.Roles) > 0 {
-			role = memberReq.Roles[0]
-		} else if user.AppMetadata.Role != "" {
-			role = user.AppMetadata.Role
-		}
-
-		// Create the organization member
+		// Create the organization member without role (will be assigned separately)
 		member := config.OrganizationMember{
-			UserID: memberReq.UserID,
+			UserID: userID,
 			OrgID:  orgID,
-			Role:   role,
+			Role:   "", // Role assigned via separate endpoint
 		}
 
 		// Add to organization's member list
@@ -259,9 +248,8 @@ func (s *Server) addOrganizationMember(w http.ResponseWriter, r *http.Request, o
 		addedMembers = append(addedMembers, member)
 	}
 
-	// Return 201 Created with member details
-	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(addedMembers)
+	// Return 204 No Content (Auth0 API behavior for AddMembers)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
@@ -319,6 +307,109 @@ func (s *Server) createConnection(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(conn)
+}
+
+func (s *Server) handleOrganizationMemberRoles(w http.ResponseWriter, r *http.Request) {
+	s.setCORS(w, r)
+	w.Header().Set("Content-Type", "application/json")
+
+	// Parse path: /api/v2/organizations/:id/members/:memberID/roles
+	path := strings.TrimPrefix(r.URL.Path, "/api/v2/organizations/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 4 {
+		http.Error(w, `{"error":"invalid_path"}`, http.StatusBadRequest)
+		return
+	}
+	orgID := parts[0]
+	memberID := parts[2]
+
+	switch r.Method {
+	case "POST":
+		s.assignMemberRoles(w, r, orgID, memberID)
+	case "DELETE":
+		s.deleteMemberRoles(w, r, orgID, memberID)
+	case "OPTIONS":
+		return
+	default:
+		http.Error(w, `{"error":"method_not_allowed"}`, http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) assignMemberRoles(w http.ResponseWriter, r *http.Request, orgID, memberID string) {
+	var req struct {
+		Roles []string `json:"roles"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid_body"}`, http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Validate organization exists
+	if _, exists := s.organizations[orgID]; !exists {
+		http.Error(w, `{"error":"organization_not_found"}`, http.StatusNotFound)
+		return
+	}
+
+	// Validate user exists
+	if _, exists := s.users[memberID]; !exists {
+		http.Error(w, `{"error":"user_not_found"}`, http.StatusNotFound)
+		return
+	}
+
+	// Find and update the member's role
+	members, exists := s.members[orgID]
+	if !exists {
+		http.Error(w, `{"error":"member_not_found"}`, http.StatusNotFound)
+		return
+	}
+
+	found := false
+	for i := range members {
+		if members[i].UserID == memberID {
+			// Use the first role from the array
+			if len(req.Roles) > 0 {
+				members[i].Role = req.Roles[0]
+			}
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		http.Error(w, `{"error":"member_not_found_in_organization"}`, http.StatusNotFound)
+		return
+	}
+
+	// Update the storage
+	s.members[orgID] = members
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) deleteMemberRoles(w http.ResponseWriter, r *http.Request, orgID, memberID string) {
+	// For mock purposes, we'll just clear the role
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	members, exists := s.members[orgID]
+	if !exists {
+		http.Error(w, `{"error":"organization_not_found"}`, http.StatusNotFound)
+		return
+	}
+
+	for i := range members {
+		if members[i].UserID == memberID {
+			members[i].Role = ""
+			s.members[orgID] = members
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+
+	http.Error(w, `{"error":"member_not_found"}`, http.StatusNotFound)
 }
 
 func (s *Server) handleUser(w http.ResponseWriter, r *http.Request) {

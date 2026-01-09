@@ -751,3 +751,243 @@ func TestManagementAPIUsers(t *testing.T) {
 		}
 	})
 }
+
+func TestManagementAPIOrganizationMembers(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+
+	t.Run("ListMembers", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/api/v2/organizations/org_test/members")
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != 200 {
+			t.Fatalf("Expected 200, got %d", resp.StatusCode)
+		}
+
+		var result map[string]interface{}
+		_ = json.NewDecoder(resp.Body).Decode(&result)
+
+		members := result["members"].([]interface{})
+		if len(members) != 2 {
+			t.Errorf("Expected 2 members, got %d", len(members))
+		}
+	})
+
+	t.Run("AddMembersWithRoles", func(t *testing.T) {
+		// First, create a new user to add
+		srv.mu.Lock()
+		srv.users["test_user_3"] = &config.User{
+			ID:            "test_user_3",
+			Email:         "newuser@example.test",
+			Name:          "New User",
+			EmailVerified: true,
+			AppMetadata: config.AppMetadata{
+				Role: "member",
+			},
+		}
+		srv.mu.Unlock()
+
+		// Step 1: Add member to organization (without role)
+		addReq := map[string]interface{}{
+			"members": []string{"test_user_3"},
+		}
+
+		body, _ := json.Marshal(addReq)
+		req, _ := http.NewRequest("POST", ts.URL+"/api/v2/organizations/org_test/members", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		_ = resp.Body.Close()
+
+		if resp.StatusCode != 204 {
+			t.Fatalf("Expected 204 No Content, got %d", resp.StatusCode)
+		}
+
+		// Step 2: Assign role to member
+		roleReq := map[string]interface{}{
+			"roles": []string{"admin"},
+		}
+
+		body, _ = json.Marshal(roleReq)
+		req, _ = http.NewRequest("POST", ts.URL+"/api/v2/organizations/org_test/members/test_user_3/roles", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		_ = resp.Body.Close()
+
+		if resp.StatusCode != 204 {
+			t.Fatalf("Expected 204 No Content for role assignment, got %d", resp.StatusCode)
+		}
+
+		// Verify the member was added with the role
+		srv.mu.RLock()
+		members := srv.members["org_test"]
+		srv.mu.RUnlock()
+
+		found := false
+		for _, member := range members {
+			if member.UserID == "test_user_3" && member.Role == "admin" {
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			t.Error("Member was not added to organization with admin role")
+		}
+
+		// Verify the user's organizations were updated
+		user := srv.getUserByID("test_user_3")
+		hasOrg := false
+		for _, orgID := range user.Organizations {
+			if orgID == "org_test" {
+				hasOrg = true
+				break
+			}
+		}
+
+		if !hasOrg {
+			t.Error("Organization was not added to user's organizations")
+		}
+	})
+
+	t.Run("AddMembersWithoutRoles", func(t *testing.T) {
+		// Create another user
+		srv.mu.Lock()
+		srv.users["test_user_4"] = &config.User{
+			ID:            "test_user_4",
+			Email:         "another@example.test",
+			Name:          "Another User",
+			EmailVerified: true,
+			AppMetadata: config.AppMetadata{
+				Role: "member",
+			},
+		}
+		srv.mu.Unlock()
+
+		// Add member without assigning role
+		reqBody := map[string]interface{}{
+			"members": []string{"test_user_4"},
+		}
+
+		body, _ := json.Marshal(reqBody)
+		req, _ := http.NewRequest("POST", ts.URL+"/api/v2/organizations/org_test/members", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != 204 {
+			t.Fatalf("Expected 204, got %d", resp.StatusCode)
+		}
+
+		// Verify the member was added (role will be empty until assigned)
+		srv.mu.RLock()
+		members := srv.members["org_test"]
+		srv.mu.RUnlock()
+
+		found := false
+		for _, member := range members {
+			if member.UserID == "test_user_4" {
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			t.Error("Member was not added")
+		}
+	})
+
+	t.Run("AddMembersToNonexistentOrg", func(t *testing.T) {
+		reqBody := map[string]interface{}{
+			"members": []string{"test_user_1"},
+		}
+
+		body, _ := json.Marshal(reqBody)
+		req, _ := http.NewRequest("POST", ts.URL+"/api/v2/organizations/nonexistent/members", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != 404 {
+			t.Fatalf("Expected 404, got %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("AddMultipleMembers", func(t *testing.T) {
+		// Create two more users
+		srv.mu.Lock()
+		srv.users["test_user_5"] = &config.User{
+			ID:            "test_user_5",
+			Email:         "user5@example.test",
+			Name:          "User Five",
+			EmailVerified: true,
+		}
+		srv.users["test_user_6"] = &config.User{
+			ID:            "test_user_6",
+			Email:         "user6@example.test",
+			Name:          "User Six",
+			EmailVerified: true,
+		}
+		srv.mu.Unlock()
+
+		// Add multiple members
+		reqBody := map[string]interface{}{
+			"members": []string{"test_user_5", "test_user_6"},
+		}
+
+		body, _ := json.Marshal(reqBody)
+		req, _ := http.NewRequest("POST", ts.URL+"/api/v2/organizations/org_test/members", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != 204 {
+			t.Fatalf("Expected 204, got %d", resp.StatusCode)
+		}
+
+		// Verify both members were added
+		srv.mu.RLock()
+		members := srv.members["org_test"]
+		srv.mu.RUnlock()
+
+		user5Found := false
+		user6Found := false
+		for _, member := range members {
+			if member.UserID == "test_user_5" {
+				user5Found = true
+			}
+			if member.UserID == "test_user_6" {
+				user6Found = true
+			}
+		}
+
+		if !user5Found {
+			t.Error("test_user_5 was not added to organization")
+		}
+		if !user6Found {
+			t.Error("test_user_6 was not added to organization")
+		}
+	})
+}

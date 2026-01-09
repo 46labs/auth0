@@ -93,12 +93,20 @@ func (c *Client) ListOrganizations(ctx context.Context) ([]*management.Organizat
 func (c *Client) AddUserToOrganization(ctx context.Context, orgID, userID, role string) error {
 	log.Printf("Adding user %s to organization %s with role %s", userID, orgID, role)
 
+	// Step 1: Add user to organization
 	members := []string{userID}
-
 	if err := c.mgmt.Organization.AddMembers(ctx, orgID, members); err != nil {
 		return fmt.Errorf("adding user to organization: %w", err)
 	}
 
-	log.Printf("Successfully added user %s to organization %s", userID, orgID)
+	// Step 2: Assign role to the member
+	if role != "" {
+		roles := []string{role}
+		if err := c.mgmt.Organization.AssignMemberRoles(ctx, orgID, userID, roles); err != nil {
+			return fmt.Errorf("assigning role to member: %w", err)
+		}
+	}
+
+	log.Printf("Successfully added user %s to organization %s with role %s", userID, orgID, role)
 	return nil
 }

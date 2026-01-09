@@ -219,7 +219,16 @@ GET /api/v2/organizations/:id/members
 # Add members
 POST /api/v2/organizations/:id/members
 {
-  "members": ["auth0|user_1", "auth0|user_2"]
+  "members": [
+    {
+      "user_id": "auth0|user_1",
+      "roles": ["admin"]
+    },
+    {
+      "user_id": "auth0|user_2",
+      "roles": ["member"]
+    }
+  ]
 }
 ```
 

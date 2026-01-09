@@ -90,7 +90,9 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("/api/v2/organizations", s.handleOrganizations)
 	mux.HandleFunc("/api/v2/organizations/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/members") {
+		if strings.Contains(r.URL.Path, "/members/") && strings.Contains(r.URL.Path, "/roles") {
+			s.handleOrganizationMemberRoles(w, r)
+		} else if strings.Contains(r.URL.Path, "/members") {
 			s.handleOrganizationMembers(w, r)
 		} else {
 			s.handleOrganization(w, r)
@@ -135,6 +137,23 @@ func (s *Server) getUserByID(userID string) *config.User {
 		return user
 	}
 	return nil
+}
+
+// SetUser adds or updates a user in the mock server (for testing)
+func (s *Server) SetUser(userID string, user *config.User) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.users[userID] = user
+}
+
+// GetOrgMembers returns the members of an organization (for testing)
+func (s *Server) GetOrgMembers(orgID string) []config.OrganizationMember {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if members, ok := s.members[orgID]; ok {
+		return members
+	}
+	return []config.OrganizationMember{}
 }
 
 func (s *Server) updateUserMetadata(userID string, appMetadata *config.AppMetadata, userMetadata map[string]interface{}) error {
