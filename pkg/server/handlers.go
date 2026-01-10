@@ -192,6 +192,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Always get the latest user data from s.users to include updated AppMetadata
+	if latestUser := s.getUserByID(user.ID); latestUser != nil {
+		user = *latestUser
+	}
+
 	now := time.Now()
 	ns := strings.TrimSuffix(s.cfg.Issuer, "/") + "/"
 
