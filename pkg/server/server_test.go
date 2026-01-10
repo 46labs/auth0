@@ -990,4 +990,62 @@ func TestManagementAPIOrganizationMembers(t *testing.T) {
 			t.Error("test_user_6 was not added to organization")
 		}
 	})
+
+	t.Run("AssignRoleUpdatesAppMetadata", func(t *testing.T) {
+		// Create a new user without org membership
+		srv.mu.Lock()
+		srv.users["test_user_jwt"] = &config.User{
+			ID:            "test_user_jwt",
+			Email:         "jwt@example.test",
+			Name:          "JWT Test User",
+			EmailVerified: true,
+			AppMetadata:   config.AppMetadata{}, // Empty AppMetadata
+		}
+		srv.mu.Unlock()
+
+		// Add member to organization
+		addReq := map[string]interface{}{
+			"members": []string{"test_user_jwt"},
+		}
+		body, _ := json.Marshal(addReq)
+		req, _ := http.NewRequest("POST", ts.URL+"/api/v2/organizations/org_test/members", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		_ = resp.Body.Close()
+
+		if resp.StatusCode != 204 {
+			t.Fatalf("Expected 204, got %d", resp.StatusCode)
+		}
+
+		// Assign role to member
+		roleReq := map[string]interface{}{
+			"roles": []string{"admin"},
+		}
+		body, _ = json.Marshal(roleReq)
+		req, _ = http.NewRequest("POST", ts.URL+"/api/v2/organizations/org_test/members/test_user_jwt/roles", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		_ = resp.Body.Close()
+
+		if resp.StatusCode != 204 {
+			t.Fatalf("Expected 204, got %d", resp.StatusCode)
+		}
+
+		// Verify AppMetadata was updated with tenant_id and role
+		user := srv.getUserByID("test_user_jwt")
+		if user.AppMetadata.TenantID != "org_test" {
+			t.Errorf("Expected AppMetadata.TenantID='org_test', got '%s'", user.AppMetadata.TenantID)
+		}
+		if user.AppMetadata.Role != "admin" {
+			t.Errorf("Expected AppMetadata.Role='admin', got '%s'", user.AppMetadata.Role)
+		}
+	})
 }

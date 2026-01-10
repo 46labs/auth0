@@ -430,6 +430,15 @@ func (s *Server) assignMemberRoles(w http.ResponseWriter, r *http.Request, orgID
 	// Update the storage
 	s.members[orgID] = members
 
+	// Update user's AppMetadata with tenant_id and role for JWT claims
+	if user, exists := s.users[memberID]; exists {
+		user.AppMetadata.TenantID = orgID
+		if len(req.Roles) > 0 {
+			user.AppMetadata.Role = req.Roles[0]
+		}
+		s.users[memberID] = user
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
