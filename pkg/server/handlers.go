@@ -86,6 +86,10 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		if code != "" {
 			if code == "123456" {
 				user := s.findUser(identifier)
+				// Auto-create user if not found (like real Auth0 passwordless)
+				if user == nil {
+					user = s.autoCreateUser(identifier)
+				}
 				if user != nil {
 					params, _ := url.ParseQuery(originalQuery)
 					authCode := s.generateID()

@@ -129,6 +129,40 @@ func (s *Server) findUser(identifier string) *config.User {
 	return nil
 }
 
+func (s *Server) autoCreateUser(identifier string) *config.User {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	userID := "auth0|" + s.generateID()
+
+	user := &config.User{
+		ID:            userID,
+		Name:          identifier,
+		EmailVerified: false,
+		AppMetadata:   config.AppMetadata{},
+		UserMetadata:  make(map[string]interface{}),
+	}
+
+	// Determine if email or phone based on format
+	if strings.HasPrefix(identifier, "+") {
+		user.Phone = identifier
+		user.AuthMethod = "sms"
+	} else if strings.Contains(identifier, "@") {
+		user.Email = identifier
+		user.AuthMethod = "email"
+		user.EmailVerified = true
+	} else {
+		// Default to email
+		user.Email = identifier
+		user.AuthMethod = "email"
+		user.EmailVerified = true
+	}
+
+	s.users[userID] = user
+	log.Printf("Auto-created user: %s (%s)", userID, identifier)
+	return user
+}
+
 func (s *Server) getUserByID(userID string) *config.User {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
