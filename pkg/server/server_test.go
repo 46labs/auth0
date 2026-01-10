@@ -750,6 +750,62 @@ func TestManagementAPIUsers(t *testing.T) {
 			t.Errorf("Expected role=member, got %s", user.AppMetadata.Role)
 		}
 	})
+
+	t.Run("BlockUser", func(t *testing.T) {
+		blocked := true
+		updates := map[string]interface{}{
+			"blocked": blocked,
+		}
+
+		body, _ := json.Marshal(updates)
+		req, _ := http.NewRequest("PATCH", ts.URL+"/api/v2/users/test_user_1", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != 200 {
+			t.Fatalf("Expected 200, got %d", resp.StatusCode)
+		}
+
+		user := srv.getUserByID("test_user_1")
+		if user.Blocked == nil {
+			t.Errorf("Expected blocked to be set, got nil")
+		} else if !*user.Blocked {
+			t.Errorf("Expected blocked=true, got false")
+		}
+	})
+
+	t.Run("UnblockUser", func(t *testing.T) {
+		blocked := false
+		updates := map[string]interface{}{
+			"blocked": blocked,
+		}
+
+		body, _ := json.Marshal(updates)
+		req, _ := http.NewRequest("PATCH", ts.URL+"/api/v2/users/test_user_1", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != 200 {
+			t.Fatalf("Expected 200, got %d", resp.StatusCode)
+		}
+
+		user := srv.getUserByID("test_user_1")
+		if user.Blocked == nil {
+			t.Errorf("Expected blocked to be set, got nil")
+		} else if *user.Blocked {
+			t.Errorf("Expected blocked=false, got true")
+		}
+	})
 }
 
 func TestManagementAPIOrganizationMembers(t *testing.T) {

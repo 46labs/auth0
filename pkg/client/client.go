@@ -158,3 +158,31 @@ func (c *Client) DeleteUser(ctx context.Context, userID string) error {
 
 	return nil
 }
+
+func (c *Client) BlockUser(ctx context.Context, userID string) error {
+	blocked := true
+	user := &management.User{
+		Blocked: &blocked,
+	}
+
+	if err := c.mgmt.User.Update(ctx, userID, user); err != nil {
+		return fmt.Errorf("blocking user: %w", err)
+	}
+
+	log.Printf("Successfully blocked user %s", userID)
+	return nil
+}
+
+func (c *Client) UnblockUser(ctx context.Context, userID string) error {
+	blocked := false
+	user := &management.User{
+		Blocked: &blocked,
+	}
+
+	if err := c.mgmt.User.Update(ctx, userID, user); err != nil {
+		return fmt.Errorf("unblocking user: %w", err)
+	}
+
+	log.Printf("Successfully unblocked user %s", userID)
+	return nil
+}

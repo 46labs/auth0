@@ -499,6 +499,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, userID strin
 	var updates struct {
 		AppMetadata  *config.AppMetadata    `json:"app_metadata"`
 		UserMetadata map[string]interface{} `json:"user_metadata"`
+		Blocked      *bool                  `json:"blocked"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
@@ -506,7 +507,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, userID strin
 		return
 	}
 
-	if err := s.updateUserMetadata(userID, updates.AppMetadata, updates.UserMetadata); err != nil {
+	if err := s.updateUserMetadata(userID, updates.AppMetadata, updates.UserMetadata, updates.Blocked); err != nil {
 		http.Error(w, `{"error":"user_not_found"}`, http.StatusNotFound)
 		return
 	}

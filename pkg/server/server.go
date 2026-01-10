@@ -190,7 +190,7 @@ func (s *Server) GetOrgMembers(orgID string) []config.OrganizationMember {
 	return []config.OrganizationMember{}
 }
 
-func (s *Server) updateUserMetadata(userID string, appMetadata *config.AppMetadata, userMetadata map[string]interface{}) error {
+func (s *Server) updateUserMetadata(userID string, appMetadata *config.AppMetadata, userMetadata map[string]interface{}, blocked *bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -210,6 +210,10 @@ func (s *Server) updateUserMetadata(userID string, appMetadata *config.AppMetada
 		for k, v := range userMetadata {
 			user.UserMetadata[k] = v
 		}
+	}
+
+	if blocked != nil {
+		user.Blocked = blocked
 	}
 
 	return nil
