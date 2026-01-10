@@ -150,3 +150,11 @@ func (c *Client) GetUser(ctx context.Context, userID string) (*management.User, 
 
 	return user, nil
 }
+
+func (c *Client) DeleteUser(ctx context.Context, userID string) error {
+	if err := c.mgmt.User.Delete(ctx, userID); err != nil {
+		return fmt.Errorf("deleting user: %w", err)
+	}
+
+	return nil
+}

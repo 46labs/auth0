@@ -476,6 +476,8 @@ func (s *Server) handleUser(w http.ResponseWriter, r *http.Request) {
 		s.getUser(w, r, userID)
 	case "PATCH":
 		s.updateUser(w, r, userID)
+	case "DELETE":
+		s.deleteUser(w, r, userID)
 	case "OPTIONS":
 		return
 	default:
@@ -511,4 +513,30 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, userID strin
 
 	user := s.getUserByID(userID)
 	_ = json.NewEncoder(w).Encode(user)
+}
+
+func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, userID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.users[userID]; !exists {
+		http.Error(w, `{"error":"user_not_found"}`, http.StatusNotFound)
+		return
+	}
+
+	// Remove user from all organizations
+	for orgID, members := range s.members {
+		filtered := []config.OrganizationMember{}
+		for _, member := range members {
+			if member.UserID != userID {
+				filtered = append(filtered, member)
+			}
+		}
+		s.members[orgID] = filtered
+	}
+
+	// Delete the user
+	delete(s.users, userID)
+
+	w.WriteHeader(http.StatusNoContent)
 }
