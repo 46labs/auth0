@@ -497,6 +497,8 @@ func (s *Server) getUser(w http.ResponseWriter, r *http.Request, userID string) 
 
 func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, userID string) {
 	var updates struct {
+		Name         *string                `json:"name"`
+		Email        *string                `json:"email"`
 		AppMetadata  *config.AppMetadata    `json:"app_metadata"`
 		UserMetadata map[string]interface{} `json:"user_metadata"`
 		Blocked      *bool                  `json:"blocked"`
@@ -507,13 +509,31 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, userID strin
 		return
 	}
 
+	// Update basic user fields if provided
+	s.mu.Lock()
+	user, exists := s.users[userID]
+	if !exists {
+		s.mu.Unlock()
+		http.Error(w, `{"error":"user_not_found"}`, http.StatusNotFound)
+		return
+	}
+
+	if updates.Name != nil {
+		user.Name = *updates.Name
+	}
+	if updates.Email != nil {
+		user.Email = *updates.Email
+	}
+	s.mu.Unlock()
+
+	// Update metadata and blocked status
 	if err := s.updateUserMetadata(userID, updates.AppMetadata, updates.UserMetadata, updates.Blocked); err != nil {
 		http.Error(w, `{"error":"user_not_found"}`, http.StatusNotFound)
 		return
 	}
 
-	user := s.getUserByID(userID)
-	_ = json.NewEncoder(w).Encode(user)
+	updatedUser := s.getUserByID(userID)
+	_ = json.NewEncoder(w).Encode(updatedUser)
 }
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, userID string) {
