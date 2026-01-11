@@ -186,3 +186,14 @@ func (c *Client) UnblockUser(ctx context.Context, userID string) error {
 	log.Printf("Successfully unblocked user %s", userID)
 	return nil
 }
+
+// UpdateUser updates a user with the provided fields
+// See: https://auth0.com/docs/api/management/v2#!/Users/patch_users_by_id
+func (c *Client) UpdateUser(ctx context.Context, userID string, user *management.User) error {
+	if err := c.mgmt.User.Update(ctx, userID, user); err != nil {
+		return fmt.Errorf("updating user: %w", err)
+	}
+
+	log.Printf("Successfully updated user %s", userID)
+	return nil
+}
