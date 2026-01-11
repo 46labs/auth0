@@ -32,7 +32,6 @@ func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
 				Email:         "test@example.test",
 				Name:          "Test User",
 				EmailVerified: true,
-				AuthMethod:    "sms",
 				Identities: []config.UserIdentity{
 					{
 						Connection: "sms",
@@ -52,7 +51,6 @@ func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
 				Email:         "email@example.test",
 				Name:          "Email User",
 				EmailVerified: true,
-				AuthMethod:    "email",
 				Identities: []config.UserIdentity{
 					{
 						Connection: "email",

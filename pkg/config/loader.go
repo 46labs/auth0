@@ -83,25 +83,5 @@ func Load(opts ...Option) (*Config, error) {
 		opt(cfg)
 	}
 
-	// Ensure all users have identities populated
-	for i := range cfg.Users {
-		if len(cfg.Users[i].Identities) == 0 && cfg.Users[i].AuthMethod != "" {
-			// Extract the user_id portion from the full ID (e.g., "auth0|user_devone" -> "user_devone")
-			userIDPart := cfg.Users[i].ID
-			if len(userIDPart) > 6 && userIDPart[:6] == "auth0|" {
-				userIDPart = userIDPart[6:]
-			}
-
-			cfg.Users[i].Identities = []UserIdentity{
-				{
-					Connection: cfg.Users[i].AuthMethod,
-					Provider:   cfg.Users[i].AuthMethod,
-					UserID:     userIDPart,
-					IsSocial:   false,
-				},
-			}
-		}
-	}
-
 	return cfg, nil
 }

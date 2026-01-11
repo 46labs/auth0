@@ -18,9 +18,8 @@ type User struct {
 	Email         string                 `json:"email" yaml:"email" mapstructure:"email"`
 	Name          string                 `json:"name" yaml:"name" mapstructure:"name"`
 	EmailVerified bool                   `json:"email_verified" yaml:"email_verified" mapstructure:"email_verified"`
-	Blocked       *bool                  `json:"blocked,omitempty" yaml:"blocked,omitempty" mapstructure:"blocked"`             // True if user is blocked from the application
-	Identities    []UserIdentity         `json:"identities,omitempty" yaml:"identities,omitempty" mapstructure:"identities"`   // Auth0 identities array
-	AuthMethod    string                 `json:"auth_method,omitempty" yaml:"auth_method,omitempty" mapstructure:"auth_method"` // "sms", "email", "oidc" - used for config only
+	Blocked       *bool                  `json:"blocked,omitempty" yaml:"blocked,omitempty" mapstructure:"blocked"`           // True if user is blocked from the application
+	Identities    []UserIdentity         `json:"identities,omitempty" yaml:"identities,omitempty" mapstructure:"identities"` // Auth0 identities array
 	AppMetadata   AppMetadata            `json:"app_metadata,omitempty" yaml:"app_metadata,omitempty" mapstructure:"app_metadata"`
 	UserMetadata  map[string]interface{} `json:"user_metadata,omitempty" yaml:"user_metadata,omitempty" mapstructure:"user_metadata"`
 	Picture       string                 `json:"picture,omitempty" yaml:"picture,omitempty" mapstructure:"picture"`

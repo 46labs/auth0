@@ -147,7 +147,6 @@ func (s *Server) autoCreateUser(identifier string) *config.User {
 	// Determine if email or phone based on format
 	if strings.HasPrefix(identifier, "+") {
 		user.Phone = identifier
-		user.AuthMethod = "sms"
 		user.Identities = []config.UserIdentity{
 			{
 				Connection: "sms",
@@ -158,7 +157,6 @@ func (s *Server) autoCreateUser(identifier string) *config.User {
 		}
 	} else if strings.Contains(identifier, "@") {
 		user.Email = identifier
-		user.AuthMethod = "email"
 		user.EmailVerified = true
 		user.Identities = []config.UserIdentity{
 			{
@@ -171,7 +169,6 @@ func (s *Server) autoCreateUser(identifier string) *config.User {
 	} else {
 		// Default to email
 		user.Email = identifier
-		user.AuthMethod = "email"
 		user.EmailVerified = true
 		user.Identities = []config.UserIdentity{
 			{

@@ -16,7 +16,11 @@ users:
     phone: "+14695550001"
     name: "Dev One"
     email_verified: true
-    auth_method: "sms"
+    identities:
+      - connection: "sms"
+        provider: "sms"
+        user_id: "user_devone"
+        isSocial: false
     app_metadata:
       tenant_id: "org_nextel_test"
       role: "admin"
@@ -28,7 +32,11 @@ users:
     phone: "+17135550002"
     name: "Dev Two"
     email_verified: true
-    auth_method: "email"
+    identities:
+      - connection: "email"
+        provider: "email"
+        user_id: "user_devtwo"
+        isSocial: false
     app_metadata:
       tenant_id: "org_nextel_test"
       role: "member"
@@ -40,7 +48,11 @@ users:
     phone: "+12105550003"
     name: "Dev Three"
     email_verified: true
-    auth_method: "sms"
+    identities:
+      - connection: "sms"
+        provider: "sms"
+        user_id: "user_devthree"
+        isSocial: false
     app_metadata:
       tenant_id: "org_nextel_test"
       role: "member"
