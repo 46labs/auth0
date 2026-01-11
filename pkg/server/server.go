@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/46labs/auth0/pkg/config"
+	"github.com/46labs/auth0/pkg/contact"
 	"github.com/46labs/auth0/pkg/templates"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -121,9 +122,26 @@ func (s *Server) findUser(identifier string) *config.User {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	for _, u := range s.users {
-		if u.Phone == identifier || u.Email == identifier {
-			return u
+	// Determine if email or phone
+	if contact.IsEmail(identifier) {
+		// Email - exact match
+		for _, u := range s.users {
+			if u.Email == identifier {
+				return u
+			}
+		}
+	} else {
+		// Phone - normalize and compare
+		normalizedIdentifier, err := contact.NormalizePhoneToE164(identifier)
+		if err == nil {
+			for _, u := range s.users {
+				if u.Phone != "" {
+					normalizedPhone, err := contact.NormalizePhoneToE164(u.Phone)
+					if err == nil && normalizedPhone == normalizedIdentifier {
+						return u
+					}
+				}
+			}
 		}
 	}
 	return nil
@@ -145,17 +163,7 @@ func (s *Server) autoCreateUser(identifier string) *config.User {
 	}
 
 	// Determine if email or phone based on format
-	if strings.HasPrefix(identifier, "+") {
-		user.Phone = identifier
-		user.Identities = []config.UserIdentity{
-			{
-				Connection: "sms",
-				Provider:   "sms",
-				UserID:     userIDPart,
-				IsSocial:   false,
-			},
-		}
-	} else if strings.Contains(identifier, "@") {
+	if contact.IsEmail(identifier) {
 		user.Email = identifier
 		user.EmailVerified = true
 		user.Identities = []config.UserIdentity{
@@ -167,13 +175,17 @@ func (s *Server) autoCreateUser(identifier string) *config.User {
 			},
 		}
 	} else {
-		// Default to email
-		user.Email = identifier
-		user.EmailVerified = true
+		// Phone number - normalize before storing
+		normalizedPhone, err := contact.NormalizePhoneToE164(identifier)
+		if err != nil {
+			log.Printf("Failed to normalize phone %s: %v", identifier, err)
+			normalizedPhone = identifier // Store as-is if normalization fails
+		}
+		user.Phone = normalizedPhone
 		user.Identities = []config.UserIdentity{
 			{
-				Connection: "email",
-				Provider:   "email",
+				Connection: "sms",
+				Provider:   "sms",
 				UserID:     userIDPart,
 				IsSocial:   false,
 			},
