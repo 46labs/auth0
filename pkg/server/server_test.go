@@ -33,6 +33,14 @@ func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
 				Name:          "Test User",
 				EmailVerified: true,
 				AuthMethod:    "sms",
+				Identities: []config.UserIdentity{
+					{
+						Connection: "sms",
+						Provider:   "sms",
+						UserID:     "test_user_1",
+						IsSocial:   false,
+					},
+				},
 				AppMetadata: config.AppMetadata{
 					TenantID: "org_test",
 					Role:     "admin",
@@ -45,6 +53,14 @@ func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
 				Name:          "Email User",
 				EmailVerified: true,
 				AuthMethod:    "email",
+				Identities: []config.UserIdentity{
+					{
+						Connection: "email",
+						Provider:   "email",
+						UserID:     "test_user_2",
+						IsSocial:   false,
+					},
+				},
 				AppMetadata: config.AppMetadata{
 					TenantID: "org_test",
 					Role:     "member",

@@ -134,6 +134,7 @@ func (s *Server) autoCreateUser(identifier string) *config.User {
 	defer s.mu.Unlock()
 
 	userID := "auth0|" + s.generateID()
+	userIDPart := userID[6:] // Extract part after "auth0|"
 
 	user := &config.User{
 		ID:            userID,
@@ -147,15 +148,39 @@ func (s *Server) autoCreateUser(identifier string) *config.User {
 	if strings.HasPrefix(identifier, "+") {
 		user.Phone = identifier
 		user.AuthMethod = "sms"
+		user.Identities = []config.UserIdentity{
+			{
+				Connection: "sms",
+				Provider:   "sms",
+				UserID:     userIDPart,
+				IsSocial:   false,
+			},
+		}
 	} else if strings.Contains(identifier, "@") {
 		user.Email = identifier
 		user.AuthMethod = "email"
 		user.EmailVerified = true
+		user.Identities = []config.UserIdentity{
+			{
+				Connection: "email",
+				Provider:   "email",
+				UserID:     userIDPart,
+				IsSocial:   false,
+			},
+		}
 	} else {
 		// Default to email
 		user.Email = identifier
 		user.AuthMethod = "email"
 		user.EmailVerified = true
+		user.Identities = []config.UserIdentity{
+			{
+				Connection: "email",
+				Provider:   "email",
+				UserID:     userIDPart,
+				IsSocial:   false,
+			},
+		}
 	}
 
 	s.users[userID] = user

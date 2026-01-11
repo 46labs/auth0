@@ -77,99 +77,30 @@ func Load(opts ...Option) (*Config, error) {
 		return nil, fmt.Errorf("unmarshal actions: %w", err)
 	}
 
-	if len(cfg.Users) == 0 {
-		cfg.Users = []User{
-			{
-				ID:            "auth0|user_devone",
-				Phone:         "+14695550001",
-				Email:         "dev.one@nextel.test",
-				Name:          "Dev One",
-				EmailVerified: true,
-				AuthMethod:    "sms",
-				AppMetadata: AppMetadata{
-					TenantID: "org_nextel_test",
-					Role:     "admin",
-				},
-				Organizations: []string{"org_nextel_test"},
-			},
-			{
-				ID:            "auth0|user_devtwo",
-				Phone:         "+17135550002",
-				Email:         "dev.two@nextel.test",
-				Name:          "Dev Two",
-				EmailVerified: true,
-				AuthMethod:    "email",
-				AppMetadata: AppMetadata{
-					TenantID: "org_nextel_test",
-					Role:     "member",
-				},
-				Organizations: []string{"org_nextel_test"},
-			},
-			{
-				ID:            "auth0|user_devthree",
-				Phone:         "+12105550003",
-				Email:         "dev.three@nextel.test",
-				Name:          "Dev Three",
-				EmailVerified: true,
-				AuthMethod:    "sms",
-				AppMetadata: AppMetadata{
-					TenantID: "org_nextel_test",
-					Role:     "member",
-				},
-				Organizations: []string{"org_nextel_test"},
-			},
-		}
-	}
-
-	if len(cfg.Organizations) == 0 {
-		cfg.Organizations = []Organization{
-			{
-				ID:          "org_nextel_test",
-				Name:        "nextel-test",
-				DisplayName: "Nextel Test Organization",
-				Branding: &OrganizationBranding{
-					PrimaryColor: "#FFD100",
-				},
-				Metadata: map[string]interface{}{
-					"tenant_id": "tenant_abc123",
-				},
-			},
-		}
-	}
-
-	if len(cfg.Connections) == 0 {
-		cfg.Connections = []Connection{
-			{
-				ID:             "con_sms",
-				Name:           "sms",
-				Strategy:       "sms",
-				DisplayName:    "SMS",
-				IsDomainConn:   false,
-				EnabledClients: []string{"*"},
-				Organizations:  []string{"org_nextel_test"},
-			},
-			{
-				ID:             "con_email",
-				Name:           "email",
-				Strategy:       "email",
-				DisplayName:    "Email",
-				IsDomainConn:   false,
-				EnabledClients: []string{"*"},
-				Organizations:  []string{"org_nextel_test"},
-			},
-		}
-	}
-
-	if len(cfg.Members) == 0 {
-		cfg.Members = []OrganizationMember{
-			{UserID: "auth0|user_devone", OrgID: "org_nextel_test", Role: "admin"},
-			{UserID: "auth0|user_devtwo", OrgID: "org_nextel_test", Role: "member"},
-			{UserID: "auth0|user_devthree", OrgID: "org_nextel_test", Role: "member"},
-		}
-	}
+	// No default users - load from config.yaml only
 
 	for _, opt := range opts {
 		opt(cfg)
+	}
+
+	// Ensure all users have identities populated
+	for i := range cfg.Users {
+		if len(cfg.Users[i].Identities) == 0 && cfg.Users[i].AuthMethod != "" {
+			// Extract the user_id portion from the full ID (e.g., "auth0|user_devone" -> "user_devone")
+			userIDPart := cfg.Users[i].ID
+			if len(userIDPart) > 6 && userIDPart[:6] == "auth0|" {
+				userIDPart = userIDPart[6:]
+			}
+
+			cfg.Users[i].Identities = []UserIdentity{
+				{
+					Connection: cfg.Users[i].AuthMethod,
+					Provider:   cfg.Users[i].AuthMethod,
+					UserID:     userIDPart,
+					IsSocial:   false,
+				},
+			}
+		}
 	}
 
 	return cfg, nil

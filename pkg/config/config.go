@@ -5,6 +5,13 @@ type AppMetadata struct {
 	Role     string `json:"role,omitempty" yaml:"role,omitempty" mapstructure:"role"`
 }
 
+type UserIdentity struct {
+	Connection string `json:"connection" yaml:"connection" mapstructure:"connection"`
+	Provider   string `json:"provider" yaml:"provider" mapstructure:"provider"`
+	UserID     string `json:"user_id" yaml:"user_id" mapstructure:"user_id"`
+	IsSocial   bool   `json:"isSocial" yaml:"isSocial" mapstructure:"isSocial"`
+}
+
 type User struct {
 	ID            string                 `json:"user_id" yaml:"user_id" mapstructure:"user_id"`
 	Phone         string                 `json:"phone,omitempty" yaml:"phone,omitempty" mapstructure:"phone"`
@@ -12,10 +19,12 @@ type User struct {
 	Name          string                 `json:"name" yaml:"name" mapstructure:"name"`
 	EmailVerified bool                   `json:"email_verified" yaml:"email_verified" mapstructure:"email_verified"`
 	Blocked       *bool                  `json:"blocked,omitempty" yaml:"blocked,omitempty" mapstructure:"blocked"`             // True if user is blocked from the application
-	AuthMethod    string                 `json:"auth_method,omitempty" yaml:"auth_method,omitempty" mapstructure:"auth_method"` // "sms", "email", "oidc"
+	Identities    []UserIdentity         `json:"identities,omitempty" yaml:"identities,omitempty" mapstructure:"identities"`   // Auth0 identities array
+	AuthMethod    string                 `json:"auth_method,omitempty" yaml:"auth_method,omitempty" mapstructure:"auth_method"` // "sms", "email", "oidc" - used for config only
 	AppMetadata   AppMetadata            `json:"app_metadata,omitempty" yaml:"app_metadata,omitempty" mapstructure:"app_metadata"`
 	UserMetadata  map[string]interface{} `json:"user_metadata,omitempty" yaml:"user_metadata,omitempty" mapstructure:"user_metadata"`
 	Picture       string                 `json:"picture,omitempty" yaml:"picture,omitempty" mapstructure:"picture"`
+	LastLogin     *string                `json:"last_login,omitempty" yaml:"last_login,omitempty" mapstructure:"last_login"`
 	Organizations []string               `json:"organizations,omitempty" yaml:"organizations,omitempty" mapstructure:"organizations"` // Organization IDs
 }
 

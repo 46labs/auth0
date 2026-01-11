@@ -82,6 +82,70 @@ func TestAuth0SDKCompatibility(t *testing.T) {
 		t.Logf("User: %s (%s)", user.GetName(), user.GetEmail())
 	})
 
+	t.Run("GetUser_VerifyIdentities", func(t *testing.T) {
+		user, err := m.User.Read(context.Background(), "test_user_1")
+		if err != nil {
+			t.Fatalf("Failed to get user: %v", err)
+		}
+
+		// Verify identities array exists and is populated
+		if len(user.Identities) == 0 {
+			t.Fatal("Expected user to have identities array")
+		}
+
+		identity := user.Identities[0]
+
+		// Verify identity structure matches Auth0 API
+		if identity.Connection == nil {
+			t.Error("Expected identity.Connection to be set")
+		} else if *identity.Connection != "sms" {
+			t.Errorf("Expected connection=sms, got %s", *identity.Connection)
+		}
+
+		if identity.Provider == nil {
+			t.Error("Expected identity.Provider to be set")
+		} else if *identity.Provider != "sms" {
+			t.Errorf("Expected provider=sms, got %s", *identity.Provider)
+		}
+
+		if identity.UserID == nil {
+			t.Error("Expected identity.UserID to be set")
+		}
+
+		if identity.IsSocial == nil {
+			t.Error("Expected identity.IsSocial to be set")
+		} else if *identity.IsSocial != false {
+			t.Error("Expected isSocial=false for passwordless")
+		}
+
+		t.Logf("User identities verified: connection=%s, provider=%s, isSocial=%v",
+			*identity.Connection, *identity.Provider, *identity.IsSocial)
+	})
+
+	t.Run("GetEmailUser_VerifyIdentities", func(t *testing.T) {
+		user, err := m.User.Read(context.Background(), "test_user_2")
+		if err != nil {
+			t.Fatalf("Failed to get user: %v", err)
+		}
+
+		// Verify email user has email identities
+		if len(user.Identities) == 0 {
+			t.Fatal("Expected user to have identities array")
+		}
+
+		identity := user.Identities[0]
+
+		if identity.Connection == nil || *identity.Connection != "email" {
+			t.Errorf("Expected connection=email, got %v", identity.Connection)
+		}
+
+		if identity.Provider == nil || *identity.Provider != "email" {
+			t.Errorf("Expected provider=email, got %v", identity.Provider)
+		}
+
+		t.Logf("Email user identities verified: connection=%s", *identity.Connection)
+	})
+
 	t.Run("UpdateUserMetadata", func(t *testing.T) {
 		appMeta := map[string]interface{}{
 			"tenant_id": "org_updated_via_sdk",
