@@ -55,9 +55,11 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		sessionID := s.generateID()
 		s.pending[sessionID] = r.URL.RawQuery
 
+		loginHint := r.URL.Query().Get("login_hint")
 		data := map[string]interface{}{
 			"SessionID": sessionID,
 			"Branding":  s.cfg.Branding,
+			"LoginHint": loginHint,
 		}
 
 		w.Header().Set("Content-Type", "text/html")

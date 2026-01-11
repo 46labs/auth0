@@ -15,7 +15,8 @@ const defaultTemplate = `<!DOCTYPE html>
 <html><head><title>{{.Branding.ServiceName}}</title></head>
 <body><form method="post">
 <input type="hidden" name="session_id" value="{{.SessionID}}">
-<input name="phone" placeholder="Phone"><input name="code" placeholder="Code">
+<input name="identifier" placeholder="Email or SMS"{{if .LoginHint}} value="{{.LoginHint}}"{{end}}>
+<input name="code" placeholder="Code">
 <button type="submit">Sign In</button></form></body></html>`
 
 func New(cfg *config.Config) (*Loader, error) {

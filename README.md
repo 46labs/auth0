@@ -8,6 +8,7 @@ Full-featured OIDC provider mock with Auth0-compatible API for local development
 - Complete OIDC/OAuth2 implementation (discovery, JWKS, authorize, token, userinfo)
 - PKCE support
 - SMS and email passwordless authentication
+- Login hint support for pre-filling user identifiers
 - Configurable custom claims with namespace support
 - Multi-tenancy with organizations
 
@@ -169,6 +170,15 @@ POST /authorize
   identifier: "user@example.com"
   code: "123456"
   session_id: "..."
+```
+
+### Login Hint
+
+Pre-fill the login form with a user's email or phone number using the `login_hint` parameter:
+
+```bash
+GET /authorize?login_hint=user@domain.com&...
+GET /authorize?login_hint=%2B14695551212&...
 ```
 
 ## Custom Claims

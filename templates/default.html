@@ -261,8 +261,8 @@
             <form id="auth-form" method="POST" action="/authorize" class="form-section">
                 <input type="hidden" name="session_id" value="{{.SessionID}}">
                 <div class="form-group">
-                    <label class="input-label">Email or Phone Number</label>
-                    <input type="text" id="identifier" name="identifier" class="input-field" placeholder="you@example.com or +1 555-0123" required autocomplete="username">
+                    <label class="input-label">Email or SMS</label>
+                    <input type="text" id="identifier" name="identifier" class="input-field" placeholder="user@domain.com or +1 469 555 1212" required autocomplete="username"{{if .LoginHint}} value="{{.LoginHint}}"{{end}}>
                 </div>
                 <div id="code-group" class="form-group hidden">
                     <label class="input-label">Verification Code</label>

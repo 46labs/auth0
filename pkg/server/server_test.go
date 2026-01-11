@@ -822,6 +822,100 @@ func TestManagementAPIUsers(t *testing.T) {
 	})
 }
 
+func TestLoginHintParameter(t *testing.T) {
+	_, ts := setupTestServer(t)
+	defer ts.Close()
+
+	redirectURI := "http://localhost:3000/callback"
+	clientID := "test_client"
+
+	_, codeChallenge := generatePKCE()
+	state := "test_state"
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	t.Log("Test 1: Verify login_hint with email pre-fills the identifier field")
+	emailHint := "user@domain.com"
+	authURL := fmt.Sprintf("%s/authorize?response_type=code&client_id=%s&redirect_uri=%s&state=%s&code_challenge=%s&code_challenge_method=S256&login_hint=%s",
+		ts.URL, clientID, url.QueryEscape(redirectURI), state, codeChallenge, url.QueryEscape(emailHint))
+
+	resp, err := client.Get(authURL)
+	if err != nil {
+		t.Fatalf("Failed to get auth page: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+
+	// Verify the login_hint value appears in the identifier input field
+	expectedValue := fmt.Sprintf(`value="%s"`, emailHint)
+	if !strings.Contains(bodyStr, expectedValue) {
+		t.Errorf("Expected login form to contain pre-filled value '%s'", emailHint)
+	}
+
+	t.Log("Test 2: Verify login_hint with phone number pre-fills the identifier field")
+	phoneHint := "+14695551212"
+	authURL2 := fmt.Sprintf("%s/authorize?response_type=code&client_id=%s&redirect_uri=%s&state=%s&code_challenge=%s&code_challenge_method=S256&login_hint=%s",
+		ts.URL, clientID, url.QueryEscape(redirectURI), state, codeChallenge, url.QueryEscape(phoneHint))
+
+	resp2, err := client.Get(authURL2)
+	if err != nil {
+		t.Fatalf("Failed to get auth page: %v", err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+
+	body2, _ := io.ReadAll(resp2.Body)
+	bodyStr2 := string(body2)
+
+	// Find what value is actually in the field
+	// Note: HTML templates escape + as &#43; which is correct security behavior
+	rePhone := regexp.MustCompile(`name="identifier"[^>]*value="([^"]*)"`)
+	if matches := rePhone.FindStringSubmatch(bodyStr2); len(matches) > 1 {
+		actualValue := matches[1]
+		// The + should be HTML-escaped to &#43;
+		expectedEscaped := "&#43;14695551212"
+		if actualValue != expectedEscaped {
+			t.Errorf("Expected HTML-escaped value '%s' but got '%s'", expectedEscaped, actualValue)
+		}
+		t.Logf("Phone number correctly pre-filled and HTML-escaped: %s", actualValue)
+	} else {
+		t.Error("Could not find value attribute in identifier field")
+	}
+
+	t.Log("Test 3: Verify form works without login_hint")
+	authURLNoHint := fmt.Sprintf("%s/authorize?response_type=code&client_id=%s&redirect_uri=%s&state=%s&code_challenge=%s&code_challenge_method=S256",
+		ts.URL, clientID, url.QueryEscape(redirectURI), state, codeChallenge)
+
+	resp3, err := client.Get(authURLNoHint)
+	if err != nil {
+		t.Fatalf("Failed to get auth page without login_hint: %v", err)
+	}
+	defer func() { _ = resp3.Body.Close() }()
+
+	body3, _ := io.ReadAll(resp3.Body)
+	bodyStr3 := string(body3)
+
+	// Verify identifier field exists with placeholder but no value
+	if !strings.Contains(bodyStr3, `name="identifier"`) {
+		t.Error("Expected identifier field to exist in form")
+	}
+	if strings.Contains(bodyStr3, `placeholder="Email or SMS"`) {
+		t.Log("Placeholder text correct")
+	}
+	// Should not have a value attribute when no login_hint
+	re := regexp.MustCompile(`name="identifier"[^>]*value=`)
+	if re.MatchString(bodyStr3) {
+		t.Error("Expected identifier field to NOT have a value when login_hint is not provided")
+	}
+
+	t.Log("login_hint parameter test passed")
+}
+
 func TestManagementAPIOrganizationMembers(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
