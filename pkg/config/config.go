@@ -14,7 +14,7 @@ type UserIdentity struct {
 
 type User struct {
 	ID            string                 `json:"user_id" yaml:"user_id" mapstructure:"user_id"`
-	Phone         string                 `json:"phone,omitempty" yaml:"phone,omitempty" mapstructure:"phone"`
+	Phone         string                 `json:"phone_number,omitempty" yaml:"phone" mapstructure:"phone"`
 	Email         string                 `json:"email" yaml:"email" mapstructure:"email"`
 	Name          string                 `json:"name" yaml:"name" mapstructure:"name"`
 	EmailVerified bool                   `json:"email_verified" yaml:"email_verified" mapstructure:"email_verified"`
