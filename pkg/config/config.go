@@ -58,6 +58,17 @@ type OrganizationMember struct {
 	Role   string `json:"role,omitempty" yaml:"role,omitempty" mapstructure:"role"`
 }
 
+type Client struct {
+	ClientID     string                 `json:"client_id" yaml:"client_id" mapstructure:"client_id"`
+	Name         string                 `json:"name" yaml:"name" mapstructure:"name"`
+	Description  string                 `json:"description,omitempty" yaml:"description,omitempty" mapstructure:"description"`
+	AppType      string                 `json:"app_type,omitempty" yaml:"app_type,omitempty" mapstructure:"app_type"` // "spa", "regular_web", "non_interactive", "native"
+	ClientSecret string                 `json:"client_secret,omitempty" yaml:"client_secret,omitempty" mapstructure:"client_secret"`
+	Callbacks    []string               `json:"callbacks,omitempty" yaml:"callbacks,omitempty" mapstructure:"callbacks"`
+	GrantTypes   []string               `json:"grant_types,omitempty" yaml:"grant_types,omitempty" mapstructure:"grant_types"`
+	JWTConfig    map[string]interface{} `json:"jwt_configuration,omitempty" yaml:"jwt_configuration,omitempty" mapstructure:"jwt_configuration"`
+}
+
 type Branding struct {
 	ServiceName  string
 	LogoURL      string
@@ -75,6 +86,7 @@ type Config struct {
 	Organizations []Organization
 	Connections   []Connection
 	Members       []OrganizationMember
+	Clients       []Client
 	Branding      Branding
 	Actions       Actions
 }

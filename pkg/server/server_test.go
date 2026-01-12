@@ -1528,3 +1528,128 @@ func TestManagementAPIOrganizationMembers(t *testing.T) {
 		t.Log("Role assignment updated AppMetadata via SDK")
 	})
 }
+
+// TestClientsFromConfig verifies clients can be pre-configured at startup
+func TestClientsFromConfig(t *testing.T) {
+	cfg := &config.Config{
+		Issuer:      "http://localhost:4646/",
+		Audience:    "http://localhost:3000",
+		Port:        4646,
+		CORSOrigins: []string{"*"},
+		Users:       []config.User{},
+		Organizations: []config.Organization{
+			{ID: "org_test", Name: "test-org", DisplayName: "Test Organization"},
+		},
+		Connections: []config.Connection{
+			{ID: "con_sms", Name: "sms", Strategy: "sms"},
+			{ID: "con_email", Name: "email", Strategy: "email"},
+		},
+		Clients: []config.Client{
+			{
+				ClientID:     "preconfigured_spa",
+				Name:         "Preconfigured SPA",
+				Description:  "SPA app from config",
+				AppType:      "spa",
+				Callbacks:    []string{"http://localhost:3000/callback"},
+				GrantTypes:   []string{"authorization_code"},
+			},
+			{
+				ClientID:     "preconfigured_m2m",
+				Name:         "Preconfigured M2M",
+				Description:  "M2M app from config",
+				AppType:      "non_interactive",
+				ClientSecret: "preconfigured_secret_123",
+				GrantTypes:   []string{"client_credentials"},
+			},
+		},
+	}
+
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	m, err := management.New(
+		ts.URL,
+		management.WithClientCredentials(
+			context.Background(),
+			"test_client",
+			"test_secret",
+		),
+		management.WithInsecure(),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create management client: %v", err)
+	}
+
+	t.Run("ListPreconfiguredClients", func(t *testing.T) {
+		clientList, err := m.Client.List(context.Background())
+		if err != nil {
+			t.Fatalf("Failed to list clients: %v", err)
+		}
+
+		if len(clientList.Clients) != 2 {
+			t.Errorf("Expected 2 preconfigured clients, got %d", len(clientList.Clients))
+		}
+
+		// Verify SPA client
+		var foundSPA, foundM2M bool
+		for _, client := range clientList.Clients {
+			if client.GetClientID() == "preconfigured_spa" {
+				foundSPA = true
+				if client.GetName() != "Preconfigured SPA" {
+					t.Errorf("Expected name 'Preconfigured SPA', got %s", client.GetName())
+				}
+				if client.GetAppType() != "spa" {
+					t.Errorf("Expected app_type 'spa', got %s", client.GetAppType())
+				}
+			}
+			if client.GetClientID() == "preconfigured_m2m" {
+				foundM2M = true
+				if client.GetClientSecret() != "preconfigured_secret_123" {
+					t.Errorf("Expected preconfigured secret")
+				}
+			}
+		}
+
+		if !foundSPA {
+			t.Error("Preconfigured SPA client not found")
+		}
+		if !foundM2M {
+			t.Error("Preconfigured M2M client not found")
+		}
+
+		t.Logf("Successfully loaded %d clients from config", len(clientList.Clients))
+	})
+
+	t.Run("UsePreconfiguredM2MClient", func(t *testing.T) {
+		// Use the preconfigured M2M client credentials to authenticate
+		m2, err := management.New(
+			ts.URL,
+			management.WithClientCredentials(
+				context.Background(),
+				"preconfigured_m2m",
+				"preconfigured_secret_123",
+			),
+			management.WithInsecure(),
+		)
+		if err != nil {
+			t.Fatalf("Failed to create management client with preconfigured credentials: %v", err)
+		}
+
+		// Test that we can use this client to make API calls
+		orgs, err := m2.Organization.List(context.Background())
+		if err != nil {
+			t.Fatalf("Failed to list organizations with preconfigured M2M client: %v", err)
+		}
+
+		if len(orgs.Organizations) == 0 {
+			t.Error("Expected at least one organization")
+		}
+
+		t.Logf("Successfully authenticated with preconfigured M2M client from config")
+	})
+}

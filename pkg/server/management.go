@@ -572,3 +572,157 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, userID strin
 
 	w.WriteHeader(http.StatusNoContent)
 }
+
+func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
+	s.setCORS(w, r)
+	w.Header().Set("Content-Type", "application/json")
+
+	switch r.Method {
+	case "GET":
+		s.listClients(w, r)
+	case "POST":
+		s.createClient(w, r)
+	case "OPTIONS":
+		return
+	default:
+		http.Error(w, `{"error":"method_not_allowed"}`, http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleClient(w http.ResponseWriter, r *http.Request) {
+	s.setCORS(w, r)
+	w.Header().Set("Content-Type", "application/json")
+
+	clientID := strings.TrimPrefix(r.URL.Path, "/api/v2/clients/")
+
+	switch r.Method {
+	case "GET":
+		s.getClient(w, r, clientID)
+	case "PATCH":
+		s.updateClient(w, r, clientID)
+	case "DELETE":
+		s.deleteClient(w, r, clientID)
+	case "OPTIONS":
+		return
+	default:
+		http.Error(w, `{"error":"method_not_allowed"}`, http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) listClients(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	clients := make([]config.Client, 0, len(s.clients))
+	for _, client := range s.clients {
+		clients = append(clients, *client)
+	}
+
+	// Match Auth0 API format with pagination metadata
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"clients": clients,
+		"start":   0,
+		"limit":   50,
+		"total":   len(clients),
+	})
+}
+
+func (s *Server) createClient(w http.ResponseWriter, r *http.Request) {
+	var client config.Client
+	if err := json.NewDecoder(r.Body).Decode(&client); err != nil {
+		http.Error(w, `{"error":"invalid_body"}`, http.StatusBadRequest)
+		return
+	}
+
+	if client.Name == "" {
+		http.Error(w, `{"error":"name_required"}`, http.StatusBadRequest)
+		return
+	}
+
+	if client.ClientID == "" {
+		client.ClientID = s.generateID()
+	}
+
+	// Generate client_secret for M2M apps
+	if client.AppType == "non_interactive" || (client.AppType == "" && len(client.GrantTypes) > 0) {
+		for _, gt := range client.GrantTypes {
+			if gt == "client_credentials" {
+				client.ClientSecret = "secret_" + s.generateID()
+				break
+			}
+		}
+	}
+
+	s.mu.Lock()
+	s.clients[client.ClientID] = &client
+	s.mu.Unlock()
+
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(client)
+}
+
+func (s *Server) getClient(w http.ResponseWriter, r *http.Request, clientID string) {
+	s.mu.RLock()
+	client, exists := s.clients[clientID]
+	s.mu.RUnlock()
+
+	if !exists {
+		http.Error(w, `{"error":"client_not_found"}`, http.StatusNotFound)
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(client)
+}
+
+func (s *Server) updateClient(w http.ResponseWriter, r *http.Request, clientID string) {
+	s.mu.Lock()
+	client, exists := s.clients[clientID]
+	if !exists {
+		s.mu.Unlock()
+		http.Error(w, `{"error":"client_not_found"}`, http.StatusNotFound)
+		return
+	}
+
+	var updates config.Client
+	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+		s.mu.Unlock()
+		http.Error(w, `{"error":"invalid_body"}`, http.StatusBadRequest)
+		return
+	}
+
+	if updates.Name != "" {
+		client.Name = updates.Name
+	}
+	if updates.Description != "" {
+		client.Description = updates.Description
+	}
+	if updates.AppType != "" {
+		client.AppType = updates.AppType
+	}
+	if len(updates.Callbacks) > 0 {
+		client.Callbacks = updates.Callbacks
+	}
+	if len(updates.GrantTypes) > 0 {
+		client.GrantTypes = updates.GrantTypes
+	}
+	if updates.JWTConfig != nil {
+		client.JWTConfig = updates.JWTConfig
+	}
+	s.mu.Unlock()
+
+	_ = json.NewEncoder(w).Encode(client)
+}
+
+func (s *Server) deleteClient(w http.ResponseWriter, r *http.Request, clientID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.clients[clientID]; !exists {
+		http.Error(w, `{"error":"client_not_found"}`, http.StatusNotFound)
+		return
+	}
+
+	delete(s.clients, clientID)
+
+	w.WriteHeader(http.StatusNoContent)
+}

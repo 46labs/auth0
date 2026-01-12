@@ -367,7 +367,9 @@ func TestSDKRefreshTokenFlow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to call userinfo: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() {
+			_ = resp.Body.Close()
+		}()
 
 		if resp.StatusCode != 200 {
 			t.Errorf("Expected 200 from userinfo, got %d", resp.StatusCode)
@@ -468,5 +470,288 @@ func TestSDKWithClientCredentials(t *testing.T) {
 		}
 
 		t.Logf("Successfully created organization via client_credentials: %s", newOrg.GetID())
+	})
+}
+
+// TestSDKClients tests the Client Management API via the official SDK
+func TestSDKClients(t *testing.T) {
+	_, ts := setupTestServer(t)
+	defer ts.Close()
+
+	// Create management client with client_credentials
+	m, err := management.New(
+		ts.URL,
+		management.WithClientCredentials(
+			context.Background(),
+			"mgmt_client_id",
+			"mgmt_client_secret",
+		),
+		management.WithInsecure(),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create management client: %v", err)
+	}
+
+	t.Run("ListClients", func(t *testing.T) {
+		clientList, err := m.Client.List(context.Background())
+		if err != nil {
+			t.Fatalf("Failed to list clients: %v", err)
+		}
+
+		if clientList == nil {
+			t.Fatal("Expected client list, got nil")
+		}
+
+		t.Logf("Successfully listed clients via SDK")
+	})
+
+	t.Run("CreateM2MClient", func(t *testing.T) {
+		name := "Test M2M Application"
+		description := "M2M app for testing"
+		appType := "non_interactive"
+		grantTypes := []string{"client_credentials"}
+
+		newClient := &management.Client{
+			Name:        &name,
+			Description: &description,
+			AppType:     &appType,
+			GrantTypes:  &grantTypes,
+		}
+
+		err := m.Client.Create(context.Background(), newClient)
+		if err != nil {
+			t.Fatalf("Failed to create M2M client: %v", err)
+		}
+
+		if newClient.GetClientID() == "" {
+			t.Error("Expected generated client_id")
+		}
+
+		if newClient.GetClientSecret() == "" {
+			t.Error("Expected generated client_secret for M2M app")
+		}
+
+		t.Logf("Created M2M client: %s with secret: %s", newClient.GetClientID(), newClient.GetClientSecret())
+	})
+
+	t.Run("CreateSPAClient", func(t *testing.T) {
+		name := "Test SPA Application"
+		appType := "spa"
+		callbacks := []string{"http://localhost:3000/callback"}
+		grantTypes := []string{"authorization_code"}
+
+		newClient := &management.Client{
+			Name:       &name,
+			AppType:    &appType,
+			Callbacks:  &callbacks,
+			GrantTypes: &grantTypes,
+		}
+
+		err := m.Client.Create(context.Background(), newClient)
+		if err != nil {
+			t.Fatalf("Failed to create SPA client: %v", err)
+		}
+
+		if newClient.GetClientID() == "" {
+			t.Error("Expected generated client_id")
+		}
+
+		if newClient.GetClientSecret() != "" {
+			t.Error("SPA apps should not have client_secret")
+		}
+
+		t.Logf("Created SPA client: %s", newClient.GetClientID())
+	})
+
+	t.Run("GetClient", func(t *testing.T) {
+		// Create a client first
+		name := "Get Test Client"
+		appType := "non_interactive"
+		grantTypes := []string{"client_credentials"}
+
+		newClient := &management.Client{
+			Name:       &name,
+			AppType:    &appType,
+			GrantTypes: &grantTypes,
+		}
+
+		err := m.Client.Create(context.Background(), newClient)
+		if err != nil {
+			t.Fatalf("Failed to create client: %v", err)
+		}
+
+		clientID := newClient.GetClientID()
+
+		// Read it back
+		readClient, err := m.Client.Read(context.Background(), clientID)
+		if err != nil {
+			t.Fatalf("Failed to get client: %v", err)
+		}
+
+		if readClient.GetClientID() != clientID {
+			t.Errorf("Expected client_id %s, got %s", clientID, readClient.GetClientID())
+		}
+
+		if readClient.GetName() != name {
+			t.Errorf("Expected name %s, got %s", name, readClient.GetName())
+		}
+
+		t.Logf("Successfully read client: %s", clientID)
+	})
+
+	t.Run("UpdateClient", func(t *testing.T) {
+		// Create a client
+		name := "Update Test Client"
+		appType := "non_interactive"
+		grantTypes := []string{"client_credentials"}
+
+		newClient := &management.Client{
+			Name:       &name,
+			AppType:    &appType,
+			GrantTypes: &grantTypes,
+		}
+
+		err := m.Client.Create(context.Background(), newClient)
+		if err != nil {
+			t.Fatalf("Failed to create client: %v", err)
+		}
+
+		clientID := newClient.GetClientID()
+
+		// Update it
+		updatedName := "Updated Client Name"
+		updatedDesc := "Updated description"
+
+		updates := &management.Client{
+			Name:        &updatedName,
+			Description: &updatedDesc,
+		}
+
+		err = m.Client.Update(context.Background(), clientID, updates)
+		if err != nil {
+			t.Fatalf("Failed to update client: %v", err)
+		}
+
+		// Read it back
+		readClient, err := m.Client.Read(context.Background(), clientID)
+		if err != nil {
+			t.Fatalf("Failed to read updated client: %v", err)
+		}
+
+		if readClient.GetName() != updatedName {
+			t.Errorf("Expected name %s, got %s", updatedName, readClient.GetName())
+		}
+
+		if readClient.GetDescription() != updatedDesc {
+			t.Errorf("Expected description %s, got %s", updatedDesc, readClient.GetDescription())
+		}
+
+		t.Logf("Successfully updated client: %s", clientID)
+	})
+
+	t.Run("DeleteClient", func(t *testing.T) {
+		// Create a client
+		name := "Delete Test Client"
+		appType := "non_interactive"
+		grantTypes := []string{"client_credentials"}
+
+		newClient := &management.Client{
+			Name:       &name,
+			AppType:    &appType,
+			GrantTypes: &grantTypes,
+		}
+
+		err := m.Client.Create(context.Background(), newClient)
+		if err != nil {
+			t.Fatalf("Failed to create client: %v", err)
+		}
+
+		clientID := newClient.GetClientID()
+
+		// Delete it
+		err = m.Client.Delete(context.Background(), clientID)
+		if err != nil {
+			t.Fatalf("Failed to delete client: %v", err)
+		}
+
+		// Try to read it (should fail)
+		_, err = m.Client.Read(context.Background(), clientID)
+		if err == nil {
+			t.Error("Expected error when reading deleted client")
+		}
+
+		t.Logf("Successfully deleted client: %s", clientID)
+	})
+
+	t.Run("CreateClientWithExplicitID", func(t *testing.T) {
+		name := "Explicit ID Client"
+		appType := "non_interactive"
+		grantTypes := []string{"client_credentials"}
+		explicitID := "my_custom_client_id"
+
+		newClient := &management.Client{
+			ClientID:   &explicitID,
+			Name:       &name,
+			AppType:    &appType,
+			GrantTypes: &grantTypes,
+		}
+
+		err := m.Client.Create(context.Background(), newClient)
+		if err != nil {
+			t.Fatalf("Failed to create client with explicit ID: %v", err)
+		}
+
+		if newClient.GetClientID() != explicitID {
+			t.Errorf("Expected client_id %s, got %s", explicitID, newClient.GetClientID())
+		}
+
+		t.Logf("Created client with explicit ID: %s", explicitID)
+	})
+
+	t.Run("UseCreatedM2MForAuth", func(t *testing.T) {
+		// Create an M2M client
+		name := "Auth Test M2M"
+		appType := "non_interactive"
+		grantTypes := []string{"client_credentials"}
+
+		newClient := &management.Client{
+			Name:       &name,
+			AppType:    &appType,
+			GrantTypes: &grantTypes,
+		}
+
+		err := m.Client.Create(context.Background(), newClient)
+		if err != nil {
+			t.Fatalf("Failed to create M2M client: %v", err)
+		}
+
+		clientID := newClient.GetClientID()
+		clientSecret := newClient.GetClientSecret()
+
+		if clientSecret == "" {
+			t.Fatal("Expected client_secret for M2M app")
+		}
+
+		// Use the created client to authenticate and create a new management client
+		m2, err := management.New(
+			ts.URL,
+			management.WithClientCredentials(
+				context.Background(),
+				clientID,
+				clientSecret,
+			),
+			management.WithInsecure(),
+		)
+		if err != nil {
+			t.Fatalf("Failed to create management client with new credentials: %v", err)
+		}
+
+		// Test that we can use this client to make API calls
+		orgs, err := m2.Organization.List(context.Background())
+		if err != nil {
+			t.Fatalf("Failed to list organizations with new M2M client: %v", err)
+		}
+
+		t.Logf("Successfully authenticated with created M2M client and listed %d organizations", len(orgs.Organizations))
 	})
 }

@@ -101,3 +101,21 @@ members:
   - user_id: "auth0|user_devthree"
     org_id: "org_nextel_test"
     role: "member"
+
+clients:
+  - client_id: "dev_web_app"
+    name: "Dev Web App"
+    description: "Development web application"
+    app_type: "spa"
+    callbacks:
+      - "http://localhost:3000/callback"
+    grant_types:
+      - "authorization_code"
+
+  - client_id: "dev_m2m_client"
+    name: "Dev M2M Client"
+    description: "Development M2M client for API access"
+    app_type: "non_interactive"
+    client_secret: "dev_client_secret_123"
+    grant_types:
+      - "client_credentials"

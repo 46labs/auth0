@@ -32,6 +32,7 @@ type Server struct {
 	organizations map[string]*config.Organization
 	connections   map[string]*config.Connection
 	members       map[string][]config.OrganizationMember
+	clients       map[string]*config.Client
 
 	mu sync.RWMutex
 }
@@ -67,6 +68,11 @@ func New(cfg *config.Config) (*Server, error) {
 		members[member.OrgID] = append(members[member.OrgID], member)
 	}
 
+	clients := make(map[string]*config.Client)
+	for i := range cfg.Clients {
+		clients[cfg.Clients[i].ClientID] = &cfg.Clients[i]
+	}
+
 	return &Server{
 		cfg:           cfg,
 		privateKey:    key,
@@ -81,6 +87,7 @@ func New(cfg *config.Config) (*Server, error) {
 		organizations: organizations,
 		connections:   connections,
 		members:       members,
+		clients:       clients,
 	}, nil
 }
 
@@ -105,6 +112,8 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("/api/v2/connections", s.handleConnections)
 	mux.HandleFunc("/api/v2/users/", s.handleUser)
+	mux.HandleFunc("/api/v2/clients", s.handleClients)
+	mux.HandleFunc("/api/v2/clients/", s.handleClient)
 
 	return mux
 }
