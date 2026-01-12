@@ -218,6 +218,17 @@ func (s *Server) addOrganizationMember(w http.ResponseWriter, r *http.Request, o
 			continue // Skip non-existent users
 		}
 
+		alreadyMember := false
+		for _, existingMember := range s.members[orgID] {
+			if existingMember.UserID == userID {
+				alreadyMember = true
+				break
+			}
+		}
+		if alreadyMember {
+			continue
+		}
+
 		// Create the organization member without role (will be assigned separately)
 		member := config.OrganizationMember{
 			UserID: userID,

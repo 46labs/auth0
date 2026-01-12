@@ -1155,6 +1155,64 @@ func TestManagementAPIOrganizationMembers(t *testing.T) {
 		}
 	})
 
+	t.Run("AddMemberIdempotent", func(t *testing.T) {
+		srv.mu.Lock()
+		srv.users["test_user_idempotent"] = &config.User{
+			ID:            "test_user_idempotent",
+			Email:         "idempotent@example.test",
+			Name:          "Idempotent User",
+			EmailVerified: true,
+		}
+		srv.mu.Unlock()
+
+		reqBody := map[string]interface{}{
+			"members": []string{"test_user_idempotent"},
+		}
+		body, _ := json.Marshal(reqBody)
+
+		for i := 0; i < 3; i++ {
+			req, _ := http.NewRequest("POST", ts.URL+"/api/v2/organizations/org_test/members", strings.NewReader(string(body)))
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("Request %d failed: %v", i+1, err)
+			}
+			_ = resp.Body.Close()
+
+			if resp.StatusCode != 204 {
+				t.Fatalf("Request %d: Expected 204, got %d", i+1, resp.StatusCode)
+			}
+		}
+
+		srv.mu.RLock()
+		members := srv.members["org_test"]
+		srv.mu.RUnlock()
+
+		count := 0
+		for _, member := range members {
+			if member.UserID == "test_user_idempotent" {
+				count++
+			}
+		}
+
+		if count != 1 {
+			t.Errorf("Expected member to appear once, found %d times", count)
+		}
+
+		user := srv.getUserByID("test_user_idempotent")
+		orgCount := 0
+		for _, orgID := range user.Organizations {
+			if orgID == "org_test" {
+				orgCount++
+			}
+		}
+
+		if orgCount != 1 {
+			t.Errorf("Expected organization to appear once in user's organizations, found %d times", orgCount)
+		}
+	})
+
 	t.Run("AssignRoleUpdatesAppMetadata", func(t *testing.T) {
 		// Create a new user without org membership
 		srv.mu.Lock()
