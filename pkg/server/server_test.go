@@ -1,5 +1,13 @@
 package server
 
+// IMPORTANT: ALWAYS USE THE AUTH0 SDK
+//
+// All Management API tests MUST use the official github.com/auth0/go-auth0/management SDK
+// to ensure compatibility and parity with the real Auth0 API.
+//
+// Do NOT use raw HTTP requests for Management API testing.
+// OAuth flow tests may use raw HTTP as they test the authentication flow itself.
+
 import (
 	"context"
 	"crypto/sha256"
@@ -16,6 +24,7 @@ import (
 	"time"
 
 	"github.com/46labs/auth0/pkg/config"
+	"github.com/auth0/go-auth0/management"
 	"github.com/coreos/go-oidc/v3/oidc"
 )
 
@@ -646,68 +655,60 @@ func TestManagementAPIOrganizations(t *testing.T) {
 	_, ts := setupTestServer(t)
 	defer ts.Close()
 
+	// Create management client using Auth0 SDK
+	m, err := management.New(
+		ts.URL,
+		management.WithStaticToken("mock_token"),
+		management.WithInsecure(),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create management client: %v", err)
+	}
+
 	t.Run("ListOrganizations", func(t *testing.T) {
-		resp, err := http.Get(ts.URL + "/api/v2/organizations")
+		orgs, err := m.Organization.List(context.Background())
 		if err != nil {
-			t.Fatalf("Request failed: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != 200 {
-			t.Fatalf("Expected 200, got %d", resp.StatusCode)
+			t.Fatalf("Failed to list organizations: %v", err)
 		}
 
-		var result map[string]interface{}
-		_ = json.NewDecoder(resp.Body).Decode(&result)
-
-		orgs := result["organizations"].([]interface{})
-		if len(orgs) == 0 {
+		if len(orgs.Organizations) == 0 {
 			t.Error("Expected at least one organization")
 		}
+
+		t.Logf("Found %d organizations via SDK", len(orgs.Organizations))
 	})
 
 	t.Run("GetOrganization", func(t *testing.T) {
-		resp, err := http.Get(ts.URL + "/api/v2/organizations/org_test")
+		org, err := m.Organization.Read(context.Background(), "org_test")
 		if err != nil {
-			t.Fatalf("Request failed: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != 200 {
-			t.Fatalf("Expected 200, got %d", resp.StatusCode)
+			t.Fatalf("Failed to get organization: %v", err)
 		}
 
-		var org config.Organization
-		_ = json.NewDecoder(resp.Body).Decode(&org)
-
-		if org.ID != "org_test" {
-			t.Errorf("Expected org_test, got %s", org.ID)
+		if org.GetID() != "org_test" {
+			t.Errorf("Expected org_test, got %s", org.GetID())
 		}
+
+		t.Logf("Read organization: %s via SDK", org.GetID())
 	})
 
 	t.Run("CreateOrganization", func(t *testing.T) {
-		newOrg := config.Organization{
-			Name:        "new-org",
-			DisplayName: "New Org",
+		name := "new-org"
+		displayName := "New Org"
+		newOrg := &management.Organization{
+			Name:        &name,
+			DisplayName: &displayName,
 		}
 
-		body, _ := json.Marshal(newOrg)
-		resp, err := http.Post(ts.URL+"/api/v2/organizations", "application/json", strings.NewReader(string(body)))
+		err := m.Organization.Create(context.Background(), newOrg)
 		if err != nil {
-			t.Fatalf("Request failed: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != 201 {
-			t.Fatalf("Expected 201, got %d", resp.StatusCode)
+			t.Fatalf("Failed to create organization: %v", err)
 		}
 
-		var createdOrg config.Organization
-		_ = json.NewDecoder(resp.Body).Decode(&createdOrg)
-
-		if createdOrg.ID == "" {
+		if newOrg.GetID() == "" {
 			t.Error("Expected generated ID")
 		}
+
+		t.Logf("Created organization: %s via SDK", newOrg.GetID())
 	})
 }
 
@@ -715,47 +716,44 @@ func TestManagementAPIUsers(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
 
+	// Create management client using Auth0 SDK
+	m, err := management.New(
+		ts.URL,
+		management.WithStaticToken("mock_token"),
+		management.WithInsecure(),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create management client: %v", err)
+	}
+
 	t.Run("GetUser", func(t *testing.T) {
-		resp, err := http.Get(ts.URL + "/api/v2/users/test_user_1")
+		user, err := m.User.Read(context.Background(), "test_user_1")
 		if err != nil {
-			t.Fatalf("Request failed: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != 200 {
-			t.Fatalf("Expected 200, got %d", resp.StatusCode)
+			t.Fatalf("Failed to get user: %v", err)
 		}
 
-		var user config.User
-		_ = json.NewDecoder(resp.Body).Decode(&user)
-
-		if user.ID != "test_user_1" {
-			t.Errorf("Expected test_user_1, got %s", user.ID)
+		if user.GetID() != "test_user_1" {
+			t.Errorf("Expected test_user_1, got %s", user.GetID())
 		}
+
+		t.Logf("Read user: %s via SDK", user.GetID())
 	})
 
 	t.Run("UpdateUser", func(t *testing.T) {
-		updates := map[string]interface{}{
-			"app_metadata": map[string]interface{}{
-				"tenant_id": "org_updated",
-				"role":      "member",
-			},
+		appMeta := map[string]interface{}{
+			"tenant_id": "org_updated",
+			"role":      "member",
+		}
+		updates := &management.User{
+			AppMetadata: &appMeta,
 		}
 
-		body, _ := json.Marshal(updates)
-		req, _ := http.NewRequest("PATCH", ts.URL+"/api/v2/users/test_user_1", strings.NewReader(string(body)))
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
+		err := m.User.Update(context.Background(), "test_user_1", updates)
 		if err != nil {
-			t.Fatalf("Request failed: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != 200 {
-			t.Fatalf("Expected 200, got %d", resp.StatusCode)
+			t.Fatalf("Failed to update user: %v", err)
 		}
 
+		// Verify the update
 		user := srv.getUserByID("test_user_1")
 		if user.AppMetadata.TenantID != "org_updated" {
 			t.Errorf("Expected tenant_id=org_updated, got %s", user.AppMetadata.TenantID)
@@ -763,26 +761,19 @@ func TestManagementAPIUsers(t *testing.T) {
 		if user.AppMetadata.Role != "member" {
 			t.Errorf("Expected role=member, got %s", user.AppMetadata.Role)
 		}
+
+		t.Log("Updated user metadata via SDK")
 	})
 
 	t.Run("BlockUser", func(t *testing.T) {
 		blocked := true
-		updates := map[string]interface{}{
-			"blocked": blocked,
+		updates := &management.User{
+			Blocked: &blocked,
 		}
 
-		body, _ := json.Marshal(updates)
-		req, _ := http.NewRequest("PATCH", ts.URL+"/api/v2/users/test_user_1", strings.NewReader(string(body)))
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
+		err := m.User.Update(context.Background(), "test_user_1", updates)
 		if err != nil {
-			t.Fatalf("Request failed: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != 200 {
-			t.Fatalf("Expected 200, got %d", resp.StatusCode)
+			t.Fatalf("Failed to block user: %v", err)
 		}
 
 		user := srv.getUserByID("test_user_1")
@@ -791,26 +782,19 @@ func TestManagementAPIUsers(t *testing.T) {
 		} else if !*user.Blocked {
 			t.Errorf("Expected blocked=true, got false")
 		}
+
+		t.Log("Blocked user via SDK")
 	})
 
 	t.Run("UnblockUser", func(t *testing.T) {
 		blocked := false
-		updates := map[string]interface{}{
-			"blocked": blocked,
+		updates := &management.User{
+			Blocked: &blocked,
 		}
 
-		body, _ := json.Marshal(updates)
-		req, _ := http.NewRequest("PATCH", ts.URL+"/api/v2/users/test_user_1", strings.NewReader(string(body)))
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
+		err := m.User.Update(context.Background(), "test_user_1", updates)
 		if err != nil {
-			t.Fatalf("Request failed: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != 200 {
-			t.Fatalf("Expected 200, got %d", resp.StatusCode)
+			t.Fatalf("Failed to unblock user: %v", err)
 		}
 
 		user := srv.getUserByID("test_user_1")
@@ -819,6 +803,8 @@ func TestManagementAPIUsers(t *testing.T) {
 		} else if *user.Blocked {
 			t.Errorf("Expected blocked=false, got true")
 		}
+
+		t.Log("Unblocked user via SDK")
 	})
 }
 
@@ -916,28 +902,387 @@ func TestLoginHintParameter(t *testing.T) {
 	t.Log("login_hint parameter test passed")
 }
 
+func TestRefreshTokenFlow(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+
+	redirectURI := "http://localhost:3000/callback"
+	clientID := "test_client"
+	phone := "+14155551234"
+	smsCode := "123456"
+
+	codeVerifier, codeChallenge := generatePKCE()
+	state := "test_state_" + fmt.Sprint(time.Now().Unix())
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	t.Log("Step 1: Get authorization page")
+	authURL := fmt.Sprintf("%s/authorize?response_type=code&client_id=%s&redirect_uri=%s&scope=openid+profile+email+offline_access&state=%s&code_challenge=%s&code_challenge_method=S256",
+		ts.URL, clientID, url.QueryEscape(redirectURI), state, codeChallenge)
+
+	resp, err := client.Get(authURL)
+	if err != nil {
+		t.Fatalf("Failed to get auth page: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	re := regexp.MustCompile(`value="([^"]*)"`)
+	matches := re.FindStringSubmatch(string(body))
+	if len(matches) < 2 {
+		t.Fatalf("Could not find session ID")
+	}
+	sessionID := matches[1]
+
+	t.Log("Step 2: Submit phone + verification code")
+	formData := url.Values{
+		"session_id": {sessionID},
+		"phone":      {phone},
+		"code":       {smsCode},
+	}
+
+	resp2, err := client.PostForm(ts.URL+"/authorize", formData)
+	if err != nil {
+		t.Fatalf("Failed to submit code: %v", err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+
+	if resp2.StatusCode != 302 {
+		t.Fatalf("Expected 302, got %d", resp2.StatusCode)
+	}
+
+	location := resp2.Header.Get("Location")
+	redirectURL, _ := url.Parse(location)
+	authCode := redirectURL.Query().Get("code")
+
+	if authCode == "" {
+		t.Fatalf("No authorization code in redirect")
+	}
+
+	t.Log("Step 3: Exchange code for tokens with offline_access scope")
+	tokenData := url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {clientID},
+		"code":          {authCode},
+		"redirect_uri":  {redirectURI},
+		"code_verifier": {codeVerifier},
+		"scope":         {"openid profile email offline_access"},
+	}
+
+	resp3, err := client.PostForm(ts.URL+"/oauth/token", tokenData)
+	if err != nil {
+		t.Fatalf("Token exchange failed: %v", err)
+	}
+	defer func() { _ = resp3.Body.Close() }()
+
+	if resp3.StatusCode != 200 {
+		body, _ := io.ReadAll(resp3.Body)
+		t.Fatalf("Token exchange failed: %d - %s", resp3.StatusCode, string(body))
+	}
+
+	var tokenResp map[string]interface{}
+	if err := json.NewDecoder(resp3.Body).Decode(&tokenResp); err != nil {
+		t.Fatalf("Failed to decode token response: %v", err)
+	}
+
+	if tokenResp["access_token"] == nil {
+		t.Fatal("Missing access_token")
+	}
+	if tokenResp["id_token"] == nil {
+		t.Fatal("Missing id_token")
+	}
+	if tokenResp["refresh_token"] == nil {
+		t.Fatal("Missing refresh_token")
+	}
+
+	refreshToken := tokenResp["refresh_token"].(string)
+	t.Logf("Got refresh token: %s", refreshToken)
+
+	t.Log("Step 4: Use refresh token to get new tokens")
+	refreshData := url.Values{
+		"grant_type":    {"refresh_token"},
+		"client_id":     {clientID},
+		"refresh_token": {refreshToken},
+	}
+
+	resp4, err := client.PostForm(ts.URL+"/oauth/token", refreshData)
+	if err != nil {
+		t.Fatalf("Refresh token exchange failed: %v", err)
+	}
+	defer func() { _ = resp4.Body.Close() }()
+
+	if resp4.StatusCode != 200 {
+		body, _ := io.ReadAll(resp4.Body)
+		t.Fatalf("Refresh token exchange failed: %d - %s", resp4.StatusCode, string(body))
+	}
+
+	var refreshResp map[string]interface{}
+	if err := json.NewDecoder(resp4.Body).Decode(&refreshResp); err != nil {
+		t.Fatalf("Failed to decode refresh response: %v", err)
+	}
+
+	if refreshResp["access_token"] == nil {
+		t.Fatal("Missing access_token in refresh response")
+	}
+	if refreshResp["id_token"] == nil {
+		t.Fatal("Missing id_token in refresh response")
+	}
+	if refreshResp["refresh_token"] == nil {
+		t.Fatal("Missing refresh_token in refresh response")
+	}
+
+	t.Log("Step 5: Validate new ID token")
+	ctx := context.Background()
+	provider, err := oidc.NewProvider(ctx, srv.cfg.Issuer)
+	if err != nil {
+		t.Fatalf("Failed to create provider: %v", err)
+	}
+
+	verifier := provider.Verifier(&oidc.Config{ClientID: clientID})
+	idToken, err := verifier.Verify(ctx, refreshResp["id_token"].(string))
+	if err != nil {
+		t.Fatalf("ID token verification failed: %v", err)
+	}
+
+	var claims map[string]interface{}
+	if err := idToken.Claims(&claims); err != nil {
+		t.Fatalf("Failed to extract claims: %v", err)
+	}
+
+	requiredClaims := []string{"sub", "email", "name", "phone_number"}
+	for _, claim := range requiredClaims {
+		if claims[claim] == nil {
+			t.Errorf("Missing claim: %s", claim)
+		}
+	}
+
+	t.Log("Refresh token flow passed")
+}
+
+func TestRefreshTokenWithoutOfflineAccess(t *testing.T) {
+	_, ts := setupTestServer(t)
+	defer ts.Close()
+
+	redirectURI := "http://localhost:3000/callback"
+	clientID := "test_client"
+	phone := "+14155551234"
+	smsCode := "123456"
+
+	codeVerifier, codeChallenge := generatePKCE()
+	state := "test_state_" + fmt.Sprint(time.Now().Unix())
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	authURL := fmt.Sprintf("%s/authorize?response_type=code&client_id=%s&redirect_uri=%s&scope=openid+profile+email&state=%s&code_challenge=%s&code_challenge_method=S256",
+		ts.URL, clientID, url.QueryEscape(redirectURI), state, codeChallenge)
+
+	resp, _ := client.Get(authURL)
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	re := regexp.MustCompile(`value="([^"]*)"`)
+	matches := re.FindStringSubmatch(string(body))
+	sessionID := matches[1]
+
+	formData := url.Values{
+		"session_id": {sessionID},
+		"phone":      {phone},
+		"code":       {smsCode},
+	}
+
+	resp2, _ := client.PostForm(ts.URL+"/authorize", formData)
+	location := resp2.Header.Get("Location")
+	_ = resp2.Body.Close()
+
+	redirectURL, _ := url.Parse(location)
+	authCode := redirectURL.Query().Get("code")
+
+	tokenData := url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {clientID},
+		"code":          {authCode},
+		"redirect_uri":  {redirectURI},
+		"code_verifier": {codeVerifier},
+		"scope":         {"openid profile email"},
+	}
+
+	resp3, _ := client.PostForm(ts.URL+"/oauth/token", tokenData)
+	defer func() { _ = resp3.Body.Close() }()
+
+	var tokenResp map[string]interface{}
+	_ = json.NewDecoder(resp3.Body).Decode(&tokenResp)
+
+	if tokenResp["refresh_token"] != nil {
+		t.Error("Should not receive refresh_token without offline_access scope")
+	}
+
+	t.Log("Correctly omitted refresh_token without offline_access scope")
+}
+
+func TestInvalidRefreshToken(t *testing.T) {
+	_, ts := setupTestServer(t)
+	defer ts.Close()
+
+	clientID := "test_client"
+	invalidRefreshToken := "rt_invalid_token_12345"
+
+	refreshData := url.Values{
+		"grant_type":    {"refresh_token"},
+		"client_id":     {clientID},
+		"refresh_token": {invalidRefreshToken},
+	}
+
+	resp, err := http.PostForm(ts.URL+"/oauth/token", refreshData)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == 200 {
+		t.Fatal("Expected error for invalid refresh token")
+	}
+
+	var errorResp map[string]interface{}
+	_ = json.NewDecoder(resp.Body).Decode(&errorResp)
+
+	if errorResp["error"] != "invalid_grant" {
+		t.Errorf("Expected error=invalid_grant, got %v", errorResp["error"])
+	}
+
+	t.Log("Invalid refresh token rejected")
+}
+
+func TestRefreshTokenPreservesCustomClaims(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+
+	redirectURI := "http://localhost:3000/callback"
+	clientID := "test_client"
+	phone := "+14155551234"
+	smsCode := "123456"
+
+	codeVerifier, codeChallenge := generatePKCE()
+	state := "test_state"
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	authURL := fmt.Sprintf("%s/authorize?response_type=code&client_id=%s&redirect_uri=%s&scope=openid+profile+email+offline_access&state=%s&code_challenge=%s&code_challenge_method=S256",
+		ts.URL, clientID, url.QueryEscape(redirectURI), state, codeChallenge)
+
+	resp, _ := client.Get(authURL)
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	re := regexp.MustCompile(`value="([^"]*)"`)
+	matches := re.FindStringSubmatch(string(body))
+	sessionID := matches[1]
+
+	formData := url.Values{
+		"session_id": {sessionID},
+		"phone":      {phone},
+		"code":       {smsCode},
+	}
+
+	resp2, _ := client.PostForm(ts.URL+"/authorize", formData)
+	location := resp2.Header.Get("Location")
+	_ = resp2.Body.Close()
+
+	redirectURL, _ := url.Parse(location)
+	authCode := redirectURL.Query().Get("code")
+
+	tokenData := url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {clientID},
+		"code":          {authCode},
+		"redirect_uri":  {redirectURI},
+		"code_verifier": {codeVerifier},
+		"scope":         {"openid profile email offline_access"},
+	}
+
+	resp3, _ := client.PostForm(ts.URL+"/oauth/token", tokenData)
+	defer func() { _ = resp3.Body.Close() }()
+
+	var tokenResp map[string]interface{}
+	_ = json.NewDecoder(resp3.Body).Decode(&tokenResp)
+
+	refreshToken := tokenResp["refresh_token"].(string)
+
+	// Use refresh token
+	refreshData := url.Values{
+		"grant_type":    {"refresh_token"},
+		"client_id":     {clientID},
+		"refresh_token": {refreshToken},
+	}
+
+	resp4, _ := client.PostForm(ts.URL+"/oauth/token", refreshData)
+	defer func() { _ = resp4.Body.Close() }()
+
+	var refreshResp map[string]interface{}
+	_ = json.NewDecoder(resp4.Body).Decode(&refreshResp)
+
+	// Validate custom claims in new ID token
+	ctx := context.Background()
+	provider, _ := oidc.NewProvider(ctx, srv.cfg.Issuer)
+	verifier := provider.Verifier(&oidc.Config{ClientID: clientID})
+	idToken, _ := verifier.Verify(ctx, refreshResp["id_token"].(string))
+
+	var claims map[string]interface{}
+	_ = idToken.Claims(&claims)
+
+	expectedClaims := map[string]string{
+		srv.cfg.Issuer + "tenant_id": "org_test",
+		srv.cfg.Issuer + "role":      "admin",
+	}
+
+	for claimKey, expectedValue := range expectedClaims {
+		if claims[claimKey] == nil {
+			t.Errorf("Missing custom claim: %s", claimKey)
+		} else if claims[claimKey].(string) != expectedValue {
+			t.Errorf("Expected %s=%s, got %s", claimKey, expectedValue, claims[claimKey])
+		}
+	}
+
+	t.Log("Custom claims preserved in refresh token flow")
+}
+
 func TestManagementAPIOrganizationMembers(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
 
+	// Create management client using Auth0 SDK
+	m, err := management.New(
+		ts.URL,
+		management.WithStaticToken("mock_token"),
+		management.WithInsecure(),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create management client: %v", err)
+	}
+
 	t.Run("ListMembers", func(t *testing.T) {
-		resp, err := http.Get(ts.URL + "/api/v2/organizations/org_test/members")
+		membersList, err := m.Organization.Members(context.Background(), "org_test")
 		if err != nil {
-			t.Fatalf("Request failed: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != 200 {
-			t.Fatalf("Expected 200, got %d", resp.StatusCode)
+			t.Fatalf("Failed to list members: %v", err)
 		}
 
-		var result map[string]interface{}
-		_ = json.NewDecoder(resp.Body).Decode(&result)
-
-		members := result["members"].([]interface{})
-		if len(members) != 2 {
-			t.Errorf("Expected 2 members, got %d", len(members))
+		if len(membersList.Members) != 2 {
+			t.Errorf("Expected 2 members, got %d", len(membersList.Members))
 		}
+
+		t.Logf("Listed %d members via SDK", len(membersList.Members))
 	})
 
 	t.Run("AddMembersWithRoles", func(t *testing.T) {
@@ -954,42 +1299,17 @@ func TestManagementAPIOrganizationMembers(t *testing.T) {
 		}
 		srv.mu.Unlock()
 
-		// Step 1: Add member to organization (without role)
-		addReq := map[string]interface{}{
-			"members": []string{"test_user_3"},
-		}
-
-		body, _ := json.Marshal(addReq)
-		req, _ := http.NewRequest("POST", ts.URL+"/api/v2/organizations/org_test/members", strings.NewReader(string(body)))
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
+		// Step 1: Add member to organization using SDK
+		err := m.Organization.AddMembers(context.Background(), "org_test", []string{"test_user_3"})
 		if err != nil {
-			t.Fatalf("Request failed: %v", err)
-		}
-		_ = resp.Body.Close()
-
-		if resp.StatusCode != 204 {
-			t.Fatalf("Expected 204 No Content, got %d", resp.StatusCode)
+			t.Fatalf("Failed to add member: %v", err)
 		}
 
-		// Step 2: Assign role to member
-		roleReq := map[string]interface{}{
-			"roles": []string{"admin"},
-		}
-
-		body, _ = json.Marshal(roleReq)
-		req, _ = http.NewRequest("POST", ts.URL+"/api/v2/organizations/org_test/members/test_user_3/roles", strings.NewReader(string(body)))
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err = http.DefaultClient.Do(req)
+		// Step 2: Assign role to member using SDK
+		roles := []string{"admin"}
+		err = m.Organization.AssignMemberRoles(context.Background(), "org_test", "test_user_3", roles)
 		if err != nil {
-			t.Fatalf("Request failed: %v", err)
-		}
-		_ = resp.Body.Close()
-
-		if resp.StatusCode != 204 {
-			t.Fatalf("Expected 204 No Content for role assignment, got %d", resp.StatusCode)
+			t.Fatalf("Failed to assign role: %v", err)
 		}
 
 		// Verify the member was added with the role
@@ -1022,6 +1342,8 @@ func TestManagementAPIOrganizationMembers(t *testing.T) {
 		if !hasOrg {
 			t.Error("Organization was not added to user's organizations")
 		}
+
+		t.Log("Added member with role via SDK")
 	})
 
 	t.Run("AddMembersWithoutRoles", func(t *testing.T) {
@@ -1038,23 +1360,10 @@ func TestManagementAPIOrganizationMembers(t *testing.T) {
 		}
 		srv.mu.Unlock()
 
-		// Add member without assigning role
-		reqBody := map[string]interface{}{
-			"members": []string{"test_user_4"},
-		}
-
-		body, _ := json.Marshal(reqBody)
-		req, _ := http.NewRequest("POST", ts.URL+"/api/v2/organizations/org_test/members", strings.NewReader(string(body)))
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
+		// Add member without assigning role using SDK
+		err := m.Organization.AddMembers(context.Background(), "org_test", []string{"test_user_4"})
 		if err != nil {
-			t.Fatalf("Request failed: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != 204 {
-			t.Fatalf("Expected 204, got %d", resp.StatusCode)
+			t.Fatalf("Failed to add member: %v", err)
 		}
 
 		// Verify the member was added (role will be empty until assigned)
@@ -1073,26 +1382,17 @@ func TestManagementAPIOrganizationMembers(t *testing.T) {
 		if !found {
 			t.Error("Member was not added")
 		}
+
+		t.Log("Added member without role via SDK")
 	})
 
 	t.Run("AddMembersToNonexistentOrg", func(t *testing.T) {
-		reqBody := map[string]interface{}{
-			"members": []string{"test_user_1"},
+		err := m.Organization.AddMembers(context.Background(), "nonexistent", []string{"test_user_1"})
+		if err == nil {
+			t.Fatal("Expected error when adding to nonexistent org")
 		}
 
-		body, _ := json.Marshal(reqBody)
-		req, _ := http.NewRequest("POST", ts.URL+"/api/v2/organizations/nonexistent/members", strings.NewReader(string(body)))
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("Request failed: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != 404 {
-			t.Fatalf("Expected 404, got %d", resp.StatusCode)
-		}
+		t.Log("Correctly rejected adding to nonexistent org via SDK")
 	})
 
 	t.Run("AddMultipleMembers", func(t *testing.T) {
@@ -1112,23 +1412,10 @@ func TestManagementAPIOrganizationMembers(t *testing.T) {
 		}
 		srv.mu.Unlock()
 
-		// Add multiple members
-		reqBody := map[string]interface{}{
-			"members": []string{"test_user_5", "test_user_6"},
-		}
-
-		body, _ := json.Marshal(reqBody)
-		req, _ := http.NewRequest("POST", ts.URL+"/api/v2/organizations/org_test/members", strings.NewReader(string(body)))
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
+		// Add multiple members using SDK
+		err := m.Organization.AddMembers(context.Background(), "org_test", []string{"test_user_5", "test_user_6"})
 		if err != nil {
-			t.Fatalf("Request failed: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != 204 {
-			t.Fatalf("Expected 204, got %d", resp.StatusCode)
+			t.Fatalf("Failed to add members: %v", err)
 		}
 
 		// Verify both members were added
@@ -1153,6 +1440,8 @@ func TestManagementAPIOrganizationMembers(t *testing.T) {
 		if !user6Found {
 			t.Error("test_user_6 was not added to organization")
 		}
+
+		t.Log("Added multiple members via SDK")
 	})
 
 	t.Run("AddMemberIdempotent", func(t *testing.T) {
@@ -1165,23 +1454,11 @@ func TestManagementAPIOrganizationMembers(t *testing.T) {
 		}
 		srv.mu.Unlock()
 
-		reqBody := map[string]interface{}{
-			"members": []string{"test_user_idempotent"},
-		}
-		body, _ := json.Marshal(reqBody)
-
+		// Add same member 3 times using SDK
 		for i := 0; i < 3; i++ {
-			req, _ := http.NewRequest("POST", ts.URL+"/api/v2/organizations/org_test/members", strings.NewReader(string(body)))
-			req.Header.Set("Content-Type", "application/json")
-
-			resp, err := http.DefaultClient.Do(req)
+			err := m.Organization.AddMembers(context.Background(), "org_test", []string{"test_user_idempotent"})
 			if err != nil {
 				t.Fatalf("Request %d failed: %v", i+1, err)
-			}
-			_ = resp.Body.Close()
-
-			if resp.StatusCode != 204 {
-				t.Fatalf("Request %d: Expected 204, got %d", i+1, resp.StatusCode)
 			}
 		}
 
@@ -1211,6 +1488,8 @@ func TestManagementAPIOrganizationMembers(t *testing.T) {
 		if orgCount != 1 {
 			t.Errorf("Expected organization to appear once in user's organizations, found %d times", orgCount)
 		}
+
+		t.Log("Idempotent add via SDK worked correctly")
 	})
 
 	t.Run("AssignRoleUpdatesAppMetadata", func(t *testing.T) {
@@ -1225,40 +1504,16 @@ func TestManagementAPIOrganizationMembers(t *testing.T) {
 		}
 		srv.mu.Unlock()
 
-		// Add member to organization
-		addReq := map[string]interface{}{
-			"members": []string{"test_user_jwt"},
-		}
-		body, _ := json.Marshal(addReq)
-		req, _ := http.NewRequest("POST", ts.URL+"/api/v2/organizations/org_test/members", strings.NewReader(string(body)))
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
+		// Add member to organization using SDK
+		err := m.Organization.AddMembers(context.Background(), "org_test", []string{"test_user_jwt"})
 		if err != nil {
-			t.Fatalf("Request failed: %v", err)
-		}
-		_ = resp.Body.Close()
-
-		if resp.StatusCode != 204 {
-			t.Fatalf("Expected 204, got %d", resp.StatusCode)
+			t.Fatalf("Failed to add member: %v", err)
 		}
 
-		// Assign role to member
-		roleReq := map[string]interface{}{
-			"roles": []string{"admin"},
-		}
-		body, _ = json.Marshal(roleReq)
-		req, _ = http.NewRequest("POST", ts.URL+"/api/v2/organizations/org_test/members/test_user_jwt/roles", strings.NewReader(string(body)))
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err = http.DefaultClient.Do(req)
+		// Assign role to member using SDK
+		err = m.Organization.AssignMemberRoles(context.Background(), "org_test", "test_user_jwt", []string{"admin"})
 		if err != nil {
-			t.Fatalf("Request failed: %v", err)
-		}
-		_ = resp.Body.Close()
-
-		if resp.StatusCode != 204 {
-			t.Fatalf("Expected 204, got %d", resp.StatusCode)
+			t.Fatalf("Failed to assign role: %v", err)
 		}
 
 		// Verify AppMetadata was updated with tenant_id and role
@@ -1269,5 +1524,7 @@ func TestManagementAPIOrganizationMembers(t *testing.T) {
 		if user.AppMetadata.Role != "admin" {
 			t.Errorf("Expected AppMetadata.Role='admin', got '%s'", user.AppMetadata.Role)
 		}
+
+		t.Log("Role assignment updated AppMetadata via SDK")
 	})
 }

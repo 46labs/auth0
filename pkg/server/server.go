@@ -21,10 +21,12 @@ type Server struct {
 	privateKey *rsa.PrivateKey
 	templates  *templates.Loader
 
-	pending   map[string]string
-	verified  map[string]config.User
-	verifiers map[string]string
-	nonces    map[string]string
+	pending       map[string]string
+	verified      map[string]config.User
+	verifiers     map[string]string
+	nonces        map[string]string
+	scopes        map[string]string // maps auth_code -> requested scopes
+	refreshTokens map[string]string // maps refresh_token -> user_id
 
 	users         map[string]*config.User
 	organizations map[string]*config.Organization
@@ -73,6 +75,8 @@ func New(cfg *config.Config) (*Server, error) {
 		verified:      make(map[string]config.User),
 		verifiers:     make(map[string]string),
 		nonces:        make(map[string]string),
+		scopes:        make(map[string]string),
+		refreshTokens: make(map[string]string),
 		users:         users,
 		organizations: organizations,
 		connections:   connections,

@@ -24,10 +24,10 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 		"jwks_uri":                              s.cfg.Issuer + ".well-known/jwks.json",
 		"end_session_endpoint":                  s.cfg.Issuer + "v2/logout",
 		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code", "client_credentials"},
+		"grant_types_supported":                 []string{"authorization_code", "client_credentials", "refresh_token"},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
-		"scopes_supported":                      []string{"openid", "profile", "email"},
+		"scopes_supported":                      []string{"openid", "profile", "email", "offline_access"},
 	})
 }
 
@@ -102,6 +102,9 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 					}
 					if nonce := params.Get("nonce"); nonce != "" {
 						s.nonces[authCode] = nonce
+					}
+					if scope := params.Get("scope"); scope != "" {
+						s.scopes[authCode] = scope
 					}
 
 					redirectURI := params.Get("redirect_uri")
@@ -182,6 +185,114 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			"token_type":   "Bearer",
 			"expires_in":   86400,
 			"scope":        "read:organizations write:organizations read:users write:users",
+		})
+		return
+	}
+
+	// Handle refresh_token flow
+	if grantType == "refresh_token" {
+		refreshToken := r.FormValue("refresh_token")
+		if refreshToken == "" {
+			http.Error(w, `{"error":"invalid_request","error_description":"refresh_token is required"}`, 400)
+			return
+		}
+
+		s.mu.RLock()
+		userID, exists := s.refreshTokens[refreshToken]
+		s.mu.RUnlock()
+
+		if !exists {
+			http.Error(w, `{"error":"invalid_grant","error_description":"Invalid refresh token"}`, 400)
+			return
+		}
+
+		user := s.getUserByID(userID)
+		if user == nil {
+			http.Error(w, `{"error":"invalid_grant","error_description":"User not found"}`, 400)
+			return
+		}
+
+		now := time.Now()
+		ns := strings.TrimSuffix(s.cfg.Issuer, "/") + "/"
+
+		// Generate new access token
+		accessClaims := jwt.MapClaims{
+			"sub":   user.ID,
+			"iss":   s.cfg.Issuer,
+			"aud":   s.cfg.Audience,
+			"exp":   now.Add(time.Hour).Unix(),
+			"iat":   now.Unix(),
+			"scope": "openid profile email",
+		}
+
+		if user.AppMetadata.TenantID != "" {
+			accessClaims[ns+"tenant_id"] = user.AppMetadata.TenantID
+		}
+		if user.AppMetadata.Role != "" {
+			accessClaims[ns+"role"] = user.AppMetadata.Role
+		}
+
+		accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
+		accessToken.Header["kid"] = "key-1"
+
+		accessTokenString, err := accessToken.SignedString(s.privateKey)
+		if err != nil {
+			http.Error(w, "Token generation failed", 500)
+			return
+		}
+
+		// Generate new ID token
+		idClaims := jwt.MapClaims{
+			"sub":            user.ID,
+			"email":          user.Email,
+			"email_verified": user.EmailVerified,
+			"name":           user.Name,
+			"iss":            s.cfg.Issuer,
+			"aud":            clientID,
+			"exp":            now.Add(time.Hour).Unix(),
+			"iat":            now.Unix(),
+		}
+
+		if user.Phone != "" {
+			idClaims["phone_number"] = user.Phone
+			idClaims["phone_number_verified"] = true
+		}
+
+		if user.Picture != "" {
+			idClaims["picture"] = user.Picture
+		}
+
+		nameParts := strings.Split(user.Name, " ")
+		if len(nameParts) > 0 {
+			idClaims["given_name"] = nameParts[0]
+		}
+		if len(nameParts) > 1 {
+			idClaims["family_name"] = nameParts[1]
+		}
+
+		if user.AppMetadata.TenantID != "" {
+			idClaims[ns+"tenant_id"] = user.AppMetadata.TenantID
+		}
+		if user.AppMetadata.Role != "" {
+			idClaims[ns+"role"] = user.AppMetadata.Role
+		}
+
+		idToken := jwt.NewWithClaims(jwt.SigningMethodRS256, idClaims)
+		idToken.Header["kid"] = "key-1"
+
+		idTokenString, err := idToken.SignedString(s.privateKey)
+		if err != nil {
+			http.Error(w, "Token generation failed", 500)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token":  accessTokenString,
+			"id_token":      idTokenString,
+			"token_type":    "Bearer",
+			"expires_in":    3600,
+			"refresh_token": refreshToken, // Return the same refresh token
 		})
 		return
 	}
@@ -276,17 +387,32 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Generate refresh token if offline_access scope was requested
+	s.mu.Lock()
+	requestedScope := s.scopes[code]
+	var refreshToken string
+	if strings.Contains(requestedScope, "offline_access") {
+		refreshToken = "rt_" + base64.RawURLEncoding.EncodeToString([]byte(s.generateID()))
+		s.refreshTokens[refreshToken] = user.ID
+	}
+	s.mu.Unlock()
+
 	delete(s.verified, code)
 	delete(s.verifiers, code)
 	delete(s.nonces, code)
+	delete(s.scopes, code)
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	response := map[string]interface{}{
 		"access_token": accessTokenString,
 		"id_token":     idTokenString,
 		"token_type":   "Bearer",
 		"expires_in":   3600,
-	})
+	}
+	if refreshToken != "" {
+		response["refresh_token"] = refreshToken
+	}
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func (s *Server) handleUserInfo(w http.ResponseWriter, r *http.Request) {
