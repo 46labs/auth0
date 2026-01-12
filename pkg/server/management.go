@@ -185,11 +185,45 @@ func (s *Server) listOrganizationMembers(w http.ResponseWriter, r *http.Request,
 		members = []config.OrganizationMember{}
 	}
 
+	// Transform to SDK-compatible format
+	responseMembers := make([]map[string]interface{}, 0, len(members))
+	for _, member := range members {
+		user, userExists := s.users[member.UserID]
+		responseMember := map[string]interface{}{
+			"user_id": member.UserID,
+		}
+
+		// Add user fields if available
+		if userExists {
+			if user.Name != "" {
+				responseMember["name"] = user.Name
+			}
+			if user.Email != "" {
+				responseMember["email"] = user.Email
+			}
+			if user.Picture != "" {
+				responseMember["picture"] = user.Picture
+			}
+		}
+
+		// Add roles array if member has a role (SDK expects array of role objects)
+		if member.Role != "" {
+			responseMember["roles"] = []map[string]interface{}{
+				{
+					"id":   member.Role,
+					"name": member.Role,
+				},
+			}
+		}
+
+		responseMembers = append(responseMembers, responseMember)
+	}
+
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"members": members,
+		"members": responseMembers,
 		"start":   0,
 		"limit":   50,
-		"total":   len(members),
+		"total":   len(responseMembers),
 	})
 }
 

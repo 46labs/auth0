@@ -227,9 +227,14 @@ func TestCompleteOAuth2PKCEFlow(t *testing.T) {
 	location := resp2.Header.Get("Location")
 	redirectURL, _ := url.Parse(location)
 	authCode := redirectURL.Query().Get("code")
+	returnedState := redirectURL.Query().Get("state")
 
 	if authCode == "" {
 		t.Fatalf("No authorization code in redirect")
+	}
+
+	if returnedState != state {
+		t.Fatalf("State mismatch: expected %q, got %q", state, returnedState)
 	}
 
 	t.Log("Step 3: Exchange code for tokens")
