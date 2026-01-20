@@ -640,17 +640,17 @@ func TestCustomClaimsInToken(t *testing.T) {
 	var claims map[string]interface{}
 	_ = idToken.Claims(&claims)
 
-	expectedClaims := map[string]string{
-		srv.cfg.Issuer + "tenant_id": "org_test",
-		srv.cfg.Issuer + "role":      "admin",
+	if claims["org_id"] == nil {
+		t.Errorf("Missing org_id claim")
+	} else if claims["org_id"].(string) != "org_test" {
+		t.Errorf("Expected org_id=org_test, got %s", claims["org_id"])
 	}
 
-	for claimKey, expectedValue := range expectedClaims {
-		if claims[claimKey] == nil {
-			t.Errorf("Missing custom claim: %s", claimKey)
-		} else if claims[claimKey].(string) != expectedValue {
-			t.Errorf("Expected %s=%s, got %s", claimKey, expectedValue, claims[claimKey])
-		}
+	roleKey := srv.cfg.Issuer + "role"
+	if claims[roleKey] == nil {
+		t.Errorf("Missing role claim: %s", roleKey)
+	} else if claims[roleKey].(string) != "admin" {
+		t.Errorf("Expected %s=admin, got %s", roleKey, claims[roleKey])
 	}
 
 	t.Log("Custom claims verification passed")
@@ -1247,17 +1247,17 @@ func TestRefreshTokenPreservesCustomClaims(t *testing.T) {
 	var claims map[string]interface{}
 	_ = idToken.Claims(&claims)
 
-	expectedClaims := map[string]string{
-		srv.cfg.Issuer + "tenant_id": "org_test",
-		srv.cfg.Issuer + "role":      "admin",
+	if claims["org_id"] == nil {
+		t.Errorf("Missing org_id claim")
+	} else if claims["org_id"].(string) != "org_test" {
+		t.Errorf("Expected org_id=org_test, got %s", claims["org_id"])
 	}
 
-	for claimKey, expectedValue := range expectedClaims {
-		if claims[claimKey] == nil {
-			t.Errorf("Missing custom claim: %s", claimKey)
-		} else if claims[claimKey].(string) != expectedValue {
-			t.Errorf("Expected %s=%s, got %s", claimKey, expectedValue, claims[claimKey])
-		}
+	roleKey := srv.cfg.Issuer + "role"
+	if claims[roleKey] == nil {
+		t.Errorf("Missing role claim: %s", roleKey)
+	} else if claims[roleKey].(string) != "admin" {
+		t.Errorf("Expected %s=admin, got %s", roleKey, claims[roleKey])
 	}
 
 	t.Log("Custom claims preserved in refresh token flow")

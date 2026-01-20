@@ -226,7 +226,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if user.AppMetadata.TenantID != "" {
-			accessClaims[ns+"tenant_id"] = user.AppMetadata.TenantID
+			accessClaims["org_id"] = user.AppMetadata.TenantID
 		}
 		if user.AppMetadata.Role != "" {
 			accessClaims[ns+"role"] = user.AppMetadata.Role
@@ -270,9 +270,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			idClaims["family_name"] = nameParts[1]
 		}
 
+		// org_id is a top-level claim (matches production Auth0 Organizations)
 		if user.AppMetadata.TenantID != "" {
-			idClaims[ns+"tenant_id"] = user.AppMetadata.TenantID
+			idClaims["org_id"] = user.AppMetadata.TenantID
 		}
+		// role remains namespaced (requires Auth0 Action in production)
 		if user.AppMetadata.Role != "" {
 			idClaims[ns+"role"] = user.AppMetadata.Role
 		}
@@ -347,7 +349,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if user.AppMetadata.TenantID != "" {
-		idClaims[ns+"tenant_id"] = user.AppMetadata.TenantID
+		idClaims["org_id"] = user.AppMetadata.TenantID
 	}
 	if user.AppMetadata.Role != "" {
 		idClaims[ns+"role"] = user.AppMetadata.Role
@@ -365,9 +367,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		"scope": "openid profile email",
 	}
 
+	// org_id is a top-level claim (matches production Auth0 Organizations)
 	if user.AppMetadata.TenantID != "" {
-		accessClaims[ns+"tenant_id"] = user.AppMetadata.TenantID
+		accessClaims["org_id"] = user.AppMetadata.TenantID
 	}
+	// role remains namespaced (requires Auth0 Action in production)
 	if user.AppMetadata.Role != "" {
 		accessClaims[ns+"role"] = user.AppMetadata.Role
 	}
