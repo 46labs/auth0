@@ -52,6 +52,26 @@ func (s *Server) handleJWKS(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
+		// Handle prompt=none (silent auth check from SDK iframes).
+		// No server-side sessions exist in the mock, so always return login_required.
+		if r.URL.Query().Get("prompt") == "none" {
+			redirectURI := r.URL.Query().Get("redirect_uri")
+			if redirectURI == "" {
+				http.Error(w, `{"error":"invalid_request"}`, 400)
+				return
+			}
+			u, _ := url.Parse(redirectURI)
+			q := u.Query()
+			q.Set("error", "login_required")
+			q.Set("error_description", "Login required")
+			if state := r.URL.Query().Get("state"); state != "" {
+				q.Set("state", state)
+			}
+			u.RawQuery = q.Encode()
+			http.Redirect(w, r, u.String(), http.StatusFound)
+			return
+		}
+
 		sessionID := s.generateID()
 		s.pending[sessionID] = r.URL.RawQuery
 
