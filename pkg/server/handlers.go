@@ -151,11 +151,27 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if grantType == "client_credentials" {
 		clientSecret := r.FormValue("client_secret")
 		audience := r.FormValue("audience")
+		organization := r.FormValue("organization")
 
-		// For dev/mock, accept any client_id/client_secret combo
-		if clientID == "" || clientSecret == "" {
-			http.Error(w, `{"error":"invalid_client"}`, 400)
+		// Validate client credentials against configured clients
+		s.mu.RLock()
+		client, exists := s.clients[clientID]
+		s.mu.RUnlock()
+
+		if !exists || client.ClientSecret != clientSecret {
+			http.Error(w, `{"error":"invalid_client","error_description":"Invalid client_id or client_secret"}`, http.StatusUnauthorized)
 			return
+		}
+
+		// Validate organization exists if provided (matches real Auth0 behavior)
+		if organization != "" {
+			s.mu.RLock()
+			_, orgExists := s.organizations[organization]
+			s.mu.RUnlock()
+			if !orgExists {
+				http.Error(w, `{"error":"invalid_request","error_description":"Organization not found"}`, 400)
+				return
+			}
 		}
 
 		now := time.Now()
@@ -168,6 +184,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			"scope":     "read:organizations write:organizations read:users write:users",
 			"gty":       "client-credentials",
 			"client_id": clientID,
+		}
+
+		// Include org_id in token when organization is requested (matches real Auth0)
+		if organization != "" {
+			accessClaims["org_id"] = organization
 		}
 
 		accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)

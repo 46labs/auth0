@@ -104,6 +104,20 @@ func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
 			{UserID: "test_user_1", OrgID: "org_test", Role: "admin"},
 			{UserID: "test_user_2", OrgID: "org_test", Role: "member"},
 		},
+		Clients: []config.Client{
+			{
+				ClientID:     "mgmt_client_dev",
+				AppType:      "non_interactive",
+				ClientSecret: "mgmt_secret_dev",
+				GrantTypes:   []string{"client_credentials"},
+			},
+			{
+				ClientID:     "mgmt_client_test",
+				AppType:      "non_interactive",
+				ClientSecret: "mgmt_secret_test",
+				GrantTypes:   []string{"client_credentials"},
+			},
+		},
 		Branding: config.Branding{
 			ServiceName:  "Test Auth",
 			PrimaryColor: "#3b82f6",
