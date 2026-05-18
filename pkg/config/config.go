@@ -92,6 +92,27 @@ type Config struct {
 }
 
 type Actions struct {
-	PostLogin        string `json:"post_login,omitempty" yaml:"post_login,omitempty"`
-	PostRegistration string `json:"post_registration,omitempty" yaml:"post_registration,omitempty"`
+	PostLogin        *PostLoginAction        `json:"post_login,omitempty" yaml:"post_login,omitempty" mapstructure:"post_login"`
+	PostRegistration *PostRegistrationAction `json:"post_registration,omitempty" yaml:"post_registration,omitempty" mapstructure:"post_registration"`
+}
+
+// PostLoginAction declares custom claims to add to tokens issued by the
+// authorization_code and refresh_token flows. Values are template strings of
+// the form "${path.dot.notation}" resolved against the action context (user,
+// authorization, client). A claim whose template references an empty path is
+// omitted entirely, mirroring `if (event.user.x) api.idToken.setCustomClaim`.
+type PostLoginAction struct {
+	IDTokenClaims        map[string]string `json:"id_token_claims,omitempty" yaml:"id_token_claims,omitempty" mapstructure:"id_token_claims"`
+	IDTokenRawClaims     map[string]string `json:"id_token_raw_claims,omitempty" yaml:"id_token_raw_claims,omitempty" mapstructure:"id_token_raw_claims"`
+	AccessTokenClaims    map[string]string `json:"access_token_claims,omitempty" yaml:"access_token_claims,omitempty" mapstructure:"access_token_claims"`
+	AccessTokenRawClaims map[string]string `json:"access_token_raw_claims,omitempty" yaml:"access_token_raw_claims,omitempty" mapstructure:"access_token_raw_claims"`
+}
+
+// PostRegistrationAction declares defaults applied when a user is auto-created
+// during a passwordless login (see Server.autoCreateUser). Templates resolve
+// against the registration context (user, client). Not yet wired into the
+// registration code path.
+type PostRegistrationAction struct {
+	AppMetadata  map[string]string `json:"app_metadata,omitempty" yaml:"app_metadata,omitempty" mapstructure:"app_metadata"`
+	UserMetadata map[string]string `json:"user_metadata,omitempty" yaml:"user_metadata,omitempty" mapstructure:"user_metadata"`
 }

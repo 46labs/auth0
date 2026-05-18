@@ -119,3 +119,14 @@ clients:
     client_secret: "dev_client_secret_123"
     grant_types:
       - "client_credentials"
+
+actions:
+  post_login:
+    id_token_claims:
+      role: "${user.app_metadata.role}"
+      phone_number: "${user.phone_number}"
+    id_token_raw_claims: {}
+    access_token_claims:
+      role: "${authorization.role}"
+      phone_number: "${user.phone_number}"
+    access_token_raw_claims: {}

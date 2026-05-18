@@ -273,16 +273,6 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			accessClaims[ns+"role"] = user.AppMetadata.Role
 		}
 
-		accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
-		accessToken.Header["kid"] = "key-1"
-
-		accessTokenString, err := accessToken.SignedString(s.privateKey)
-		if err != nil {
-			http.Error(w, "Token generation failed", 500)
-			return
-		}
-
-		// Generate new ID token
 		idClaims := jwt.MapClaims{
 			"sub":            user.ID,
 			"email":          user.Email,
@@ -318,6 +308,17 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		// role remains namespaced (requires Auth0 Action in production)
 		if user.AppMetadata.Role != "" {
 			idClaims[ns+"role"] = user.AppMetadata.Role
+		}
+
+		s.applyPostLogin(user, s.lookupClient(clientID), idClaims, accessClaims)
+
+		accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
+		accessToken.Header["kid"] = "key-1"
+
+		accessTokenString, err := accessToken.SignedString(s.privateKey)
+		if err != nil {
+			http.Error(w, "Token generation failed", 500)
+			return
 		}
 
 		idToken := jwt.NewWithClaims(jwt.SigningMethodRS256, idClaims)
@@ -416,6 +417,8 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if user.AppMetadata.Role != "" {
 		accessClaims[ns+"role"] = user.AppMetadata.Role
 	}
+
+	s.applyPostLogin(&user, s.lookupClient(clientID), idClaims, accessClaims)
 
 	accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
 	accessToken.Header["kid"] = "key-1"
