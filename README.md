@@ -22,6 +22,7 @@ Full-featured OIDC provider mock with Auth0-compatible API for local development
 - Dynamic login UI supporting both email and SMS
 - Customizable branding and templates
 - Configurable via YAML or environment variables
+- Declarative Actions for shaping token claims (`post_login` trigger)
 - Hot-reload development with Tilt
 - Multi-arch support (amd64 + arm64)
 
@@ -195,6 +196,55 @@ Tokens automatically include custom claims from `app_metadata` using the issuer 
 ```
 
 The namespace is derived from the `issuer` configuration, ensuring uniqueness and avoiding claim collisions.
+
+## Actions
+
+Declarative replacement for Auth0 Actions / Rules. Configured under `actions:` in `config.yaml`. The `post_login` trigger fires on the `authorization_code` and `refresh_token` flows and lets you shape custom claims without writing JavaScript.
+
+```yaml
+actions:
+  post_login:
+    # Namespaced claims (prefixed with the issuer URL)
+    id_token_claims:
+      role: "${user.app_metadata.role}"
+      phone_number: "${user.phone_number}"
+    # Top-level claims (no namespace) — for Auth0 standard claims like org_id
+    id_token_raw_claims:
+      org_id: "${user.app_metadata.tenant_id}"
+    access_token_claims:
+      role: "${authorization.role}"
+      phone_number: "${user.phone_number}"
+    access_token_raw_claims:
+      org_id: "${user.app_metadata.tenant_id}"
+```
+
+Template syntax: `${path.dot.notation}`. Literals (no `${...}`) pass through unchanged. A claim whose template references an empty or missing path is **omitted** — matching the `if (event.user.x) api.idToken.setCustomClaim(...)` pattern in real Auth0 Actions.
+
+Available context paths:
+
+| Path | Source |
+|------|--------|
+| `user.user_id`, `user.email`, `user.phone_number`, `user.name` | User profile fields |
+| `user.app_metadata.tenant_id`, `user.app_metadata.role` | User `app_metadata` |
+| `user.user_metadata.*` | User `user_metadata` (any nested key) |
+| `authorization.role`, `authorization.org_id` | Looked up from `members` by the user's `app_metadata.tenant_id` |
+| `client.client_id`, `client.name` | The requesting client |
+
+Equivalent to the following Auth0 Action snippet:
+
+```js
+exports.onExecutePostLogin = async (event, api) => {
+  const namespace = 'https://auth.example.test';
+  if (event.authorization?.role) {
+    api.idToken.setCustomClaim(`${namespace}/role`, event.user.app_metadata.role);
+    api.accessToken.setCustomClaim(`${namespace}/role`, event.authorization.role);
+  }
+  if (event.user.phone_number) {
+    api.idToken.setCustomClaim(`${namespace}/phone_number`, event.user.phone_number);
+    api.accessToken.setCustomClaim(`${namespace}/phone_number`, event.user.phone_number);
+  }
+};
+```
 
 ## Management API
 
@@ -386,7 +436,8 @@ For issues, feature requests, or questions:
 ## Roadmap
 
 - [ ] SAML connection support
-- [ ] Actions/Rules engine
+- [x] Actions: declarative `post_login` trigger (custom claim shaping)
+- [ ] Actions: `post_registration`, `credentials_exchange` triggers
 - [ ] Persistent storage option
 - [ ] WebAuthn/Passkey support
 - [ ] Social connection mocks
