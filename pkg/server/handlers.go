@@ -12,6 +12,23 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// parseRedirectURI parses a redirect_uri and restores the original scheme
+// casing. url.Parse normalizes the scheme to lowercase per RFC 3986, but
+// iOS ASWebAuthenticationSession matches `callbackURLScheme` case-sensitively
+// at the OS level. Native iOS app callbacks use the bundle identifier as the
+// scheme (e.g. `com.pl8txt.Pl8txt://…`), so lowercasing breaks the round-trip.
+// Real Auth0 preserves the original case; this matches that behavior.
+func parseRedirectURI(raw string) *url.URL {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	if i := strings.Index(raw, ":"); i > 0 {
+		u.Scheme = raw[:i]
+	}
+	return u
+}
+
 func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w, r)
 	w.Header().Set("Content-Type", "application/json")
@@ -60,7 +77,11 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, `{"error":"invalid_request"}`, 400)
 				return
 			}
-			u, _ := url.Parse(redirectURI)
+			u := parseRedirectURI(redirectURI)
+			if u == nil {
+				http.Error(w, `{"error":"invalid_request"}`, 400)
+				return
+			}
 			q := u.Query()
 			q.Set("error", "login_required")
 			q.Set("error_description", "Login required")
@@ -128,7 +149,11 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 					}
 
 					redirectURI := params.Get("redirect_uri")
-					redirectURL, _ := url.Parse(redirectURI)
+					redirectURL := parseRedirectURI(redirectURI)
+					if redirectURL == nil {
+						http.Error(w, "Invalid redirect_uri", 400)
+						return
+					}
 					query := redirectURL.Query()
 					query.Set("code", authCode)
 					if state := params.Get("state"); state != "" {
