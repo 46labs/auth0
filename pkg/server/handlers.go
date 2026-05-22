@@ -3,14 +3,53 @@ package server
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"math/big"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// parseTokenBody normalizes form vs JSON bodies into r.Form so the existing
+// FormValue() call sites in handleToken work for both encodings. Auth0.swift
+// posts application/json; web SPA and go-auth0 post x-www-form-urlencoded.
+func parseTokenBody(r *http.Request) error {
+	ct := r.Header.Get("Content-Type")
+	if i := strings.Index(ct, ";"); i >= 0 {
+		ct = strings.TrimSpace(ct[:i])
+	}
+	if ct != "application/json" {
+		return r.ParseForm()
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = r.Body.Close() }()
+	r.Form = url.Values{}
+	if len(body) == 0 {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return err
+	}
+	for k, v := range m {
+		switch t := v.(type) {
+		case string:
+			r.Form.Set(k, t)
+		case float64:
+			r.Form.Set(k, strconv.FormatFloat(t, 'f', -1, 64))
+		case bool:
+			r.Form.Set(k, strconv.FormatBool(t))
+		}
+	}
+	return nil
+}
 
 // parseRedirectURI parses a redirect_uri and restores the original scheme
 // casing. url.Parse normalizes the scheme to lowercase per RFC 3986, but
@@ -188,7 +227,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = r.ParseForm()
+	_ = parseTokenBody(r)
 	grantType := r.FormValue("grant_type")
 	clientID := r.FormValue("client_id")
 
