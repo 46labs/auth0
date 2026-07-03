@@ -102,16 +102,26 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("/api/v2/organizations", s.handleOrganizations)
 	mux.HandleFunc("/api/v2/organizations/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/members/") && strings.Contains(r.URL.Path, "/roles") {
+		rest := strings.TrimPrefix(r.URL.Path, "/api/v2/organizations/")
+		switch {
+		case strings.HasPrefix(rest, "name/"):
+			s.handleOrganizationByName(w, r)
+		case strings.Contains(r.URL.Path, "/members/") && strings.Contains(r.URL.Path, "/roles"):
 			s.handleOrganizationMemberRoles(w, r)
-		} else if strings.Contains(r.URL.Path, "/members") {
+		case strings.Contains(r.URL.Path, "/members"):
 			s.handleOrganizationMembers(w, r)
-		} else {
+		default:
 			s.handleOrganization(w, r)
 		}
 	})
 	mux.HandleFunc("/api/v2/connections", s.handleConnections)
-	mux.HandleFunc("/api/v2/users/", s.handleUser)
+	mux.HandleFunc("/api/v2/users/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/organizations") {
+			s.handleUserOrganizations(w, r)
+			return
+		}
+		s.handleUser(w, r)
+	})
 	mux.HandleFunc("/api/v2/clients", s.handleClients)
 	mux.HandleFunc("/api/v2/clients/", s.handleClient)
 

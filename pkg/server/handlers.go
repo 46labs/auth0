@@ -330,11 +330,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			"scope": "openid profile email",
 		}
 
-		if user.AppMetadata.TenantID != "" {
-			accessClaims["org_id"] = user.AppMetadata.TenantID
+		if user.AppMetadata.TenantID() != "" {
+			accessClaims["org_id"] = user.AppMetadata.TenantID()
 		}
-		if user.AppMetadata.Role != "" {
-			accessClaims[ns+"role"] = user.AppMetadata.Role
+		if user.AppMetadata.Role() != "" {
+			accessClaims[ns+"role"] = user.AppMetadata.Role()
 		}
 
 		idClaims := jwt.MapClaims{
@@ -366,12 +366,12 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// org_id is a top-level claim (matches production Auth0 Organizations)
-		if user.AppMetadata.TenantID != "" {
-			idClaims["org_id"] = user.AppMetadata.TenantID
+		if user.AppMetadata.TenantID() != "" {
+			idClaims["org_id"] = user.AppMetadata.TenantID()
 		}
 		// role remains namespaced (requires Auth0 Action in production)
-		if user.AppMetadata.Role != "" {
-			idClaims[ns+"role"] = user.AppMetadata.Role
+		if user.AppMetadata.Role() != "" {
+			idClaims[ns+"role"] = user.AppMetadata.Role()
 		}
 
 		s.applyPostLogin(user, s.lookupClient(clientID), idClaims, accessClaims)
@@ -454,11 +454,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		idClaims["family_name"] = nameParts[1]
 	}
 
-	if user.AppMetadata.TenantID != "" {
-		idClaims["org_id"] = user.AppMetadata.TenantID
+	if user.AppMetadata.TenantID() != "" {
+		idClaims["org_id"] = user.AppMetadata.TenantID()
 	}
-	if user.AppMetadata.Role != "" {
-		idClaims[ns+"role"] = user.AppMetadata.Role
+	if user.AppMetadata.Role() != "" {
+		idClaims[ns+"role"] = user.AppMetadata.Role()
 	}
 
 	idToken := jwt.NewWithClaims(jwt.SigningMethodRS256, idClaims)
@@ -474,12 +474,12 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// org_id is a top-level claim (matches production Auth0 Organizations)
-	if user.AppMetadata.TenantID != "" {
-		accessClaims["org_id"] = user.AppMetadata.TenantID
+	if user.AppMetadata.TenantID() != "" {
+		accessClaims["org_id"] = user.AppMetadata.TenantID()
 	}
 	// role remains namespaced (requires Auth0 Action in production)
-	if user.AppMetadata.Role != "" {
-		accessClaims[ns+"role"] = user.AppMetadata.Role
+	if user.AppMetadata.Role() != "" {
+		accessClaims[ns+"role"] = user.AppMetadata.Role()
 	}
 
 	s.applyPostLogin(&user, s.lookupClient(clientID), idClaims, accessClaims)
