@@ -50,8 +50,8 @@ func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
 					},
 				},
 				AppMetadata: config.AppMetadata{
-					TenantID: "org_test",
-					Role:     "admin",
+					config.AppMetaTenantID: "org_test",
+					config.AppMetaRole:     "admin",
 				},
 				Organizations: []string{"org_test"},
 			},
@@ -69,8 +69,8 @@ func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
 					},
 				},
 				AppMetadata: config.AppMetadata{
-					TenantID: "org_test",
-					Role:     "member",
+					config.AppMetaTenantID: "org_test",
+					config.AppMetaRole:     "member",
 				},
 				Organizations: []string{"org_test"},
 			},
@@ -774,11 +774,11 @@ func TestManagementAPIUsers(t *testing.T) {
 
 		// Verify the update
 		user := srv.getUserByID("test_user_1")
-		if user.AppMetadata.TenantID != "org_updated" {
-			t.Errorf("Expected tenant_id=org_updated, got %s", user.AppMetadata.TenantID)
+		if user.AppMetadata.TenantID() != "org_updated" {
+			t.Errorf("Expected tenant_id=org_updated, got %s", user.AppMetadata.TenantID())
 		}
-		if user.AppMetadata.Role != "member" {
-			t.Errorf("Expected role=member, got %s", user.AppMetadata.Role)
+		if user.AppMetadata.Role() != "member" {
+			t.Errorf("Expected role=member, got %s", user.AppMetadata.Role())
 		}
 
 		t.Log("Updated user metadata via SDK")
@@ -1313,7 +1313,7 @@ func TestManagementAPIOrganizationMembers(t *testing.T) {
 			Name:          "New User",
 			EmailVerified: true,
 			AppMetadata: config.AppMetadata{
-				Role: "member",
+				config.AppMetaRole: "member",
 			},
 		}
 		srv.mu.Unlock()
@@ -1374,7 +1374,7 @@ func TestManagementAPIOrganizationMembers(t *testing.T) {
 			Name:          "Another User",
 			EmailVerified: true,
 			AppMetadata: config.AppMetadata{
-				Role: "member",
+				config.AppMetaRole: "member",
 			},
 		}
 		srv.mu.Unlock()
@@ -1537,11 +1537,11 @@ func TestManagementAPIOrganizationMembers(t *testing.T) {
 
 		// Verify AppMetadata was updated with tenant_id and role
 		user := srv.getUserByID("test_user_jwt")
-		if user.AppMetadata.TenantID != "org_test" {
-			t.Errorf("Expected AppMetadata.TenantID='org_test', got '%s'", user.AppMetadata.TenantID)
+		if user.AppMetadata.TenantID() != "org_test" {
+			t.Errorf("Expected AppMetadata.TenantID='org_test', got '%s'", user.AppMetadata.TenantID())
 		}
-		if user.AppMetadata.Role != "admin" {
-			t.Errorf("Expected AppMetadata.Role='admin', got '%s'", user.AppMetadata.Role)
+		if user.AppMetadata.Role() != "admin" {
+			t.Errorf("Expected AppMetadata.Role='admin', got '%s'", user.AppMetadata.Role())
 		}
 
 		t.Log("Role assignment updated AppMetadata via SDK")

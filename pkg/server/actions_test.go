@@ -107,8 +107,8 @@ func minimalServer(t *testing.T, pl *config.PostLoginAction) *Server {
 			Phone: "+15555550100",
 			Name:  "User One",
 			AppMetadata: config.AppMetadata{
-				TenantID: "org_1",
-				Role:     "admin",
+				config.AppMetaTenantID: "org_1",
+				config.AppMetaRole:     "admin",
 			},
 		}},
 		Organizations: []config.Organization{{ID: "org_1", Name: "org-one"}},
@@ -227,7 +227,7 @@ func TestApplyPostLogin_AuthorizationEmptyWhenNoMembership(t *testing.T) {
 			"role": "${authorization.role}",
 		},
 	})
-	srv.users["auth0|u1"].AppMetadata.TenantID = "" // user belongs to no org
+	delete(srv.users["auth0|u1"].AppMetadata, config.AppMetaTenantID) // user belongs to no org
 
 	accessClaims := jwt.MapClaims{}
 	srv.applyPostLogin(srv.users["auth0|u1"], srv.clients["spa_app"], jwt.MapClaims{}, accessClaims)

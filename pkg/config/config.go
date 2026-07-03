@@ -1,8 +1,30 @@
 package config
 
-type AppMetadata struct {
-	TenantID string `json:"tenant_id,omitempty" yaml:"tenant_id,omitempty" mapstructure:"tenant_id"`
-	Role     string `json:"role,omitempty" yaml:"role,omitempty" mapstructure:"role"`
+// AppMetadata mirrors Auth0's user.app_metadata — an open map, not a typed
+// struct. Two keys have first-class meaning to the mock's JWT wiring
+// (tenant_id, role) and are exposed via helper methods, but every other key
+// (e.g. pee's org_roles) is preserved intact through PATCH/GET so SDK writes
+// round-trip faithfully.
+type AppMetadata map[string]any
+
+// Well-known app_metadata keys read by the mock's JWT claim assembly.
+const (
+	AppMetaTenantID = "tenant_id"
+	AppMetaRole     = "role"
+)
+
+// TenantID returns app_metadata.tenant_id or "" when unset or the value isn't
+// a string. Nil-safe.
+func (m AppMetadata) TenantID() string {
+	s, _ := m[AppMetaTenantID].(string)
+	return s
+}
+
+// Role returns app_metadata.role or "" when unset or the value isn't a string.
+// Nil-safe.
+func (m AppMetadata) Role() string {
+	s, _ := m[AppMetaRole].(string)
+	return s
 }
 
 type UserIdentity struct {

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -163,8 +164,8 @@ func TestAuth0SDKCompatibility(t *testing.T) {
 
 		// Verify the update
 		user := srv.getUserByID("test_user_1")
-		if user.AppMetadata.TenantID != "org_updated_via_sdk" {
-			t.Errorf("Expected tenant_id=org_updated_via_sdk, got %s", user.AppMetadata.TenantID)
+		if user.AppMetadata.TenantID() != "org_updated_via_sdk" {
+			t.Errorf("Expected tenant_id=org_updated_via_sdk, got %s", user.AppMetadata.TenantID())
 		}
 
 		t.Log("User metadata updated via SDK")
@@ -181,6 +182,97 @@ func TestAuth0SDKCompatibility(t *testing.T) {
 		}
 
 		t.Logf("Found %d connections", len(conns.Connections))
+	})
+
+	t.Run("ReadOrganizationByName", func(t *testing.T) {
+		org, err := m.Organization.ReadByName(context.Background(), "test-org")
+		if err != nil {
+			t.Fatalf("ReadByName failed: %v", err)
+		}
+		if org.GetID() != "org_test" {
+			t.Errorf("Expected org_test, got %s", org.GetID())
+		}
+		if org.GetName() != "test-org" {
+			t.Errorf("Expected name test-org, got %s", org.GetName())
+		}
+	})
+
+	t.Run("ReadOrganizationByName_NotFound", func(t *testing.T) {
+		_, err := m.Organization.ReadByName(context.Background(), "does-not-exist")
+		if err == nil {
+			t.Fatal("Expected 404 for unknown name")
+		}
+		var mErr management.Error
+		if !errors.As(err, &mErr) || mErr.Status() != 404 {
+			t.Fatalf("Expected management.Error 404, got %T: %v", err, err)
+		}
+	})
+
+	t.Run("ListUserOrganizations", func(t *testing.T) {
+		out, err := m.User.Organizations(context.Background(), "test_user_1")
+		if err != nil {
+			t.Fatalf("User.Organizations failed: %v", err)
+		}
+		if out == nil || len(out.Organizations) != 1 {
+			t.Fatalf("Expected 1 org for test_user_1, got %+v", out)
+		}
+		if out.Organizations[0].GetID() != "org_test" {
+			t.Errorf("Expected org_test, got %s", out.Organizations[0].GetID())
+		}
+	})
+
+	t.Run("ListUserOrganizations_UnknownUser", func(t *testing.T) {
+		_, err := m.User.Organizations(context.Background(), "does_not_exist")
+		if err == nil {
+			t.Fatal("Expected 404 for unknown user")
+		}
+		var mErr management.Error
+		if !errors.As(err, &mErr) || mErr.Status() != 404 {
+			t.Fatalf("Expected management.Error 404, got %T: %v", err, err)
+		}
+	})
+
+	// AppMetadataArbitraryKeysRoundTrip pins down the behavior pee's RBAC
+	// depends on: writing app_metadata with arbitrary nested keys (like
+	// org_roles) via the SDK must survive a subsequent Read. tenant_id/role
+	// must coexist untouched.
+	t.Run("AppMetadataArbitraryKeysRoundTrip", func(t *testing.T) {
+		appMeta := map[string]interface{}{
+			"tenant_id": "org_test",
+			"role":      "admin",
+			"org_roles": map[string]interface{}{
+				"org_test":  "admin",
+				"org_other": "superadmin",
+			},
+		}
+		if err := m.User.Update(context.Background(), "test_user_1", &management.User{AppMetadata: &appMeta}); err != nil {
+			t.Fatalf("User.Update: %v", err)
+		}
+
+		user, err := m.User.Read(context.Background(), "test_user_1")
+		if err != nil {
+			t.Fatalf("User.Read: %v", err)
+		}
+		if user.AppMetadata == nil {
+			t.Fatal("app_metadata missing on read-back")
+		}
+		got := *user.AppMetadata
+		if got["tenant_id"] != "org_test" {
+			t.Errorf("tenant_id lost: %+v", got["tenant_id"])
+		}
+		if got["role"] != "admin" {
+			t.Errorf("role lost: %+v", got["role"])
+		}
+		orgRoles, ok := got["org_roles"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("org_roles dropped or wrong type: %T (%+v)", got["org_roles"], got["org_roles"])
+		}
+		if orgRoles["org_test"] != "admin" {
+			t.Errorf("org_roles[org_test] lost: %+v", orgRoles["org_test"])
+		}
+		if orgRoles["org_other"] != "superadmin" {
+			t.Errorf("org_roles[org_other] lost: %+v", orgRoles["org_other"])
+		}
 	})
 }
 

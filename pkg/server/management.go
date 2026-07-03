@@ -176,6 +176,85 @@ func (s *Server) handleOrganizationMembers(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+// handleOrganizationByName serves GET /api/v2/organizations/name/{name},
+// the SDK's Organization.ReadByName. Returns the org record by its machine
+// name. Used by pee's EnsureOrganization to skip the create when the org
+// already exists.
+func (s *Server) handleOrganizationByName(w http.ResponseWriter, r *http.Request) {
+	s.setCORS(w, r)
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+	if r.Method != "GET" {
+		http.Error(w, `{"error":"method_not_allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	name := strings.TrimPrefix(r.URL.Path, "/api/v2/organizations/name/")
+	if idx := strings.Index(name, "/"); idx != -1 {
+		name = name[:idx]
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, org := range s.organizations {
+		if org.Name == name {
+			_ = json.NewEncoder(w).Encode(org)
+			return
+		}
+	}
+	http.Error(w, `{"statusCode":404,"error":"Not Found","message":"organization not found"}`, http.StatusNotFound)
+}
+
+// handleUserOrganizations serves GET /api/v2/users/{id}/organizations, the
+// SDK's User.Organizations. Returns every org the user is a current member of.
+// Source of truth is the s.members map (kept in sync by AddOrganizationMember).
+func (s *Server) handleUserOrganizations(w http.ResponseWriter, r *http.Request) {
+	s.setCORS(w, r)
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+	if r.Method != "GET" {
+		http.Error(w, `{"error":"method_not_allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v2/users/")
+	userID := strings.TrimSuffix(rest, "/organizations")
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if _, exists := s.users[userID]; !exists {
+		http.Error(w, `{"statusCode":404,"error":"Not Found","message":"user not found"}`, http.StatusNotFound)
+		return
+	}
+
+	orgs := make([]config.Organization, 0)
+	for orgID, members := range s.members {
+		for _, m := range members {
+			if m.UserID != userID {
+				continue
+			}
+			if org, ok := s.organizations[orgID]; ok {
+				orgs = append(orgs, *org)
+			}
+			break
+		}
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"organizations": orgs,
+		"start":         0,
+		"limit":         50,
+		"total":         len(orgs),
+	})
+}
+
 func (s *Server) listOrganizationMembers(w http.ResponseWriter, r *http.Request, orgID string) {
 	s.mu.RLock()
 	members, exists := s.members[orgID]
@@ -477,9 +556,12 @@ func (s *Server) assignMemberRoles(w http.ResponseWriter, r *http.Request, orgID
 
 	// Update user's AppMetadata with tenant_id and role for JWT claims
 	if user, exists := s.users[memberID]; exists {
-		user.AppMetadata.TenantID = orgID
+		if user.AppMetadata == nil {
+			user.AppMetadata = config.AppMetadata{}
+		}
+		user.AppMetadata[config.AppMetaTenantID] = orgID
 		if len(req.Roles) > 0 {
-			user.AppMetadata.Role = req.Roles[0]
+			user.AppMetadata[config.AppMetaRole] = req.Roles[0]
 		}
 		s.users[memberID] = user
 	}

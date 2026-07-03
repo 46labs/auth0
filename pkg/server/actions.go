@@ -70,24 +70,27 @@ func (s *Server) buildPostLoginContext(user *config.User, client *config.Client)
 		userMeta[k] = v
 	}
 
+	appMeta := map[string]any{}
+	for k, v := range user.AppMetadata {
+		appMeta[k] = v
+	}
+
 	ctx := map[string]any{
 		"user": map[string]any{
-			"user_id":      user.ID,
-			"email":        user.Email,
-			"phone_number": user.Phone,
-			"name":         user.Name,
-			"app_metadata": map[string]any{
-				"tenant_id": user.AppMetadata.TenantID,
-				"role":      user.AppMetadata.Role,
-			},
+			"user_id":       user.ID,
+			"email":         user.Email,
+			"phone_number":  user.Phone,
+			"name":          user.Name,
+			"app_metadata":  appMeta,
 			"user_metadata": userMeta,
 		},
 	}
 
 	auth := map[string]any{}
-	if user.AppMetadata.TenantID != "" {
+	tenantID := user.AppMetadata.TenantID()
+	if tenantID != "" {
 		s.mu.RLock()
-		members := s.members[user.AppMetadata.TenantID]
+		members := s.members[tenantID]
 		s.mu.RUnlock()
 		for _, m := range members {
 			if m.UserID == user.ID {
