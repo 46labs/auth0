@@ -87,16 +87,24 @@ func (s *Server) buildPostLoginContext(user *config.User, client *config.Client)
 	}
 
 	auth := map[string]any{}
-	tenantID := user.AppMetadata.TenantID()
-	if tenantID != "" {
-		s.mu.RLock()
-		members := s.members[tenantID]
-		s.mu.RUnlock()
-		for _, m := range members {
-			if m.UserID == user.ID {
-				auth["role"] = m.Role
-				auth["org_id"] = m.OrgID
-				break
+	orgID := user.AppMetadata.TenantID()
+	if orgID != "" {
+		auth["org_id"] = orgID
+		// Prod parity: derive the org-scoped role from app_metadata.org_roles[org]
+		// (the model consumers like pee use), so SDK writes to org_roles
+		// round-trip into the next token. Fall back to the org-membership config
+		// for legacy single-role setups.
+		if role := user.AppMetadata.OrgRole(orgID); role != "" {
+			auth["role"] = role
+		} else {
+			s.mu.RLock()
+			members := s.members[orgID]
+			s.mu.RUnlock()
+			for _, m := range members {
+				if m.UserID == user.ID {
+					auth["role"] = m.Role
+					break
+				}
 			}
 		}
 	}
