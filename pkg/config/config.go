@@ -11,6 +11,7 @@ type AppMetadata map[string]any
 const (
 	AppMetaTenantID = "tenant_id"
 	AppMetaRole     = "role"
+	AppMetaOrgRoles = "org_roles"
 )
 
 // TenantID returns app_metadata.tenant_id or "" when unset or the value isn't
@@ -24,6 +25,19 @@ func (m AppMetadata) TenantID() string {
 // Nil-safe.
 func (m AppMetadata) Role() string {
 	s, _ := m[AppMetaRole].(string)
+	return s
+}
+
+// OrgRole returns app_metadata.org_roles[orgID], the per-org role model (a
+// map of org id to role). Returns "" when absent or not a string. Nil-safe.
+// This is a generic per-org lookup; consumers name the claim in config, not
+// here.
+func (m AppMetadata) OrgRole(orgID string) string {
+	orgRoles, ok := m[AppMetaOrgRoles].(map[string]any)
+	if !ok {
+		return ""
+	}
+	s, _ := orgRoles[orgID].(string)
 	return s
 }
 

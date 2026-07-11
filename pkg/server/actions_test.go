@@ -174,6 +174,31 @@ func TestApplyPostLogin_NamespacedAndRawClaims(t *testing.T) {
 	}
 }
 
+// TestApplyPostLogin_RoleFromOrgRoles: the org-scoped authorization.role is
+// derived from app_metadata.org_roles[activeOrg] (the per-org role model),
+// taking precedence over the legacy members config. Claim naming is left to
+// config, so the mock stays generic.
+func TestApplyPostLogin_RoleFromOrgRoles(t *testing.T) {
+	srv := minimalServer(t, &config.PostLoginAction{
+		AccessTokenClaims: map[string]string{
+			"role": "${authorization.role}",
+		},
+	})
+	// Per-org role model. members still says "owner" for org_1 — org_roles wins.
+	srv.users["auth0|u1"].AppMetadata = config.AppMetadata{
+		config.AppMetaTenantID: "org_1",
+		config.AppMetaOrgRoles: map[string]any{"org_1": "superadmin"},
+	}
+
+	access := jwt.MapClaims{}
+	srv.applyPostLogin(srv.users["auth0|u1"], srv.clients["spa_app"], jwt.MapClaims{}, access)
+
+	ns := "https://auth.example.test/"
+	if access[ns+"role"] != "superadmin" {
+		t.Errorf("role should come from org_roles[org], not members: got %v", access[ns+"role"])
+	}
+}
+
 func TestApplyPostLogin_SkipsClaimsWithEmptySource(t *testing.T) {
 	srv := minimalServer(t, &config.PostLoginAction{
 		IDTokenClaims: map[string]string{
