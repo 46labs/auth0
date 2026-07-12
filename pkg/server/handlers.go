@@ -405,6 +405,14 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle RFC 8693 token exchange (Auth0 Custom Token Exchange). Mirrors an
+	// on-behalf-of exchange: a subject token is traded for a token scoped to a
+	// target organization, carrying a delegated actor (`act`) claim for audit.
+	if grantType == tokenExchangeGrantType {
+		s.handleTokenExchange(w, r)
+		return
+	}
+
 	// Handle authorization_code flow (existing logic)
 	code := r.FormValue("code")
 	user, exists := s.verified[code]
