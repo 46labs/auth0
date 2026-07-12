@@ -130,6 +130,33 @@ type Config struct {
 type Actions struct {
 	PostLogin        *PostLoginAction        `json:"post_login,omitempty" yaml:"post_login,omitempty" mapstructure:"post_login"`
 	PostRegistration *PostRegistrationAction `json:"post_registration,omitempty" yaml:"post_registration,omitempty" mapstructure:"post_registration"`
+	TokenExchange    *TokenExchangeAction    `json:"token_exchange,omitempty" yaml:"token_exchange,omitempty" mapstructure:"token_exchange"`
+}
+
+// TokenExchangeAction declares how the mock services RFC 8693 token exchange
+// (grant_type urn:ietf:params:oauth:grant-type:token-exchange), mirroring an
+// Auth0 Custom Token Exchange profile + Action. It is intentionally generic:
+// all consumer-specific claim names live in config, not in the mock's Go.
+//
+// The grant mints a new access token whose sub is the subject token's sub
+// (the real operator, preserved for audit), org_id is the requested target
+// organization, plus the claims declared below. When RequireClaim is set, the
+// exchange is authorized only if the subject token carries that claim
+// non-empty (the mock's stand-in for the Action's authorization check).
+type TokenExchangeAction struct {
+	// RequireClaim, if set, gates the exchange: the subject token must carry
+	// this (fully-qualified) claim with a non-empty value, else 403.
+	RequireClaim string `json:"require_claim,omitempty" yaml:"require_claim,omitempty" mapstructure:"require_claim"`
+	// CarryClaims are copied verbatim (same key) from the subject token onto
+	// the minted token when present.
+	CarryClaims []string `json:"carry_claims,omitempty" yaml:"carry_claims,omitempty" mapstructure:"carry_claims"`
+	// SetClaims are literal key/value claims stamped on the minted token. Keys
+	// are used verbatim (already namespaced in config), so org_id and
+	// namespaced role/platform coexist without the mock namespacing anything.
+	SetClaims map[string]string `json:"set_claims,omitempty" yaml:"set_claims,omitempty" mapstructure:"set_claims"`
+	// Actor, when true, stamps the RFC 8693 `act` claim {"sub": subject.sub}
+	// so the delegated token carries a native actor/audit trail.
+	Actor bool `json:"actor,omitempty" yaml:"actor,omitempty" mapstructure:"actor"`
 }
 
 // PostLoginAction declares custom claims to add to tokens issued by the
