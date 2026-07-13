@@ -20,12 +20,7 @@ docker:
 	@echo "Discovery: http://localhost:4646/.well-known/openid-configuration"
 
 ci:
-	@echo "Checking format..."
-	@gofmt -l .
-	@echo "Running tests..."
-	@go test -v ./pkg/...
-	@echo "Running linter..."
-	@golangci-lint run
+	@just _docker-go-tests
 
 # Context safety check
 _context-guard:
@@ -78,6 +73,17 @@ kind: _context-guard
 
 	echo "Starting Tilt..."
 	tilt up
+
+# Test and Lint Go code
+_docker-go-tests:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	echo "gofmt..."
+	docker run --rm -v "$(pwd):/auth0" -w /auth0 golangci/golangci-lint:v2.7.2-alpine gofmt -l /auth0
+	echo "go test..."
+	docker run --rm -v "$(pwd):/auth0" -w /auth0 golangci/golangci-lint:v2.7.2-alpine go test -v /auth0/pkg/...
+	echo "Linting Go..."
+	docker run --rm -v "$(pwd):/auth0" -w /auth0 golangci/golangci-lint:v2.7.2-alpine golangci-lint run --fix /auth0/...
 
 _setup-certs:
 	#!/usr/bin/env bash
