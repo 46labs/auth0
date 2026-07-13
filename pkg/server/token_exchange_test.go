@@ -14,9 +14,13 @@ import (
 )
 
 const exNS = "https://auth.example.test/"
+const exSubjectType = "urn:pee:token-type:platform-admin"
 
 func exchangeServer(t *testing.T, ex *config.TokenExchangeAction) *Server {
 	t.Helper()
+	if ex != nil && ex.SubjectTokenType == "" {
+		ex.SubjectTokenType = exSubjectType
+	}
 	cfg := &config.Config{
 		Issuer:   "https://auth.example.test/",
 		Audience: "https://api.example.test",
@@ -53,8 +57,8 @@ func doExchange(t *testing.T, srv *Server, subjectToken, org string) *httptest.R
 	form := url.Values{}
 	form.Set("grant_type", tokenExchangeGrantType)
 	form.Set("subject_token", subjectToken)
-	form.Set("subject_token_type", accessTokenType)
-	form.Set("organization", org)
+	form.Set("subject_token_type", exSubjectType)
+	form.Set("target_org", org)
 	req := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
@@ -150,5 +154,24 @@ func TestTokenExchange_RejectsGarbageSubjectToken(t *testing.T) {
 	rec := doExchange(t, srv, "not-a-jwt", "org_2")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for garbage subject_token, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTokenExchange_RejectsWrongSubjectTokenType(t *testing.T) {
+	srv := exchangeServer(t, &config.TokenExchangeAction{RequireClaim: exNS + "platform"})
+	subject := srv.signSubject(t, jwt.MapClaims{"sub": "auth0|admin", exNS + "platform": "admin"})
+
+	form := url.Values{}
+	form.Set("grant_type", tokenExchangeGrantType)
+	form.Set("subject_token", subject)
+	form.Set("subject_token_type", "urn:ietf:params:oauth:token-type:access_token") // reserved / no profile
+	form.Set("target_org", "org_2")
+	req := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.handleToken(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unmatched subject_token_type, got %d (body=%s)", rec.Code, rec.Body.String())
 	}
 }
