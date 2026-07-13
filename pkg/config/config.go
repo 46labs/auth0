@@ -144,6 +144,11 @@ type Actions struct {
 // exchange is authorized only if the subject token carries that claim
 // non-empty (the mock's stand-in for the Action's authorization check).
 type TokenExchangeAction struct {
+	// SubjectTokenType is the profile's subject_token_type: the request's
+	// subject_token_type must match it exactly (mirrors Auth0 profile matching).
+	// Auth0 rejects reserved namespaces (urn:ietf, urn:auth0, urn:okta,
+	// *.auth0.com, *.okta.com), so configure a custom URN. Empty = accept any.
+	SubjectTokenType string `json:"subject_token_type,omitempty" yaml:"subject_token_type,omitempty" mapstructure:"subject_token_type"`
 	// RequireClaim, if set, gates the exchange: the subject token must carry
 	// this (fully-qualified) claim with a non-empty value, else 403.
 	RequireClaim string `json:"require_claim,omitempty" yaml:"require_claim,omitempty" mapstructure:"require_claim"`

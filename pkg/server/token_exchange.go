@@ -28,14 +28,23 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Match the profile's subject_token_type, as Auth0 routes exchanges to a
+	// profile by this value (and rejects reserved namespaces at config time).
+	if ex.SubjectTokenType != "" && r.FormValue("subject_token_type") != ex.SubjectTokenType {
+		http.Error(w, `{"error":"invalid_request","error_description":"no token exchange profile for subject_token_type"}`, http.StatusBadRequest)
+		return
+	}
+
 	subjectToken := r.FormValue("subject_token")
-	organization := r.FormValue("organization")
+	// Target tenant rides as a custom body param the Auth0 CTE Action reads from
+	// event.request.body.target_org (then calls api.authentication.setOrganization).
+	organization := r.FormValue("target_org")
 	if subjectToken == "" {
 		http.Error(w, `{"error":"invalid_request","error_description":"subject_token is required"}`, http.StatusBadRequest)
 		return
 	}
 	if organization == "" {
-		http.Error(w, `{"error":"invalid_request","error_description":"organization is required"}`, http.StatusBadRequest)
+		http.Error(w, `{"error":"invalid_request","error_description":"target_org is required"}`, http.StatusBadRequest)
 		return
 	}
 
