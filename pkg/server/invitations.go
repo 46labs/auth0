@@ -6,19 +6,18 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/46labs/auth0/pkg/config"
 )
 
-// auth0TimeFormat is the ISO 8601 rendering the Management API uses for
-// created_at / expires_at.
+// ISO 8601 rendering the Management API uses for created_at / expires_at.
 const auth0TimeFormat = "2006-01-02T15:04:05.000Z"
 
-// invitationView is the wire shape of an organization invitation. Auth0 nests
-// the inviter and invitee as objects and reports the window as expires_at, not
-// as the ttl_sec that was sent in.
+// invitationView is the wire shape. Auth0 nests inviter and invitee as
+// objects and reports expires_at, not the ttl_sec that was sent in.
 type invitationView struct {
 	ID             string          `json:"id"`
 	OrganizationID string          `json:"organization_id"`
@@ -103,9 +102,9 @@ func (s *Server) handleOrganizationInvitation(w http.ResponseWriter, r *http.Req
 	}
 }
 
-// pendingInvitations returns the organization's unexpired invitations and
-// prunes the expired ones. Auth0 lets an invitation lapse on its TTL rather
-// than reporting it as pending. Callers must hold the write lock.
+// pendingInvitations returns the unexpired invitations and prunes the rest:
+// an invitation lapses on its TTL rather than being reported as pending.
+// Caller holds the write lock.
 func (s *Server) pendingInvitations(orgID string, now time.Time) []config.OrganizationInvitation {
 	stored := s.invitations[orgID]
 
@@ -194,8 +193,8 @@ func (s *Server) createOrganizationInvitation(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// ttl_sec is schema-validated by Auth0: 0 or absent means the default, and
-	// anything above the maximum is rejected rather than clamped.
+	// Auth0 schema-validates ttl_sec: 0 or absent means the default, above the
+	// maximum is rejected rather than clamped.
 	ttlSec := config.InvitationDefaultTTLSec
 	if req.TTLSec != nil && *req.TTLSec != 0 {
 		ttlSec = *req.TTLSec
@@ -223,18 +222,15 @@ func (s *Server) createOrganizationInvitation(w http.ResponseWriter, r *http.Req
 		writeAuth0Error(w, http.StatusBadRequest, "client "+req.ClientID+" does not exist")
 		return
 	}
-	// Auth0 resolves invitation_url against the application's login initiation
-	// endpoint and 400s when the client has none configured.
+	// Auth0 400s when the named client has no login initiation endpoint.
 	if client.InitiateLoginURI == "" {
 		writeAuth0Error(w, http.StatusBadRequest,
 			"client "+req.ClientID+" has no initiate_login_uri configured")
 		return
 	}
 
-	// A named connection must exist, be enabled on this organization, and not
-	// be passwordless. Skipping the enabled check would mint an invitation
-	// that forces the invitee through a connection the organization cannot
-	// authenticate against.
+	// A named connection must exist, be enabled here, and not be passwordless,
+	// else the invitee is forced through a connection the org cannot use.
 	if req.ConnectionID != "" {
 		conn, ok := s.connections[req.ConnectionID]
 		if !ok {
@@ -252,16 +248,28 @@ func (s *Server) createOrganizationInvitation(w http.ResponseWriter, r *http.Req
 			return
 		}
 	} else if !s.hasNonPasswordlessConnection(orgID) {
-		// Without a named connection Auth0 needs some non-passwordless
-		// connection on the organization for the invitee to authenticate with.
 		writeAuth0Error(w, http.StatusBadRequest,
 			"organization has no non-passwordless enabled connection to invite to")
 		return
 	}
 
-	// Build the URL before storing anything: an unparseable
-	// initiate_login_uri must fail the request, not yield an invitation whose
-	// link cannot be followed.
+	// The mock's member role is a single value, so more than one role cannot
+	// be modelled through acceptance. Refuse rather than silently drop.
+	if len(req.Roles) > 1 {
+		writeAuth0Error(w, http.StatusBadRequest,
+			"the auth0 mock models one role per invitation; got "+strconv.Itoa(len(req.Roles)))
+		return
+	}
+	// A role id that names nothing would carry a grant that resolves to
+	// nothing on acceptance.
+	if unknown := s.unknownRoleIDs(req.Roles); len(unknown) > 0 {
+		writeAuth0Error(w, http.StatusBadRequest,
+			"unknown role ids: "+strings.Join(unknown, ", "))
+		return
+	}
+
+	// Build the URL first: a bad initiate_login_uri must fail the request, not
+	// yield an invitation whose link cannot be followed.
 	ticketID := "tkt_" + s.generateID()
 	link, err := invitationURL(client.InitiateLoginURI, ticketID, org)
 	if err != nil {
@@ -326,8 +334,8 @@ func (s *Server) deleteOrganizationInvitation(w http.ResponseWriter, orgID, invi
 		return
 	}
 
-	// Prune first, so revoking an already-expired invitation 404s regardless of
-	// whether a list or read happened to prune it earlier.
+	// Prune first so revoking an expired invitation 404s regardless of whether
+	// an earlier list or read already pruned it.
 	s.pendingInvitations(orgID, time.Now())
 
 	stored := s.invitations[orgID]
@@ -342,21 +350,17 @@ func (s *Server) deleteOrganizationInvitation(w http.ResponseWriter, orgID, invi
 	writeAuth0Error(w, http.StatusNotFound, "invitation not found")
 }
 
-// invitationURL builds the link the invitee follows. Auth0 points it at the
-// application's login initiation endpoint and carries the ticket, the
-// organization id and its name, which is what lets the SPA forward them to
-// loginWithRedirect.
-//
-// The URI is parsed rather than concatenated: a hash-routed SPA login URI
-// (https://app.test/#/login) would otherwise get the parameters appended
-// inside the fragment, where the browser never exposes them as query values.
+// invitationURL builds <login_uri>?invitation=<ticket>&organization=<org>
+// &organization_name=<name>, which the SPA forwards to loginWithRedirect.
+// Parsed rather than concatenated: a hash-routed login URI
+// (https://app.test/#/login) would otherwise bury the parameters in the
+// fragment, where the browser never exposes them as query values.
 func invitationURL(initiateLoginURI, ticketID string, org *config.Organization) (string, error) {
 	u, err := url.Parse(initiateLoginURI)
 	if err != nil {
 		return "", err
 	}
-	// url.Parse accepts relative references, so "/login" parses cleanly and
-	// would yield a link that is not rooted at the application at all.
+	// url.Parse accepts relative references, so "/login" parses cleanly.
 	if !u.IsAbs() || u.Host == "" {
 		return "", fmt.Errorf("initiate_login_uri must be absolute with a host, got %q", initiateLoginURI)
 	}
@@ -370,7 +374,6 @@ func invitationURL(initiateLoginURI, ticketID string, org *config.Organization) 
 	q.Set("organization_name", org.Name)
 	u.RawQuery = q.Encode()
 
-	// url.URL.String orders the query before the fragment, so a fragment in
-	// the configured URI stays last.
+	// String orders the query before the fragment.
 	return u.String(), nil
 }

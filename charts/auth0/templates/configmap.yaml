@@ -17,6 +17,34 @@ data:
     {{- toYaml .Values.config.users | nindent 4 }}
     branding:
       {{- toYaml .Values.config.branding | nindent 6 }}
+    {{- with .Values.config.organizations }}
+    organizations:
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.config.connections }}
+    connections:
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.config.roles }}
+    roles:
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.config.members }}
+    members:
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.config.organizationConnections }}
+    organizationConnections:
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.config.clients }}
+    clients:
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.config.actions }}
+    actions:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
 ---
 {{- if .Values.customLogin.enabled }}
 apiVersion: v1

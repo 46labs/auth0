@@ -14,9 +14,22 @@ Full-featured OIDC provider mock with Auth0-compatible API for local development
 
 ### Auth0 Management API Mock
 - Organizations CRUD (`/api/v2/organizations`)
+- Organization invitations: create, list, read, revoke
+- Organization enabled connections (`/api/v2/organizations/:id/enabled_connections`)
+- Roles registry (`/api/v2/roles`), including `name_filter` for read-or-create by name
 - Connections management (`/api/v2/connections`)
+- Clients CRUD (`/api/v2/clients`), including `initiate_login_uri`
 - User metadata updates (`/api/v2/users/:id`)
-- Organization membership management
+- Organization membership and member roles
+- Page-based pagination (`page`, `per_page`) on every list endpoint
+
+### Organization login
+- Org-scoped login via the `organization` authorize parameter, gated on membership
+- `assign_membership_on_login` so a directory self-serves into an organization
+- Invitation acceptance via the `invitation` parameter: creates the user, joins the
+  organization, applies the invitation's role and metadata, and consumes the ticket
+- `app_metadata.org_roles[org_id]` seeded from the member role on login, mirroring the
+  production Post-Login Action
 
 ### Developer Experience
 - Dynamic login UI supporting both email and SMS

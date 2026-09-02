@@ -16,23 +16,52 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// authCode is everything a pending authorization code carries from the
+// /authorize redirect through to its single exchange at /oauth/token. It
+// replaced four parallel maps keyed by the same code; org-scoped login needs
+// one more field, and a fifth parallel map is where correctness goes to die.
+type authCode struct {
+	User          config.User
+	CodeChallenge string
+	Nonce         string
+	Scope         string
+	// ClientID is the application the code was issued to. The exchange must
+	// present the same one, otherwise an invitation validated for application
+	// A could be exchanged as B — the token audience and the action's client
+	// context would both be B, defeating the invitation's client binding.
+	ClientID string
+	// OrgID is the organization the login was scoped to, from the
+	// `organization` authorize parameter. Auth0 puts this on the token as
+	// org_id independently of the user's app_metadata, so a user who belongs
+	// to several organizations gets a token for the one they logged in to.
+	OrgID string
+}
+
+// refreshToken is the state behind an issued refresh token. It carries the
+// organization the original login was scoped to: without it, refreshing
+// rebuilds org_id from the user's current app_metadata, so a token minted for
+// one organization could come back scoped to another after the user later
+// joins one.
+type refreshTokenState struct {
+	UserID string
+	OrgID  string
+}
+
 type Server struct {
 	cfg        *config.Config
 	privateKey *rsa.PrivateKey
 	templates  *templates.Loader
 
 	pending       map[string]string
-	verified      map[string]config.User
-	verifiers     map[string]string
-	nonces        map[string]string
-	scopes        map[string]string // maps auth_code -> requested scopes
-	refreshTokens map[string]string // maps refresh_token -> user_id
+	authCodes     map[string]*authCode
+	refreshTokens map[string]*refreshTokenState
 
 	users         map[string]*config.User
 	organizations map[string]*config.Organization
 	connections   map[string]*config.Connection
 	members       map[string][]config.OrganizationMember
 	clients       map[string]*config.Client
+	roles         map[string]*config.Role
 
 	// orgConnections holds the enabled_connections pairings, keyed by org id.
 	orgConnections map[string][]config.OrganizationConnection
@@ -79,6 +108,11 @@ func New(cfg *config.Config) (*Server, error) {
 		clients[cfg.Clients[i].ClientID] = &cfg.Clients[i]
 	}
 
+	roles := make(map[string]*config.Role)
+	for i := range cfg.Roles {
+		roles[cfg.Roles[i].ID] = &cfg.Roles[i]
+	}
+
 	orgConnections := buildOrgConnections(cfg)
 
 	return &Server{
@@ -86,16 +120,14 @@ func New(cfg *config.Config) (*Server, error) {
 		privateKey:     key,
 		templates:      tmpl,
 		pending:        make(map[string]string),
-		verified:       make(map[string]config.User),
-		verifiers:      make(map[string]string),
-		nonces:         make(map[string]string),
-		scopes:         make(map[string]string),
-		refreshTokens:  make(map[string]string),
+		authCodes:      make(map[string]*authCode),
+		refreshTokens:  make(map[string]*refreshTokenState),
 		users:          users,
 		organizations:  organizations,
 		connections:    connections,
 		members:        members,
 		clients:        clients,
+		roles:          roles,
 		orgConnections: orgConnections,
 		invitations:    make(map[string][]config.OrganizationInvitation),
 	}, nil
@@ -122,8 +154,6 @@ func buildOrgConnections(cfg *config.Config) map[string][]config.OrganizationCon
 			enabled(declared.OrgID, declared.ConnectionID) {
 			continue
 		}
-		// Resolve applies Auth0's defaults so a config-declared pairing and one
-		// created over HTTP report identically.
 		oc := declared.Resolve()
 		out[oc.OrgID] = append(out[oc.OrgID], oc)
 	}
@@ -165,6 +195,8 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("/api/v2/clients", s.handleClients)
 	mux.HandleFunc("/api/v2/clients/", s.handleClient)
+	mux.HandleFunc("/api/v2/roles", s.handleRoles)
+	mux.HandleFunc("/api/v2/roles/", s.handleRole)
 
 	return mux
 }
@@ -188,12 +220,19 @@ func (s *Server) generateID() string {
 func (s *Server) findUser(identifier string) *config.User {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.findUserLocked(identifier)
+}
 
+// findUserLocked is findUser without the lock, for callers that need the
+// lookup to be atomic with what they do next. Callers must hold the lock.
+func (s *Server) findUserLocked(identifier string) *config.User {
 	// Determine if email or phone
 	if contact.IsEmail(identifier) {
-		// Email - exact match
+		// Case-insensitive, as Auth0 treats email identifiers. An exact
+		// compare here would miss an existing account whose stored casing
+		// differs and silently create a duplicate.
 		for _, u := range s.users {
-			if u.Email == identifier {
+			if strings.EqualFold(u.Email, identifier) {
 				return u.Clone()
 			}
 		}
@@ -217,7 +256,14 @@ func (s *Server) findUser(identifier string) *config.User {
 func (s *Server) autoCreateUser(identifier string) *config.User {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.autoCreateUserLocked(identifier)
+}
 
+// autoCreateUserLocked is autoCreateUser without the lock, for callers that
+// need creation to be atomic with what they do next (invitation redemption
+// finds-or-creates and grants membership in one step). Callers must hold the
+// write lock.
+func (s *Server) autoCreateUserLocked(identifier string) *config.User {
 	userID := "auth0|" + s.generateID()
 	userIDPart := userID[6:] // Extract part after "auth0|"
 
@@ -275,6 +321,25 @@ func (s *Server) getUserByID(userID string) *config.User {
 		return user.Clone()
 	}
 	return nil
+}
+
+// IssueAuthCode mints an authorization code for a user without driving the
+// login UI, so tests can exercise the token endpoint directly. Returns the
+// code to exchange.
+//
+// clientID binds the code to an application, as a real /authorize request
+// always does; pass "" to leave it unbound so any client may exchange it.
+func (s *Server) IssueAuthCode(userID, scope, orgID, clientID string) string {
+	user := s.getUserByID(userID)
+	if user == nil {
+		return ""
+	}
+
+	code := s.generateID()
+	s.mu.Lock()
+	s.authCodes[code] = &authCode{User: *user, Scope: scope, OrgID: orgID, ClientID: clientID}
+	s.mu.Unlock()
+	return code
 }
 
 // SetUser adds or updates a user in the mock server (for testing)

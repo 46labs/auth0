@@ -5,24 +5,14 @@ import (
 	"reflect"
 )
 
-// Clone helpers exist because the server hands stored records to handlers that
-// serialize them outside the storage lock, while update handlers mutate the
-// same records under it. Returning a copy at every read boundary is what makes
-// that safe: a reader can never observe a half-applied write.
-//
-// The metadata maps hold arbitrary decoded JSON (app_metadata.org_roles, an
-// organization's metadata), so the copy has to recurse through nested maps and
-// slices rather than stopping at the top level.
+// Handlers serialize stored records outside the storage lock while update
+// handlers mutate them under it, so reads hand back a copy. Metadata holds
+// arbitrary decoded JSON, so the copy recurses.
 
-// cloneValue deep-copies a metadata value. The typed cases are the shapes
-// encoding/json produces and cover the hot path; anything else (metadata built
-// programmatically, or decoded by mapstructure, which yields concrete types
-// like []string) falls through to reflection so no mutable collection is
-// returned by reference.
-//
-// Maps, slices and pointers are rebuilt at every depth. Scalars are returned
-// as-is, being immutable. Structs and arrays are not traversed: metadata holds
-// decoded JSON, and reflection cannot set unexported struct fields anyway.
+// cloneValue deep-copies a metadata value. The typed cases are what
+// encoding/json produces; anything else (mapstructure yields concrete types
+// like []string) goes through reflection. Structs and arrays are not
+// traversed — metadata holds decoded JSON, and unexported fields cannot be set.
 func cloneValue(v any) any {
 	switch t := v.(type) {
 	case nil:
@@ -51,7 +41,6 @@ func cloneValue(v any) any {
 }
 
 // cloneReflect deep-copies maps, slices and pointers of any concrete type.
-// Other kinds are returned unchanged, being either immutable or untraversable.
 func cloneReflect(rv reflect.Value) reflect.Value {
 	switch rv.Kind() {
 	case reflect.Interface:
@@ -69,7 +58,6 @@ func cloneReflect(rv reflect.Value) reflect.Value {
 		out := reflect.MakeMapWithSize(rv.Type(), rv.Len())
 		iter := rv.MapRange()
 		for iter.Next() {
-			// Keys are scalars in every metadata shape we accept.
 			out.SetMapIndex(iter.Key(), cloneReflect(iter.Value()))
 		}
 		return out
@@ -97,8 +85,7 @@ func cloneReflect(rv reflect.Value) reflect.Value {
 	}
 }
 
-// cloneAnyMap deep-copies a map of decoded JSON. Returns nil for a nil map so
-// omitempty keys stay absent on re-serialization.
+// cloneAnyMap returns nil for a nil map, so omitempty keys stay absent.
 func cloneAnyMap(m map[string]any) map[string]any {
 	if m == nil {
 		return nil
@@ -110,8 +97,7 @@ func cloneAnyMap(m map[string]any) map[string]any {
 	return out
 }
 
-// Clone returns a deep copy of the metadata, including nested maps such as
-// org_roles. Nil-safe.
+// Clone deep-copies the metadata, including nested maps such as org_roles.
 func (m AppMetadata) Clone() AppMetadata {
 	if m == nil {
 		return nil
@@ -119,8 +105,7 @@ func (m AppMetadata) Clone() AppMetadata {
 	return AppMetadata(cloneAnyMap(m))
 }
 
-// Clone returns a deep copy of the user, sharing no mutable state with the
-// receiver. Nil-safe.
+// Clone returns a deep copy of the user. Nil-safe.
 func (u *User) Clone() *User {
 	if u == nil {
 		return nil

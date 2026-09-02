@@ -16,23 +16,18 @@ const (
 	maxPerPage     = 100
 )
 
-// listWindow is the envelope Auth0 returns alongside a page of a collection.
-// The SDK decodes it into management.List, whose HasNext compares
-// total > start+limit, so these values decide whether a paginating caller
-// stops.
+// listWindow is the envelope alongside a page. The SDK's HasNext compares
+// total > start+limit, so these values decide whether a caller stops paging.
 type listWindow struct {
 	Start int
 	Limit int
 	Total int
 }
 
-// paginate resolves the page/per_page query parameters against a collection
-// size, returning half-open [lo, hi) bounds and the response envelope.
-//
-// Ignoring these parameters is not a harmless simplification: a caller that
-// walks pages until it sees an empty result — which is exactly what the SDK's
-// documentation tells organization-invitation callers to do — would be served
-// page 0 forever and never terminate.
+// paginate resolves page/per_page against a collection size, returning
+// half-open [lo, hi) bounds and the response envelope. Ignoring them would
+// serve page 0 forever to a caller paging until an empty result, which is what
+// the SDK tells invitation callers to do.
 func paginate(r *http.Request, total int) (lo, hi int, window listWindow) {
 	perPage := defaultPerPage
 	if v := r.URL.Query().Get("per_page"); v != "" {
@@ -48,9 +43,8 @@ func paginate(r *http.Request, total int) (lo, hi int, window listWindow) {
 		}
 	}
 
-	// Clamp the page before multiplying. A syntactically valid but huge page
-	// value would overflow int, yield a negative lower bound, and panic every
-	// handler that slices its collection with it. perPage is always >= 1 here.
+	// Clamp before multiplying: a huge page would overflow int and yield a
+	// negative lower bound, panicking the slice. perPage is always >= 1.
 	if maxPage := total/perPage + 1; page > maxPage {
 		page = maxPage
 	}
@@ -60,8 +54,25 @@ func paginate(r *http.Request, total int) (lo, hi int, window listWindow) {
 	return lo, hi, listWindow{Start: lo, Limit: perPage, Total: total}
 }
 
-// writeAuth0Error renders an error body in the Management API's shape, which
-// the SDK decodes into a management.Error carrying the right status.
+// writeList renders a page. Auth0 returns a bare array unless
+// include_totals=true; go-auth0 always sets it, so SDK callers get the
+// envelope and raw callers get what the API actually returns.
+func writeList(w http.ResponseWriter, r *http.Request, key string, items any, window listWindow, length int) {
+	if r.URL.Query().Get("include_totals") != "true" {
+		_ = json.NewEncoder(w).Encode(items)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		key:      items,
+		"start":  window.Start,
+		"limit":  window.Limit,
+		"length": length,
+		"total":  window.Total,
+	})
+}
+
+// writeAuth0Error renders the Management API's error shape, which the SDK
+// decodes into a management.Error.
 func writeAuth0Error(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -73,14 +84,10 @@ func writeAuth0Error(w http.ResponseWriter, status int, message string) {
 }
 
 // routeOrganizationPath dispatches /api/v2/organizations/{id} and its
-// subresources.
-//
-// An unrecognized subresource must 404. The previous router fell through to
-// the bare-organization handlers, which truncate the path at the first slash:
-// a DELETE on an unimplemented subpath (say .../invitations/{iid}) resolved to
-// the org id and deleted the organization itself, returning 204. Matching on
-// exact segment counts keeps an unimplemented route from mutating a different
-// resource than the caller named.
+// subresources. An unrecognized subresource must 404: the previous router fell
+// through to the bare-organization handlers, which truncate the path at the
+// first slash, so a DELETE on .../invitations/{iid} deleted the organization
+// itself and answered 204.
 func (s *Server) routeOrganizationPath(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/v2/organizations/")
 
@@ -168,21 +175,13 @@ func (s *Server) listOrganizations(w http.ResponseWriter, r *http.Request) {
 	lo, hi, window := paginate(r, len(all))
 	orgs := all[lo:hi]
 
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"organizations": orgs,
-		"start":         window.Start,
-		"limit":         window.Limit,
-		"length":        len(orgs),
-		"total":         window.Total,
-	})
+	writeList(w, r, "organizations", orgs, window, len(orgs))
 }
 
 func (s *Server) createOrganization(w http.ResponseWriter, r *http.Request) {
-	// enabled_connections rides along on organization creation in the
-	// Management API (and in the SDK's Organization struct). Dropping it would
-	// answer 201 while leaving the organization with no connections, so an
-	// invitation created straight afterwards would be rejected for a reason
-	// the caller cannot see.
+	// enabled_connections rides along on organization creation. Dropping it
+	// would answer 201 with an org that has no connections, so an immediate
+	// invitation would fail for an invisible reason.
 	var req struct {
 		config.Organization
 		EnabledConnections []struct {
@@ -207,8 +206,8 @@ func (s *Server) createOrganization(w http.ResponseWriter, r *http.Request) {
 		org.ID = "org_" + s.generateID()
 	}
 
-	// Store a copy so the response we serialize below shares no memory with
-	// the stored record a concurrent PATCH could be mutating.
+	// Store a copy: the response below must not share memory with the record
+	// a concurrent PATCH could be mutating.
 	stored := org.Clone()
 
 	s.mu.Lock()
@@ -224,9 +223,8 @@ func (s *Server) createOrganization(w http.ResponseWriter, r *http.Request) {
 			writeAuth0Error(w, http.StatusBadRequest, "connection "+ec.ConnectionID+" does not exist")
 			return
 		}
-		// A repeated connection_id would store two pairings for one
-		// connection, and a later DeleteConnection would remove only the
-		// first while answering 204.
+		// Two pairings for one connection would leave DeleteConnection
+		// removing only the first while answering 204.
 		for _, existing := range pairings {
 			if existing.ConnectionID == ec.ConnectionID {
 				s.mu.Unlock()
@@ -438,17 +436,11 @@ func (s *Server) handleUserOrganizations(w http.ResponseWriter, r *http.Request)
 	lo, hi, window := paginate(r, len(orgs))
 	page := orgs[lo:hi]
 
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"organizations": page,
-		"start":         window.Start,
-		"limit":         window.Limit,
-		"length":        len(page),
-		"total":         window.Total,
-	})
+	writeList(w, r, "organizations", page, window, len(page))
 }
 
 func (s *Server) listOrganizationMembers(w http.ResponseWriter, r *http.Request, orgID string) {
-	// Held across the member/user join below: both maps are read.
+	// held across the member/user join below
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -478,13 +470,15 @@ func (s *Server) listOrganizationMembers(w http.ResponseWriter, r *http.Request,
 			}
 		}
 
-		// Add roles array if member has a role (SDK expects array of role objects)
+		// The member role is a name; pair it with the registry's id so the
+		// SDK's role objects carry both.
 		if member.Role != "" {
+			id := s.roleIDByName(member.Role)
+			if id == "" {
+				id = member.Role
+			}
 			responseMember["roles"] = []map[string]interface{}{
-				{
-					"id":   member.Role,
-					"name": member.Role,
-				},
+				{"id": id, "name": member.Role},
 			}
 		}
 
@@ -494,13 +488,7 @@ func (s *Server) listOrganizationMembers(w http.ResponseWriter, r *http.Request,
 	lo, hi, window := paginate(r, len(responseMembers))
 	page := responseMembers[lo:hi]
 
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"members": page,
-		"start":   window.Start,
-		"limit":   window.Limit,
-		"length":  len(page),
-		"total":   window.Total,
-	})
+	writeList(w, r, "members", page, window, len(page))
 }
 
 func (s *Server) addOrganizationMember(w http.ResponseWriter, r *http.Request, orgID string) {
@@ -646,13 +634,7 @@ func (s *Server) listConnections(w http.ResponseWriter, r *http.Request) {
 	lo, hi, window := paginate(r, len(all))
 	conns := all[lo:hi]
 
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"connections": conns,
-		"start":       window.Start,
-		"limit":       window.Limit,
-		"length":      len(conns),
-		"total":       window.Total,
-	})
+	writeList(w, r, "connections", conns, window, len(conns))
 }
 
 func (s *Server) createConnection(w http.ResponseWriter, r *http.Request) {
@@ -737,12 +719,30 @@ func (s *Server) assignMemberRoles(w http.ResponseWriter, r *http.Request, orgID
 		return
 	}
 
+	// Auth0 takes role ids here. The mock's member role is a single value, so
+	// more than one cannot be modelled — say so rather than drop the rest.
+	if len(req.Roles) > 1 {
+		writeAuth0Error(w, http.StatusBadRequest,
+			"the auth0 mock models one role per member; got "+strconv.Itoa(len(req.Roles)))
+		return
+	}
+	// Auth0 takes role ids. This accepts a name too: the mock's own config
+	// seeds members by role name and pkg/client passes one, and tightening
+	// that is a change to this repo's helper API, not to Auth0 parity. The
+	// invitation path, which the onboarding design does exercise, is strict.
+	roleName := ""
+	if len(req.Roles) > 0 {
+		roleName = s.roleNameByID(req.Roles[0])
+		if roleName == "" {
+			roleName = req.Roles[0]
+		}
+	}
+
 	found := false
 	for i := range members {
 		if members[i].UserID == memberID {
-			// Use the first role from the array
-			if len(req.Roles) > 0 {
-				members[i].Role = req.Roles[0]
+			if roleName != "" {
+				members[i].Role = roleName
 			}
 			found = true
 			break
@@ -763,8 +763,8 @@ func (s *Server) assignMemberRoles(w http.ResponseWriter, r *http.Request, orgID
 			user.AppMetadata = config.AppMetadata{}
 		}
 		user.AppMetadata[config.AppMetaTenantID] = orgID
-		if len(req.Roles) > 0 {
-			user.AppMetadata[config.AppMetaRole] = req.Roles[0]
+		if roleName != "" {
+			user.AppMetadata[config.AppMetaRole] = roleName
 		}
 		s.users[memberID] = user
 	}
@@ -941,13 +941,7 @@ func (s *Server) listClients(w http.ResponseWriter, r *http.Request) {
 	lo, hi, window := paginate(r, len(all))
 	clients := all[lo:hi]
 
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"clients": clients,
-		"start":   window.Start,
-		"limit":   window.Limit,
-		"length":  len(clients),
-		"total":   window.Total,
-	})
+	writeList(w, r, "clients", clients, window, len(clients))
 }
 
 func (s *Server) createClient(w http.ResponseWriter, r *http.Request) {
@@ -1010,9 +1004,8 @@ func (s *Server) updateClient(w http.ResponseWriter, r *http.Request, clientID s
 		return
 	}
 
-	// Pointer fields distinguish "absent" from "present and empty", which is
-	// what lets a PATCH clear a value rather than only ever overwrite it with
-	// something non-empty. Mirrors the SDK's own client patch shape.
+	// Pointers distinguish absent from present-and-empty, so a PATCH can
+	// clear a value. Mirrors the SDK's client patch shape.
 	var updates struct {
 		Name             *string         `json:"name"`
 		Description      *string         `json:"description"`
@@ -1028,9 +1021,8 @@ func (s *Server) updateClient(w http.ResponseWriter, r *http.Request, clientID s
 		return
 	}
 
-	// Clear semantics apply only to optional fields. name is required at
-	// creation, so a present-but-empty name is a bad request rather than an
-	// instruction to blank it out.
+	// name is required at creation, so an empty one is a bad request rather
+	// than an instruction to clear it.
 	if updates.Name != nil && *updates.Name == "" {
 		s.mu.Unlock()
 		writeAuth0Error(w, http.StatusBadRequest, "name cannot be empty")

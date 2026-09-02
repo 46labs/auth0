@@ -90,20 +90,24 @@ type Connection struct {
 	Organizations  []string               `json:"organizations,omitempty" yaml:"organizations,omitempty" mapstructure:"organizations"` // Linked org IDs
 }
 
+// Role is a tenant-level role. PEE resolves its admin carrier role by name at
+// runtime, so ids are generated rather than configured.
+type Role struct {
+	ID          string `json:"id" yaml:"id" mapstructure:"id"`
+	Name        string `json:"name" yaml:"name" mapstructure:"name"`
+	Description string `json:"description,omitempty" yaml:"description,omitempty" mapstructure:"description"`
+}
+
 type OrganizationMember struct {
 	UserID string `json:"user_id" yaml:"user_id" mapstructure:"user_id"`
 	OrgID  string `json:"org_id" yaml:"org_id" mapstructure:"org_id"`
 	Role   string `json:"role,omitempty" yaml:"role,omitempty" mapstructure:"role"`
 }
 
-// OrganizationConnection is a connection enabled on an organization: the
-// /api/v2/organizations/{id}/enabled_connections sub-resource. Kept distinct
-// from Connection because it describes the pairing — the per-organization
-// login settings Auth0 attaches to it — not the connection definition.
-//
-// The connection's own name and strategy are not stored here; they are read
-// from the connection registry when a response is assembled, so there is one
-// source of truth for them.
+// OrganizationConnection is a connection enabled on an organization, the
+// enabled_connections sub-resource. Distinct from Connection: it holds the
+// per-organization login settings, not the connection definition. Name and
+// strategy are projected from the connection registry at response time.
 type OrganizationConnection struct {
 	OrgID                   string `json:"org_id"`
 	ConnectionID            string `json:"connection_id"`
@@ -112,12 +116,9 @@ type OrganizationConnection struct {
 	ShowAsButton            bool   `json:"show_as_button"`
 }
 
-// DeclaredOrganizationConnection is the config-file form of a pairing, kept
-// separate from the resolved OrganizationConnection above because the two
-// differ in exactly one way that matters: an omitted key here has to pick up
-// Auth0's default rather than Go's zero value. show_as_button defaults to
-// true, so a plain bool would silently disagree with what the API returns for
-// the same pairing created over HTTP.
+// DeclaredOrganizationConnection is the config-file form of a pairing.
+// Separate from the resolved form because an omitted show_as_button must pick
+// up Auth0's true default, not Go's false zero value.
 type DeclaredOrganizationConnection struct {
 	OrgID                   string `yaml:"org_id" mapstructure:"org_id"`
 	ConnectionID            string `yaml:"connection_id" mapstructure:"connection_id"`
@@ -147,9 +148,8 @@ const (
 	InvitationMaxTTLSec     = 2592000 // 30 days
 )
 
-// OrganizationInvitation is a pending invitation to an organization. Auth0
-// owns the whole acceptance lifecycle, so this record is the mock's entire
-// state for it: created on POST, removed on acceptance or expiry.
+// OrganizationInvitation is a pending invitation: created on POST, removed on
+// acceptance or expiry.
 type OrganizationInvitation struct {
 	ID             string `json:"id" yaml:"id" mapstructure:"id"`
 	OrganizationID string `json:"organization_id" yaml:"organization_id" mapstructure:"organization_id"`
@@ -157,22 +157,19 @@ type OrganizationInvitation struct {
 	InviteeEmail   string `json:"invitee_email" yaml:"invitee_email" mapstructure:"invitee_email"`
 	ClientID       string `json:"client_id" yaml:"client_id" mapstructure:"client_id"`
 	ConnectionID   string `json:"connection_id,omitempty" yaml:"connection_id,omitempty" mapstructure:"connection_id"`
-	// TicketID is the opaque value carried in the invitation URL's
-	// `invitation` query parameter and redeemed at login.
+	// carried in the invitation URL's `invitation` parameter, redeemed at login
 	TicketID      string      `json:"ticket_id" yaml:"ticket_id" mapstructure:"ticket_id"`
 	InvitationURL string      `json:"invitation_url" yaml:"invitation_url" mapstructure:"invitation_url"`
 	AppMetadata   AppMetadata `json:"app_metadata,omitempty" yaml:"app_metadata,omitempty" mapstructure:"app_metadata"`
 	UserMetadata  map[string]any
-	// Roles are the organization role ids granted to the invitee on
-	// acceptance. The design uses this as the carrier for the admin grant.
+	// role ids granted on acceptance; the carrier for the admin grant
 	Roles               []string  `json:"roles,omitempty" yaml:"roles,omitempty" mapstructure:"roles"`
 	SendInvitationEmail bool      `json:"send_invitation_email" yaml:"send_invitation_email" mapstructure:"send_invitation_email"`
 	CreatedAt           time.Time `json:"created_at" yaml:"created_at" mapstructure:"created_at"`
 	ExpiresAt           time.Time `json:"expires_at" yaml:"expires_at" mapstructure:"expires_at"`
 }
 
-// IsExpired reports whether the invitation has passed its expiry. Auth0 drops
-// expired invitations from the pending list rather than surfacing them.
+// IsExpired reports whether the invitation has passed its expiry.
 func (i *OrganizationInvitation) IsExpired(now time.Time) bool {
 	return !i.ExpiresAt.IsZero() && now.After(i.ExpiresAt)
 }
@@ -192,10 +189,7 @@ func (i *OrganizationInvitation) Clone() *OrganizationInvitation {
 	return &out
 }
 
-// Passwordless connection strategies. Auth0 refuses to create an organization
-// invitation unless the organization has a non-passwordless connection
-// enabled, because a passwordless connection has no credential for the
-// invitee to set on acceptance.
+// Auth0 refuses to create an invitation for a passwordless connection.
 const (
 	StrategyEmail = "email"
 	StrategySMS   = "sms"
@@ -216,9 +210,7 @@ type Client struct {
 	Callbacks    []string               `json:"callbacks,omitempty" yaml:"callbacks,omitempty" mapstructure:"callbacks"`
 	GrantTypes   []string               `json:"grant_types,omitempty" yaml:"grant_types,omitempty" mapstructure:"grant_types"`
 	JWTConfig    map[string]interface{} `json:"jwt_configuration,omitempty" yaml:"jwt_configuration,omitempty" mapstructure:"jwt_configuration"`
-	// InitiateLoginURI is the application's login initiation endpoint. Auth0
-	// resolves an organization invitation's invitation_url against it, and
-	// rejects invitation creation when the named client has none set.
+	// login initiation endpoint; invitation_url is resolved against it
 	InitiateLoginURI string `json:"initiate_login_uri,omitempty" yaml:"initiate_login_uri,omitempty" mapstructure:"initiate_login_uri"`
 }
 
@@ -236,12 +228,12 @@ type Config struct {
 	Port        int
 	CORSOrigins []string
 	Users       []User
-	// OrganizationConnections declares org/connection pairings explicitly, for
-	// per-organization login settings. Pairings are also derived from each
-	// Connection's Organizations list; an explicit entry here wins.
+	// explicit pairings, for per-organization login settings; also derived
+	// from each Connection's Organizations list, and an entry here wins
 	OrganizationConnections []DeclaredOrganizationConnection
 	Organizations           []Organization
 	Connections             []Connection
+	Roles                   []Role
 	Members                 []OrganizationMember
 	Clients                 []Client
 	Branding                Branding

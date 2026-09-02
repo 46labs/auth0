@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -19,10 +20,12 @@ import (
 type inviteFixture struct {
 	m            *management.Management
 	srv          *Server
+	ts           *httptest.Server
 	orgID        string
 	clientID     string
 	loginURI     string
 	connectionID string
+	adminRoleID  string
 }
 
 func newInviteFixture(t *testing.T) (*inviteFixture, func()) {
@@ -49,6 +52,14 @@ func newInviteFixture(t *testing.T) (*inviteFixture, func()) {
 		t.Fatalf("Organization.AddConnection: %v", err)
 	}
 
+	// pee provisions its admin carrier role at runtime by name; invitations
+	// then carry the resolved id.
+	adminRole := &management.Role{Name: auth0String("admin")}
+	if err := m.Role.Create(ctx, adminRole); err != nil {
+		ts.Close()
+		t.Fatalf("Role.Create: %v", err)
+	}
+
 	clientName := "Invite SPA"
 	appType := "spa"
 	loginURI := "https://app.example.test/login"
@@ -61,10 +72,12 @@ func newInviteFixture(t *testing.T) (*inviteFixture, func()) {
 	return &inviteFixture{
 		m:            m,
 		srv:          srv,
+		ts:           ts,
 		orgID:        "org_test",
 		clientID:     c.GetClientID(),
 		loginURI:     loginURI,
 		connectionID: conn.GetID(),
+		adminRoleID:  adminRole.GetID(),
 	}, ts.Close
 }
 
@@ -74,9 +87,12 @@ func (f *inviteFixture) invitation(email string) *management.OrganizationInvitat
 		Inviter:  &management.OrganizationInvitationInviter{Name: &inviter},
 		Invitee:  &management.OrganizationInvitationInvitee{Email: &email},
 		ClientID: &f.clientID,
-		Roles:    []string{"admin"},
+		Roles:    []string{f.adminRoleID},
 	}
 }
+
+// auth0String is the pointer-taking the SDK's optional fields require.
+func auth0String(s string) *string { return &s }
 
 // TestSDKCreateInvitation is the core of the design: a platform admin invites
 // an email address and gets back a URL that carries the ticket and the
@@ -106,8 +122,9 @@ func TestSDKCreateInvitation(t *testing.T) {
 	if inv.GetInviter().GetName() != "Platform Admin" {
 		t.Errorf("inviter.name = %q", inv.GetInviter().GetName())
 	}
-	if len(inv.Roles) != 1 || inv.Roles[0] != "admin" {
-		t.Errorf("roles = %+v, want [admin]", inv.Roles)
+	// roles are role ids on the wire; the name appears on acceptance.
+	if len(inv.Roles) != 1 || inv.Roles[0] != f.adminRoleID {
+		t.Errorf("roles = %+v, want [%s]", inv.Roles, f.adminRoleID)
 	}
 
 	// The URL is what the SPA forwards to loginWithRedirect, so its query

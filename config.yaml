@@ -102,6 +102,25 @@ connections:
     organizations:
       - "org_nextel_test"
 
+# The role registry. pee resolves its admin carrier role by name at runtime.
+roles:
+  - id: "rol_superadmin"
+    name: "superadmin"
+    description: "Platform superadmin"
+  - id: "rol_admin"
+    name: "admin"
+    description: "Tenant admin"
+  - id: "rol_user"
+    name: "user"
+    description: "Read-only tenant user"
+
+# Auto-membership is the primary onboarding path: authenticating against the
+# enterprise connection joins the org without an invitation.
+organizationConnections:
+  - org_id: "org_nextel_test"
+    connection_id: "con_enterprise"
+    assign_membership_on_login: true
+
 members:
   - user_id: "auth0|user_devone"
     org_id: "org_nextel_test"

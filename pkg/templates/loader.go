@@ -12,14 +12,11 @@ type Loader struct {
 	tmpl *template.Template
 }
 
-// templateFuncs are the helpers the shipped login templates expect. Without
-// them template parsing fails at startup, which is not something the server
-// can recover from, so keep this in step with templates/default.html.
+// templateFuncs are the helpers the shipped login templates expect; a missing
+// one fails template parsing at startup. Keep in step with templates/.
 var templateFuncs = template.FuncMap{
-	// substr takes (start, length, string) in Sprig's argument order, which is
-	// what the templates were written against. Bounds are clamped rather than
-	// panicking mid-render, and it counts runes so a multi-byte initial is not
-	// split in half.
+	// (start, length, string), Sprig's argument order. Clamps rather than
+	// panicking, and counts runes so a multi-byte initial stays whole.
 	"substr": func(start, length int, s string) string {
 		r := []rune(s)
 		if start < 0 {
@@ -59,9 +56,8 @@ func New(cfg *config.Config) (*Loader, error) {
 	return &Loader{tmpl: tmpl}, nil
 }
 
-// NewFromFile parses a login template from disk. The template is named after
-// the file because ParseFiles associates parsed templates by base name, and
-// Execute resolves the name the template was created with.
+// NewFromFile parses a login template from disk, named after the file because
+// ParseFiles associates by base name and Execute resolves the created name.
 func NewFromFile(path string) (*Loader, error) {
 	tmpl, err := template.New(filepath.Base(path)).Funcs(templateFuncs).ParseFiles(path)
 	if err != nil {

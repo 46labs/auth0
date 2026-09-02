@@ -64,7 +64,11 @@ func lookupPath(ctx map[string]any, path string) string {
 // buildPostLoginContext assembles the data context exposed to post_login
 // templates. Mirrors Auth0's `event` object shape at a high level: user,
 // authorization (org-scoped role), and client.
-func (s *Server) buildPostLoginContext(user *config.User, client *config.Client) map[string]any {
+// buildPostLoginContext takes the organization the login was scoped to rather
+// than reading app_metadata.tenant_id, so that for a user who belongs to
+// several organizations an action's ${authorization.role} resolves against the
+// one they actually logged in to.
+func (s *Server) buildPostLoginContext(user *config.User, client *config.Client, orgID string) map[string]any {
 	userMeta := map[string]any{}
 	for k, v := range user.UserMetadata {
 		userMeta[k] = v
@@ -87,13 +91,19 @@ func (s *Server) buildPostLoginContext(user *config.User, client *config.Client)
 	}
 
 	auth := map[string]any{}
-	orgID := user.AppMetadata.TenantID()
+	if orgID == "" {
+		orgID = user.AppMetadata.TenantID()
+	}
 	if orgID != "" {
 		auth["org_id"] = orgID
 		// Prod parity: derive the org-scoped role from app_metadata.org_roles[org]
 		// (the model consumers like pee use), so SDK writes to org_roles
 		// round-trip into the next token. Fall back to the org-membership config
 		// for legacy single-role setups.
+		//
+		// The flat app_metadata.role is deliberately not consulted here:
+		// authorization.role is the organization-scoped role, mirroring
+		// production where it comes from membership rather than a flat key.
 		if role := user.AppMetadata.OrgRole(orgID); role != "" {
 			auth["role"] = role
 		} else {
@@ -125,13 +135,15 @@ func (s *Server) buildPostLoginContext(user *config.User, client *config.Client)
 // applyPostLogin merges configured post_login claims into idClaims and
 // accessClaims. Namespaced claims are prefixed with the issuer; raw claims
 // land at the top level. Templates resolving to an empty value are dropped.
-func (s *Server) applyPostLogin(user *config.User, client *config.Client, idClaims, accessClaims jwt.MapClaims) {
+func (s *Server) applyPostLogin(
+	user *config.User, client *config.Client, orgID string, idClaims, accessClaims jwt.MapClaims,
+) {
 	pl := s.cfg.Actions.PostLogin
 	if pl == nil {
 		return
 	}
 
-	ctx := s.buildPostLoginContext(user, client)
+	ctx := s.buildPostLoginContext(user, client, orgID)
 	ns := strings.TrimSuffix(s.cfg.Issuer, "/") + "/"
 
 	merge := func(claims jwt.MapClaims, src map[string]string, namespaced bool) {

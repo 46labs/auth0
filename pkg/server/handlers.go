@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/46labs/auth0/pkg/config"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -68,6 +69,18 @@ func parseRedirectURI(raw string) *url.URL {
 	return u
 }
 
+// clientIDFromRequest reads the client from the body, then HTTP Basic.
+// x/oauth2 probes both styles, so a body-only read misidentifies the caller.
+func clientIDFromRequest(r *http.Request) string {
+	if id := r.FormValue("client_id"); id != "" {
+		return id
+	}
+	if id, _, ok := r.BasicAuth(); ok {
+		return id
+	}
+	return ""
+}
+
 func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w, r)
 	w.Header().Set("Content-Type", "application/json")
@@ -106,30 +119,70 @@ func (s *Server) handleJWKS(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// redirectAuthorizeError reports failure through the application's
+// redirect_uri, falling back to 400 when there is no usable target.
+func (s *Server) redirectAuthorizeError(w http.ResponseWriter, r *http.Request, code, description string) {
+	// A missing target is a malformed request, not the failure being reported.
+	redirectURI := r.URL.Query().Get("redirect_uri")
+	if redirectURI == "" {
+		http.Error(w, `{"error":"invalid_request","error_description":"redirect_uri is required"}`,
+			http.StatusBadRequest)
+		return
+	}
+	u := parseRedirectURI(redirectURI)
+	if u == nil {
+		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
+		return
+	}
+
+	q := u.Query()
+	q.Set("error", code)
+	q.Set("error_description", description)
+	if state := r.URL.Query().Get("state"); state != "" {
+		q.Set("state", state)
+	}
+	u.RawQuery = q.Encode()
+	http.Redirect(w, r, u.String(), http.StatusFound)
+}
+
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
 		// Handle prompt=none (silent auth check from SDK iframes).
 		// No server-side sessions exist in the mock, so always return login_required.
 		if r.URL.Query().Get("prompt") == "none" {
-			redirectURI := r.URL.Query().Get("redirect_uri")
-			if redirectURI == "" {
-				http.Error(w, `{"error":"invalid_request"}`, 400)
-				return
-			}
-			u := parseRedirectURI(redirectURI)
-			if u == nil {
-				http.Error(w, `{"error":"invalid_request"}`, 400)
-				return
-			}
-			q := u.Query()
-			q.Set("error", "login_required")
-			q.Set("error_description", "Login required")
-			if state := r.URL.Query().Get("state"); state != "" {
-				q.Set("state", state)
-			}
-			u.RawQuery = q.Encode()
-			http.Redirect(w, r, u.String(), http.StatusFound)
+			s.redirectAuthorizeError(w, r, "login_required", "Login required")
 			return
+		}
+
+		loginHint := r.URL.Query().Get("login_hint")
+
+		// Validate before rendering the page, so a revoked or expired ticket
+		// fails immediately rather than after a code is entered. The invited
+		// address becomes the login hint, as Auth0 prefills it.
+		if ticket, ok := ticketFromQuery(r.URL.Query()); ok {
+			s.mu.Lock()
+			inv, err := s.lookupInvitation(ticket, time.Now())
+			var invitee string
+			if err == nil {
+				invitee = inv.InviteeEmail
+			}
+			s.mu.Unlock()
+
+			if err != nil {
+				s.redirectAuthorizeError(w, r, "invalid_request", err.Error())
+				return
+			}
+			loginHint = invitee
+		} else if orgID := r.URL.Query().Get("organization"); orgID != "" {
+			// Membership needs an authenticated user, but an unknown org can
+			// be refused before the login page.
+			s.mu.RLock()
+			_, known := s.organizations[orgID]
+			s.mu.RUnlock()
+			if !known {
+				s.redirectAuthorizeError(w, r, "invalid_request", errOrgNotFound.Error())
+				return
+			}
 		}
 
 		sessionID := s.generateID()
@@ -137,7 +190,6 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		s.pending[sessionID] = r.URL.RawQuery
 		s.mu.Unlock()
 
-		loginHint := r.URL.Query().Get("login_hint")
 		data := map[string]interface{}{
 			"SessionID": sessionID,
 			"Branding":  s.cfg.Branding,
@@ -170,52 +222,79 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if code != "" {
-			if code == "123456" {
-				user := s.findUser(identifier)
+			if code != "123456" {
+				http.Error(w, "Invalid code", 400)
+				return
+			}
+
+			params, _ := url.ParseQuery(originalQuery)
+
+			// Validate before minting, so a bad redirect_uri cannot leave an
+			// orphaned auth code behind.
+			redirectURI := params.Get("redirect_uri")
+			redirectURL := parseRedirectURI(redirectURI)
+			if redirectURL == nil {
+				http.Error(w, "Invalid redirect_uri", 400)
+				return
+			}
+
+			// Auth0 owns acceptance: validate the ticket, create the user when
+			// new, join the org, assign the role, consume the ticket.
+			var user *config.User
+			orgID := params.Get("organization")
+
+			if ticket, ok := ticketFromQuery(params); ok {
+				redeemed, err := s.redeemInvitation(ticket, identifier, time.Now())
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				user = redeemed
+				orgID = ticket.OrgID
+			} else {
+				user = s.findUser(identifier)
 				// Auto-create user if not found (like real Auth0 passwordless)
 				if user == nil {
 					user = s.autoCreateUser(identifier)
 				}
-				if user != nil {
-					params, _ := url.ParseQuery(originalQuery)
+				if user == nil {
+					http.Error(w, "Invalid code", 400)
+					return
+				}
 
-					// Validate the redirect target before minting the code, so a
-					// bad redirect_uri cannot leave an orphaned auth code behind.
-					redirectURI := params.Get("redirect_uri")
-					redirectURL := parseRedirectURI(redirectURI)
-					if redirectURL == nil {
-						http.Error(w, "Invalid redirect_uri", 400)
-						return
-					}
-
-					authCode := s.generateID()
-
-					s.mu.Lock()
-					s.verified[authCode] = *user
-					if codeChallenge := params.Get("code_challenge"); codeChallenge != "" {
-						s.verifiers[authCode] = codeChallenge
-					}
-					if nonce := params.Get("nonce"); nonce != "" {
-						s.nonces[authCode] = nonce
-					}
-					if scope := params.Get("scope"); scope != "" {
-						s.scopes[authCode] = scope
-					}
-					delete(s.pending, sessionID)
-					s.mu.Unlock()
-
-					query := redirectURL.Query()
-					query.Set("code", authCode)
-					if state := params.Get("state"); state != "" {
-						query.Set("state", state)
-					}
-					redirectURL.RawQuery = query.Encode()
-
-					http.Redirect(w, r, redirectURL.String(), http.StatusFound)
+				if err := s.authorizeOrgLogin(user, orgID); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
 			}
-			http.Error(w, "Invalid code", 400)
+			if user == nil {
+				http.Error(w, "Invalid code", 400)
+				return
+			}
+
+			code := s.generateID()
+			state := &authCode{
+				User:          *user,
+				CodeChallenge: params.Get("code_challenge"),
+				Nonce:         params.Get("nonce"),
+				Scope:         params.Get("scope"),
+				ClientID:      params.Get("client_id"),
+				OrgID:         orgID,
+			}
+
+			s.mu.Lock()
+			s.authCodes[code] = state
+			delete(s.pending, sessionID)
+			s.mu.Unlock()
+
+			query := redirectURL.Query()
+			query.Set("code", code)
+			if st := params.Get("state"); st != "" {
+				query.Set("state", st)
+			}
+			redirectURL.RawQuery = query.Encode()
+
+			http.Redirect(w, r, redirectURL.String(), http.StatusFound)
 			return
 		}
 
@@ -239,7 +318,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 
 	_ = parseTokenBody(r)
 	grantType := r.FormValue("grant_type")
-	clientID := r.FormValue("client_id")
+	clientID := clientIDFromRequest(r)
 
 	// Handle client_credentials flow for M2M
 	if grantType == "client_credentials" {
@@ -313,7 +392,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.mu.RLock()
-		userID, exists := s.refreshTokens[refreshToken]
+		issued, exists := s.refreshTokens[refreshToken]
 		s.mu.RUnlock()
 
 		if !exists {
@@ -321,10 +400,21 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		user := s.getUserByID(userID)
+		// Load first: the account can be deleted while its refresh token lives.
+		user := s.getUserByID(issued.UserID)
 		if user == nil {
 			http.Error(w, `{"error":"invalid_grant","error_description":"User not found"}`, 400)
 			return
+		}
+
+		// The org is the one the original login was scoped to.
+		orgID := issued.OrgID
+		if orgID == "" {
+			orgID = user.AppMetadata.TenantID()
+		}
+
+		if seeded := s.seedOrgRoles(issued.UserID, orgID); seeded != nil {
+			user = seeded
 		}
 
 		now := time.Now()
@@ -340,11 +430,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			"scope": "openid profile email",
 		}
 
-		if user.AppMetadata.TenantID() != "" {
-			accessClaims["org_id"] = user.AppMetadata.TenantID()
+		if orgID != "" {
+			accessClaims["org_id"] = orgID
 		}
-		if user.AppMetadata.Role() != "" {
-			accessClaims[ns+"role"] = user.AppMetadata.Role()
+		if role := roleForOrg(user, orgID); role != "" {
+			accessClaims[ns+"role"] = role
 		}
 
 		idClaims := jwt.MapClaims{
@@ -376,15 +466,15 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// org_id is a top-level claim (matches production Auth0 Organizations)
-		if user.AppMetadata.TenantID() != "" {
-			idClaims["org_id"] = user.AppMetadata.TenantID()
+		if orgID != "" {
+			idClaims["org_id"] = orgID
 		}
 		// role remains namespaced (requires Auth0 Action in production)
-		if user.AppMetadata.Role() != "" {
-			idClaims[ns+"role"] = user.AppMetadata.Role()
+		if role := roleForOrg(user, orgID); role != "" {
+			idClaims[ns+"role"] = role
 		}
 
-		s.applyPostLogin(user, s.lookupClient(clientID), idClaims, accessClaims)
+		s.applyPostLogin(user, s.lookupClient(clientID), orgID, idClaims, accessClaims)
 
 		accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
 		accessToken.Header["kid"] = "key-1"
@@ -426,20 +516,15 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	// Handle authorization_code flow (existing logic)
 	code := r.FormValue("code")
 
-	// Claim the code and everything hanging off it in one write lock, before
-	// issuing anything. Authorization codes are single-use, so a concurrent
-	// second exchange of the same code has to lose here rather than race the
-	// delete and also get a 200 (with the nonce and requested scope already
-	// pulled out from under it).
+	// Claim the code atomically: codes are single-use, so a concurrent second
+	// exchange must lose rather than race the delete. The client check sits
+	// before the delete so a rejected exchange does not burn the code —
+	// clients probing both auth styles would consume it on the losing attempt.
 	s.mu.Lock()
-	user, exists := s.verified[code]
-	nonce, hasNonce := s.nonces[code]
-	requestedScope := s.scopes[code]
-	if exists {
-		delete(s.verified, code)
-		delete(s.verifiers, code)
-		delete(s.nonces, code)
-		delete(s.scopes, code)
+	claimed, exists := s.authCodes[code]
+	wrongClient := exists && claimed.ClientID != "" && clientID != claimed.ClientID
+	if exists && !wrongClient {
+		delete(s.authCodes, code)
 	}
 	s.mu.Unlock()
 
@@ -447,9 +532,28 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid code", 400)
 		return
 	}
+	if wrongClient {
+		http.Error(w,
+			`{"error":"invalid_grant","error_description":"the code was issued to a different client"}`,
+			http.StatusBadRequest)
+		return
+	}
 
-	// Always get the latest user data from s.users to include updated AppMetadata
-	if latestUser := s.getUserByID(user.ID); latestUser != nil {
+	user := claimed.User
+	nonce, hasNonce := claimed.Nonce, claimed.Nonce != ""
+	requestedScope := claimed.Scope
+
+	// The scoped organization wins over the stored tenant, so a member of
+	// several gets a token for the one they logged in to.
+	orgID := claimed.OrgID
+	if orgID == "" {
+		orgID = user.AppMetadata.TenantID()
+	}
+
+	// Post-Login Action parity, and it reads back the latest AppMetadata.
+	if seeded := s.seedOrgRoles(user.ID, orgID); seeded != nil {
+		user = *seeded
+	} else if latestUser := s.getUserByID(user.ID); latestUser != nil {
 		user = *latestUser
 	}
 
@@ -489,11 +593,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		idClaims["family_name"] = nameParts[1]
 	}
 
-	if user.AppMetadata.TenantID() != "" {
-		idClaims["org_id"] = user.AppMetadata.TenantID()
+	if orgID != "" {
+		idClaims["org_id"] = orgID
 	}
-	if user.AppMetadata.Role() != "" {
-		idClaims[ns+"role"] = user.AppMetadata.Role()
+	if role := roleForOrg(&user, orgID); role != "" {
+		idClaims[ns+"role"] = role
 	}
 
 	idToken := jwt.NewWithClaims(jwt.SigningMethodRS256, idClaims)
@@ -509,15 +613,15 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// org_id is a top-level claim (matches production Auth0 Organizations)
-	if user.AppMetadata.TenantID() != "" {
-		accessClaims["org_id"] = user.AppMetadata.TenantID()
+	if orgID != "" {
+		accessClaims["org_id"] = orgID
 	}
 	// role remains namespaced (requires Auth0 Action in production)
-	if user.AppMetadata.Role() != "" {
-		accessClaims[ns+"role"] = user.AppMetadata.Role()
+	if role := roleForOrg(&user, orgID); role != "" {
+		accessClaims[ns+"role"] = role
 	}
 
-	s.applyPostLogin(&user, s.lookupClient(clientID), idClaims, accessClaims)
+	s.applyPostLogin(&user, s.lookupClient(clientID), orgID, idClaims, accessClaims)
 
 	accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
 	accessToken.Header["kid"] = "key-1"
@@ -534,13 +638,12 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate refresh token if offline_access scope was requested. The scope
-	// was captured when the code was claimed above.
+	// The scope was captured when the code was claimed above.
 	var refreshToken string
 	if strings.Contains(requestedScope, "offline_access") {
 		refreshToken = "rt_" + base64.RawURLEncoding.EncodeToString([]byte(s.generateID()))
 		s.mu.Lock()
-		s.refreshTokens[refreshToken] = user.ID
+		s.refreshTokens[refreshToken] = &refreshTokenState{UserID: user.ID, OrgID: orgID}
 		s.mu.Unlock()
 	}
 

@@ -9,10 +9,8 @@ import (
 	"github.com/46labs/auth0/pkg/config"
 )
 
-// orgConnectionView is the wire shape of an enabled connection: the stored
-// pairing, plus the connection's own name and strategy which Auth0 nests under
-// "connection". The nested details are projected from the connection registry
-// at response time rather than duplicated in storage.
+// orgConnectionView is the wire shape: the stored pairing plus the
+// connection's name and strategy, which Auth0 nests under "connection".
 type orgConnectionView struct {
 	ConnectionID            string                `json:"connection_id"`
 	AssignMembershipOnLogin bool                  `json:"assign_membership_on_login"`
@@ -26,8 +24,7 @@ type orgConnectionDetails struct {
 	Strategy string `json:"strategy"`
 }
 
-// viewOrgConnection projects a stored pairing into its wire shape. Callers
-// must hold at least a read lock.
+// viewOrgConnection requires the caller to hold at least a read lock.
 func (s *Server) viewOrgConnection(oc config.OrganizationConnection) orgConnectionView {
 	view := orgConnectionView{
 		ConnectionID:            oc.ConnectionID,
@@ -214,8 +211,7 @@ func (s *Server) updateOrganizationConnection(w http.ResponseWriter, r *http.Req
 		if pairings[i].ConnectionID != connectionID {
 			continue
 		}
-		// Apply to a copy, validate the result, then commit — a rejected
-		// patch must leave the stored pairing untouched.
+		// Apply to a copy so a rejected patch leaves the stored pairing alone.
 		updated := pairings[i]
 		if req.AssignMembershipOnLogin != nil {
 			updated.AssignMembershipOnLogin = *req.AssignMembershipOnLogin
@@ -258,8 +254,7 @@ func (s *Server) deleteOrganizationConnection(w http.ResponseWriter, orgID, conn
 	writeAuth0Error(w, http.StatusNotFound, "connection is not enabled on this organization")
 }
 
-// isConnectionEnabled reports whether the connection is enabled on the
-// organization. Callers must hold the lock.
+// isConnectionEnabled requires the caller to hold the lock.
 func (s *Server) isConnectionEnabled(orgID, connectionID string) bool {
 	for _, oc := range s.orgConnections[orgID] {
 		if oc.ConnectionID == connectionID {
@@ -269,11 +264,9 @@ func (s *Server) isConnectionEnabled(orgID, connectionID string) bool {
 	return false
 }
 
-// validOrgConnection rejects pairing states Auth0 disallows. Signup can only
-// be enabled when membership is granted automatically, otherwise a user could
-// sign up into an organization they never become a member of. Validating the
-// resulting state (rather than the request fields) is what stops a PATCH of
-// either field alone from reaching the invalid combination.
+// validOrgConnection rejects pairings Auth0 disallows. Validating the
+// resulting state, not the request fields, is what stops a PATCH of either
+// field alone from reaching the invalid combination.
 func validOrgConnection(oc config.OrganizationConnection) error {
 	if oc.IsSignupEnabled && !oc.AssignMembershipOnLogin {
 		return errSignupWithoutMembership
@@ -284,9 +277,8 @@ func validOrgConnection(oc config.OrganizationConnection) error {
 var errSignupWithoutMembership = errors.New(
 	"is_signup_enabled requires assign_membership_on_login to be true")
 
-// hasNonPasswordlessConnection reports whether the organization has at least
-// one enabled connection whose strategy is not passwordless. Auth0 requires
-// this before an invitation may be created. Callers must hold the lock.
+// hasNonPasswordlessConnection reports whether the org has one, which Auth0
+// requires before an invitation may be created. Caller holds the lock.
 func (s *Server) hasNonPasswordlessConnection(orgID string) bool {
 	for _, oc := range s.orgConnections[orgID] {
 		conn, ok := s.connections[oc.ConnectionID]
@@ -297,8 +289,7 @@ func (s *Server) hasNonPasswordlessConnection(orgID string) bool {
 	return false
 }
 
-// orgIDFromPath extracts the organization id from an
-// /api/v2/organizations/{id}/... path.
+// orgIDFromPath extracts the id from /api/v2/organizations/{id}/...
 func orgIDFromPath(path string) string {
 	rest := strings.TrimPrefix(path, "/api/v2/organizations/")
 	if idx := strings.Index(rest, "/"); idx != -1 {
