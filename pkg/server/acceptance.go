@@ -14,17 +14,19 @@ import (
 // separates them so a failing local test says which rule tripped.
 var (
 	// unknown, already-redeemed, revoked or expired — indistinguishable by design
-	errInvitationNotFound     = errors.New("the invitation is not valid")
-	errInvitationWrongInvitee = errors.New("the invitation was issued to a different address")
-	errInvitationWrongClient  = errors.New("the invitation was issued for a different application")
-	errInvitationRoleGone     = errors.New("the invitation's role no longer exists")
+	errInvitationNotFound        = errors.New("the invitation is not valid")
+	errInvitationWrongInvitee    = errors.New("the invitation was issued to a different address")
+	errInvitationWrongClient     = errors.New("the invitation was issued for a different application")
+	errInvitationRoleGone        = errors.New("the invitation's role no longer exists")
+	errInvitationWrongConnection = errors.New("the invitation requires a different connection")
 )
 
 // invitationTicket identifies an invitation in a login request.
 type invitationTicket struct {
-	OrgID    string
-	TicketID string
-	ClientID string
+	OrgID        string
+	TicketID     string
+	ClientID     string
+	ConnectionID string
 }
 
 // ticketFromQuery returns false for an ordinary login carrying no invitation.
@@ -34,9 +36,10 @@ func ticketFromQuery(q url.Values) (invitationTicket, bool) {
 		return invitationTicket{}, false
 	}
 	return invitationTicket{
-		OrgID:    q.Get("organization"),
-		TicketID: ticketID,
-		ClientID: q.Get("client_id"),
+		OrgID:        q.Get("organization"),
+		TicketID:     ticketID,
+		ClientID:     q.Get("client_id"),
+		ConnectionID: q.Get("connection"),
 	}, true
 }
 
@@ -60,6 +63,11 @@ func (s *Server) lookupInvitation(t invitationTicket, now time.Time) (*config.Or
 		if pending[i].ClientID != "" && t.ClientID != pending[i].ClientID {
 			return nil, errInvitationWrongClient
 		}
+		// An invitation that names a connection forces authentication through
+		// it, so a login on any other connection cannot redeem it.
+		if pending[i].ConnectionID != "" && t.ConnectionID != pending[i].ConnectionID {
+			return nil, errInvitationWrongConnection
+		}
 		return &pending[i], nil
 	}
 	return nil, errInvitationNotFound
@@ -68,7 +76,7 @@ func (s *Server) lookupInvitation(t invitationTicket, now time.Time) (*config.Or
 // authorizeOrgLoginLocked authorizes an org-scoped login that is not an
 // invitation redemption. Without it any caller could name an arbitrary
 // organization and get a token carrying its org_id. Caller holds the lock.
-func (s *Server) authorizeOrgLoginLocked(user *config.User, orgID string) error {
+func (s *Server) authorizeOrgLoginLocked(user *config.User, orgID, connectionID string) error {
 	if orgID == "" {
 		return nil
 	}
@@ -84,8 +92,13 @@ func (s *Server) authorizeOrgLoginLocked(user *config.User, orgID string) error 
 
 	// Auth0's escape hatch: the directory self-serves into the org by
 	// authenticating against a connection that grants membership on login.
+	// It has to be *that* connection — otherwise an email OTP would autojoin
+	// through an unrelated enterprise pairing.
+	if connectionID == "" {
+		return errOrgNotMember
+	}
 	for _, oc := range s.orgConnections[orgID] {
-		if !oc.AssignMembershipOnLogin {
+		if oc.ConnectionID != connectionID || !oc.AssignMembershipOnLogin {
 			continue
 		}
 		stored, ok := s.users[user.ID]
@@ -106,10 +119,10 @@ var (
 )
 
 // authorizeOrgLogin is authorizeOrgLoginLocked with the lock taken.
-func (s *Server) authorizeOrgLogin(user *config.User, orgID string) error {
+func (s *Server) authorizeOrgLogin(user *config.User, orgID, connectionID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.authorizeOrgLoginLocked(user, orgID)
+	return s.authorizeOrgLoginLocked(user, orgID, connectionID)
 }
 
 // roleForOrg resolves the role claim for the scoped organization. org_roles is
@@ -142,6 +155,17 @@ func (s *Server) redeemInvitation(t invitationTicket, identifier string, now tim
 		return nil, errInvitationWrongInvitee
 	}
 
+	// Resolve the role before touching the user store: a role deleted between
+	// create and acceptance must fail the redemption without leaving an
+	// orphaned account behind.
+	role := ""
+	if len(inv.Roles) > 0 {
+		role = s.roleNameByID(inv.Roles[0])
+		if role == "" {
+			return nil, errInvitationRoleGone
+		}
+	}
+
 	user := s.findUserLocked(inv.InviteeEmail)
 	if user == nil {
 		user = s.autoCreateUserLocked(inv.InviteeEmail)
@@ -150,17 +174,6 @@ func (s *Server) redeemInvitation(t invitationTicket, identifier string, now tim
 	stored, ok := s.users[user.ID]
 	if !ok {
 		return nil, errInvitationNotFound
-	}
-
-	// Invitations carry role ids; org_roles holds the name. A role deleted
-	// between create and acceptance must fail the redemption, not quietly
-	// grant nothing.
-	role := ""
-	if len(inv.Roles) > 0 {
-		role = s.roleNameByID(inv.Roles[0])
-		if role == "" {
-			return nil, errInvitationRoleGone
-		}
 	}
 
 	s.addMemberLocked(t.OrgID, stored, role)

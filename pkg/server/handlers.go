@@ -242,6 +242,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			// new, join the org, assign the role, consume the ticket.
 			var user *config.User
 			orgID := params.Get("organization")
+			connectionID := params.Get("connection")
 
 			if ticket, ok := ticketFromQuery(params); ok {
 				redeemed, err := s.redeemInvitation(ticket, identifier, time.Now())
@@ -262,7 +263,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 
-				if err := s.authorizeOrgLogin(user, orgID); err != nil {
+				if err := s.authorizeOrgLogin(user, orgID, connectionID); err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
@@ -280,6 +281,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 				Scope:         params.Get("scope"),
 				ClientID:      params.Get("client_id"),
 				OrgID:         orgID,
+				ConnectionID:  connectionID,
 			}
 
 			s.mu.Lock()
@@ -397,6 +399,14 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 
 		if !exists {
 			http.Error(w, `{"error":"invalid_grant","error_description":"Invalid refresh token"}`, 400)
+			return
+		}
+		// The token belongs to the client the login was authorized for;
+		// otherwise the audience and action client context could be swapped.
+		if issued.ClientID != "" && clientID != issued.ClientID {
+			http.Error(w,
+				`{"error":"invalid_grant","error_description":"the refresh token was issued to a different client"}`,
+				http.StatusBadRequest)
 			return
 		}
 
@@ -643,7 +653,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(requestedScope, "offline_access") {
 		refreshToken = "rt_" + base64.RawURLEncoding.EncodeToString([]byte(s.generateID()))
 		s.mu.Lock()
-		s.refreshTokens[refreshToken] = &refreshTokenState{UserID: user.ID, OrgID: orgID}
+		s.refreshTokens[refreshToken] = &refreshTokenState{
+			UserID:   user.ID,
+			OrgID:    orgID,
+			ClientID: claimed.ClientID,
+		}
 		s.mu.Unlock()
 	}
 

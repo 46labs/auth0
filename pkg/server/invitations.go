@@ -352,20 +352,14 @@ func (s *Server) deleteOrganizationInvitation(w http.ResponseWriter, orgID, invi
 
 // invitationURL builds <login_uri>?invitation=<ticket>&organization=<org>
 // &organization_name=<name>, which the SPA forwards to loginWithRedirect.
-// Parsed rather than concatenated: a hash-routed login URI
-// (https://app.test/#/login) would otherwise bury the parameters in the
-// fragment, where the browser never exposes them as query values.
+// Parsed rather than concatenated so an existing query survives.
 func invitationURL(initiateLoginURI, ticketID string, org *config.Organization) (string, error) {
 	u, err := url.Parse(initiateLoginURI)
 	if err != nil {
 		return "", err
 	}
-	// url.Parse accepts relative references, so "/login" parses cleanly.
-	if !u.IsAbs() || u.Host == "" {
-		return "", fmt.Errorf("initiate_login_uri must be absolute with a host, got %q", initiateLoginURI)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("initiate_login_uri must be http or https, got scheme %q", u.Scheme)
+	if err := validateInitiateLoginURI(initiateLoginURI); err != nil {
+		return "", err
 	}
 
 	q := u.Query()
@@ -374,6 +368,27 @@ func invitationURL(initiateLoginURI, ticketID string, org *config.Organization) 
 	q.Set("organization_name", org.Name)
 	u.RawQuery = q.Encode()
 
-	// String orders the query before the fragment.
 	return u.String(), nil
+}
+
+// validateInitiateLoginURI enforces what the Management API requires of the
+// field: absolute https with no fragment. go-auth0 states it on the struct
+// ("must be https and cannot contain a fragment"), so accepting http or a
+// fragment would green-light a client real Auth0 refuses.
+func validateInitiateLoginURI(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("initiate_login_uri is not a valid URL: %w", err)
+	}
+	// url.Parse accepts relative references, so "/login" parses cleanly.
+	if !u.IsAbs() || u.Host == "" {
+		return fmt.Errorf("initiate_login_uri must be absolute with a host, got %q", raw)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("initiate_login_uri must be https, got scheme %q", u.Scheme)
+	}
+	if u.Fragment != "" || strings.Contains(raw, "#") {
+		return fmt.Errorf("initiate_login_uri cannot contain a fragment, got %q", raw)
+	}
+	return nil
 }

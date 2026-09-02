@@ -16,35 +16,26 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// authCode is everything a pending authorization code carries from the
-// /authorize redirect through to its single exchange at /oauth/token. It
-// replaced four parallel maps keyed by the same code; org-scoped login needs
-// one more field, and a fifth parallel map is where correctness goes to die.
+// authCode is the state a pending authorization code carries from the
+// /authorize redirect to its single exchange at /oauth/token. The client,
+// organization and connection are the ones the login was authorized for; the
+// exchange and the refresh path must not be able to substitute others.
 type authCode struct {
 	User          config.User
 	CodeChallenge string
 	Nonce         string
 	Scope         string
-	// ClientID is the application the code was issued to. The exchange must
-	// present the same one, otherwise an invitation validated for application
-	// A could be exchanged as B — the token audience and the action's client
-	// context would both be B, defeating the invitation's client binding.
-	ClientID string
-	// OrgID is the organization the login was scoped to, from the
-	// `organization` authorize parameter. Auth0 puts this on the token as
-	// org_id independently of the user's app_metadata, so a user who belongs
-	// to several organizations gets a token for the one they logged in to.
-	OrgID string
+	ClientID      string
+	OrgID         string
+	ConnectionID  string
 }
 
-// refreshToken is the state behind an issued refresh token. It carries the
-// organization the original login was scoped to: without it, refreshing
-// rebuilds org_id from the user's current app_metadata, so a token minted for
-// one organization could come back scoped to another after the user later
-// joins one.
+// refreshTokenState carries the bindings of the login that issued the token,
+// so a refresh cannot re-scope it to another client or organization.
 type refreshTokenState struct {
-	UserID string
-	OrgID  string
+	UserID   string
+	OrgID    string
+	ClientID string
 }
 
 type Server struct {
@@ -63,10 +54,8 @@ type Server struct {
 	clients       map[string]*config.Client
 	roles         map[string]*config.Role
 
-	// orgConnections holds the enabled_connections pairings, keyed by org id.
 	orgConnections map[string][]config.OrganizationConnection
-	// invitations holds pending organization invitations, keyed by org id and
-	// kept in creation order.
+	// keyed by org id, in creation order
 	invitations map[string][]config.OrganizationInvitation
 
 	mu sync.RWMutex
@@ -133,10 +122,9 @@ func New(cfg *config.Config) (*Server, error) {
 	}, nil
 }
 
-// buildOrgConnections seeds the enabled_connections pairings. Each connection
-// names the organizations it is enabled on, which is the shape existing config
-// files use; explicit OrganizationConnections entries carry per-organization
-// login settings and win over a derived pairing for the same pair.
+// buildOrgConnections seeds the enabled_connections pairings from each
+// connection's Organizations list. An explicit OrganizationConnections entry
+// wins over a derived pairing for the same pair.
 func buildOrgConnections(cfg *config.Config) map[string][]config.OrganizationConnection {
 	out := make(map[string][]config.OrganizationConnection)
 
@@ -208,9 +196,8 @@ func (s *Server) Start() error {
 	return http.ListenAndServe(addr, s.Handler())
 }
 
-// generateID mints an opaque identifier. Unpadded, because real Auth0 ids
-// carry no "==" tail and these land in URL paths and query strings where the
-// padding only invites encoding mistakes in consumers.
+// generateID mints an opaque identifier. Unpadded: real Auth0 ids carry no
+// "==" tail, and these land in URL paths and query strings.
 func (s *Server) generateID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
@@ -223,14 +210,12 @@ func (s *Server) findUser(identifier string) *config.User {
 	return s.findUserLocked(identifier)
 }
 
-// findUserLocked is findUser without the lock, for callers that need the
-// lookup to be atomic with what they do next. Callers must hold the lock.
+// findUserLocked requires the caller to hold the lock.
 func (s *Server) findUserLocked(identifier string) *config.User {
 	// Determine if email or phone
 	if contact.IsEmail(identifier) {
-		// Case-insensitive, as Auth0 treats email identifiers. An exact
-		// compare here would miss an existing account whose stored casing
-		// differs and silently create a duplicate.
+		// Case-insensitive, as Auth0 treats email identifiers; an exact
+		// compare would miss an account whose stored casing differs.
 		for _, u := range s.users {
 			if strings.EqualFold(u.Email, identifier) {
 				return u.Clone()
@@ -259,10 +244,7 @@ func (s *Server) autoCreateUser(identifier string) *config.User {
 	return s.autoCreateUserLocked(identifier)
 }
 
-// autoCreateUserLocked is autoCreateUser without the lock, for callers that
-// need creation to be atomic with what they do next (invitation redemption
-// finds-or-creates and grants membership in one step). Callers must hold the
-// write lock.
+// autoCreateUserLocked requires the caller to hold the write lock.
 func (s *Server) autoCreateUserLocked(identifier string) *config.User {
 	userID := "auth0|" + s.generateID()
 	userIDPart := userID[6:] // Extract part after "auth0|"
@@ -311,8 +293,7 @@ func (s *Server) autoCreateUserLocked(identifier string) *config.User {
 }
 
 // getUserByID returns a copy of the stored user, or nil when unknown. The copy
-// is what lets callers serialize or read the record after the lock is released
-// without racing an in-flight PATCH.
+// lets callers read it after the lock is released without racing a PATCH.
 func (s *Server) getUserByID(userID string) *config.User {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -323,12 +304,9 @@ func (s *Server) getUserByID(userID string) *config.User {
 	return nil
 }
 
-// IssueAuthCode mints an authorization code for a user without driving the
-// login UI, so tests can exercise the token endpoint directly. Returns the
-// code to exchange.
-//
-// clientID binds the code to an application, as a real /authorize request
-// always does; pass "" to leave it unbound so any client may exchange it.
+// IssueAuthCode mints an authorization code without driving the login UI, so
+// tests can exercise the token endpoint directly. An empty clientID leaves the
+// code unbound.
 func (s *Server) IssueAuthCode(userID, scope, orgID, clientID string) string {
 	user := s.getUserByID(userID)
 	if user == nil {
@@ -340,6 +318,13 @@ func (s *Server) IssueAuthCode(userID, scope, orgID, clientID string) string {
 	s.authCodes[code] = &authCode{User: *user, Scope: scope, OrgID: orgID, ClientID: clientID}
 	s.mu.Unlock()
 	return code
+}
+
+// SetOrgConnectionForTest enables a connection on an organization (for tests).
+func (s *Server) SetOrgConnectionForTest(oc config.OrganizationConnection) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.orgConnections[oc.OrgID] = append(s.orgConnections[oc.OrgID], oc)
 }
 
 // SetUser adds or updates a user in the mock server (for testing)

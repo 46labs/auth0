@@ -257,12 +257,29 @@ func (s *Server) createOrganization(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.organizations[stored.ID] = stored
+	views := make([]orgConnectionView, 0, len(pairings))
 	if len(pairings) > 0 {
 		s.orgConnections[org.ID] = pairings
+		for _, oc := range pairings {
+			views = append(views, s.viewOrgConnection(oc))
+		}
 	}
 	s.mu.Unlock()
 
 	w.WriteHeader(http.StatusCreated)
+	// Auth0's create response carries the projected pairings, so the SDK's
+	// hydrated Organization comes back with server defaults applied.
+	if len(views) > 0 {
+		body, err := json.Marshal(org)
+		if err == nil {
+			var merged map[string]any
+			if json.Unmarshal(body, &merged) == nil {
+				merged["enabled_connections"] = views
+				_ = json.NewEncoder(w).Encode(merged)
+				return
+			}
+		}
+	}
 	_ = json.NewEncoder(w).Encode(org)
 }
 
@@ -955,6 +972,12 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"name_required"}`, http.StatusBadRequest)
 		return
 	}
+	if client.InitiateLoginURI != "" {
+		if err := validateInitiateLoginURI(client.InitiateLoginURI); err != nil {
+			writeAuth0Error(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
 	if client.ClientID == "" {
 		client.ClientID = s.generateID()
@@ -1048,6 +1071,13 @@ func (s *Server) updateClient(w http.ResponseWriter, r *http.Request, clientID s
 		client.JWTConfig = *updates.JWTConfig
 	}
 	if updates.InitiateLoginURI != nil {
+		if *updates.InitiateLoginURI != "" {
+			if err := validateInitiateLoginURI(*updates.InitiateLoginURI); err != nil {
+				s.mu.Unlock()
+				writeAuth0Error(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
 		client.InitiateLoginURI = *updates.InitiateLoginURI
 	}
 	response := client.Clone()

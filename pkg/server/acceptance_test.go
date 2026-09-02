@@ -48,6 +48,9 @@ func authorizeURLFromInvitation(t *testing.T, baseURL, invURL, clientID string) 
 	params.Set("scope", "openid profile email")
 	params.Set("invitation", q.Get("invitation"))
 	params.Set("organization", q.Get("organization"))
+	if conn := q.Get("connection"); conn != "" {
+		params.Set("connection", conn)
+	}
 	return baseURL + "/authorize?" + params.Encode()
 }
 
@@ -385,6 +388,41 @@ func TestInvitationAcceptanceRejections(t *testing.T) {
 			t.Errorf("unexpected refusal: %s", msg)
 		}
 	})
+}
+
+// TestInvitationForcedConnectionIsEnforced covers connection_id on the
+// invitation: it forces authentication through that connection, so a login on
+// any other one cannot redeem it.
+func TestInvitationForcedConnectionIsEnforced(t *testing.T) {
+	f, cleanup := newInviteFixture(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const email = "forced-conn@example.test"
+	inv := f.invitation(email)
+	inv.ConnectionID = &f.connectionID
+	if err := f.m.Organization.CreateInvitation(ctx, f.orgID, inv); err != nil {
+		t.Fatalf("CreateInvitation: %v", err)
+	}
+
+	// The invitation URL carries no connection, so a plain follow is refused.
+	if tokens, _, msg := followInvitation(t, f.ts.URL, inv.GetInvitationURL(), email, f.clientID); tokens != nil {
+		t.Error("an invitation with a forced connection was redeemed without it")
+	} else if !strings.Contains(msg, "different connection") {
+		t.Errorf("unexpected refusal: %s", msg)
+	}
+
+	// A different connection is refused too.
+	wrong := inv.GetInvitationURL() + "&connection=con_email"
+	if tokens, _, _ := followInvitation(t, f.ts.URL, wrong, email, f.clientID); tokens != nil {
+		t.Error("an invitation was redeemed through the wrong connection")
+	}
+
+	// The named one works.
+	right := inv.GetInvitationURL() + "&connection=" + f.connectionID
+	if tokens, st, msg := followInvitation(t, f.ts.URL, right, email, f.clientID); tokens == nil {
+		t.Fatalf("the forced connection should be accepted: %d %s", st, msg)
+	}
 }
 
 // TestInvitationIsSingleUse covers the replay half of requirement 4: once

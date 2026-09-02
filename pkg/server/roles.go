@@ -28,15 +28,23 @@ func (s *Server) handleRoles(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleRole serves a single role by id.
+// handleRole serves a single role by id. Subresources this mock does not
+// implement (permissions, users) must 404: truncating the path at the slash
+// would dispatch DELETE .../roles/{id}/permissions to deleteRole and destroy
+// the role itself, the same fall-through the organization router had.
 func (s *Server) handleRole(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w, r)
 	w.Header().Set("Content-Type", "application/json")
 
-	roleID := strings.TrimPrefix(r.URL.Path, "/api/v2/roles/")
-	if idx := strings.Index(roleID, "/"); idx != -1 {
-		roleID = roleID[:idx]
+	segments := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v2/roles/"), "/"), "/")
+	if len(segments) != 1 || segments[0] == "" {
+		if r.Method == http.MethodOptions {
+			return
+		}
+		writeAuth0Error(w, http.StatusNotFound, "route not implemented by the auth0 mock: "+r.URL.Path)
+		return
 	}
+	roleID := segments[0]
 
 	switch r.Method {
 	case http.MethodGet:
@@ -193,7 +201,10 @@ func (s *Server) deleteRole(w http.ResponseWriter, roleID string) {
 	}
 
 	delete(s.roles, roleID)
-	w.WriteHeader(http.StatusNoContent)
+
+	// Auth0 answers 200 with a body here, not 204; go-auth0 passes a decode
+	// destination for exactly that reason.
+	_ = json.NewEncoder(w).Encode(struct{}{})
 }
 
 // roleNameByID resolves a role id to its name. Invitations carry role ids,

@@ -18,6 +18,11 @@ import (
 // organization via the `organization` authorize parameter, and returns the
 // token response or the refusal.
 func loginToOrg(t *testing.T, baseURL, identifier, orgID, scope string) (*acceptedTokens, int, string) {
+	return loginToOrgVia(t, baseURL, identifier, orgID, scope, "")
+}
+
+// loginToOrgVia adds the `connection` parameter the OIN deep link carries.
+func loginToOrgVia(t *testing.T, baseURL, identifier, orgID, scope, connectionID string) (*acceptedTokens, int, string) {
 	t.Helper()
 
 	client := noRedirectClient()
@@ -29,6 +34,9 @@ func loginToOrg(t *testing.T, baseURL, identifier, orgID, scope string) (*accept
 	params.Set("scope", scope)
 	if orgID != "" {
 		params.Set("organization", orgID)
+	}
+	if connectionID != "" {
+		params.Set("connection", connectionID)
 	}
 
 	resp, err := client.Get(baseURL + "/authorize?" + params.Encode())
@@ -153,7 +161,22 @@ func TestOrgScopedLoginRequiresMembership(t *testing.T) {
 			t.Fatalf("Organization.AddConnection: %v", err)
 		}
 
-		tokens, status, msg := loginToOrg(t, f.ts.URL, "+14155551234", otherOrg.GetID(), "openid")
+		// Without naming the connection there is nothing to admit them
+		// through: an email OTP must not autojoin via an enterprise pairing.
+		if tokens, _, msg := loginToOrg(t, f.ts.URL, "+14155551234", otherOrg.GetID(), "openid"); tokens != nil {
+			t.Error("a non-member was admitted without naming the connection")
+		} else if !strings.Contains(msg, "not a member") {
+			t.Errorf("unexpected refusal: %s", msg)
+		}
+
+		// A different connection, without the flag, must not admit them either.
+		if tokens, _, _ := loginToOrgVia(t, f.ts.URL, "+14155551234",
+			otherOrg.GetID(), "openid", "con_sms"); tokens != nil {
+			t.Error("a non-member was admitted through a connection lacking the flag")
+		}
+
+		tokens, status, msg := loginToOrgVia(t, f.ts.URL, "+14155551234",
+			otherOrg.GetID(), "openid", f.connectionID)
 		if tokens == nil {
 			t.Fatalf("assign_membership_on_login should admit a non-member: %d %s", status, msg)
 		}
@@ -266,6 +289,49 @@ func TestRefreshTokenKeepsItsOrganization(t *testing.T) {
 	access := claimsOf(t, f.srv, refreshed.AccessToken)
 	if access["org_id"] != secondOrg.GetID() {
 		t.Errorf("refreshed org_id = %v, want the original %s", access["org_id"], secondOrg.GetID())
+	}
+}
+
+// TestRefreshTokenKeepsItsClient covers the refresh client binding: a token
+// issued to one application must not be exchangeable as another, which would
+// undo the invitation and authorization-code client binding.
+func TestRefreshTokenKeepsItsClient(t *testing.T) {
+	f, cleanup := newInviteFixture(t)
+	defer cleanup()
+
+	refresh := refreshTokenFor(t, f, "test_user_1", "org_test")
+
+	resp, err := http.PostForm(f.ts.URL+"/oauth/token", url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refresh},
+		"client_id":     {"someone_elses_client"},
+	})
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		t.Error("a refresh token was exchanged as a different client")
+	}
+	if !strings.Contains(string(body), "different client") {
+		t.Errorf("unexpected refusal: %s", body)
+	}
+
+	// The original client still works.
+	resp2, err := http.PostForm(f.ts.URL+"/oauth/token", url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refresh},
+		"client_id":     {"test_client"},
+	})
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	_, _ = io.ReadAll(resp2.Body)
+	_ = resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("the issuing client was refused: %d", resp2.StatusCode)
 	}
 }
 

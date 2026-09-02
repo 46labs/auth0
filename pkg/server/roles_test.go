@@ -407,6 +407,84 @@ func decodeAny(t *testing.T, url string) any {
 	return out
 }
 
+// TestUnimplementedRoleSubresourceDoesNotDeleteRole is the phase-1 hazard
+// again, in the roles router: truncating the path at the slash dispatched
+// DELETE .../roles/{id}/permissions to deleteRole and destroyed the role while
+// answering success.
+func TestUnimplementedRoleSubresourceDoesNotDeleteRole(t *testing.T) {
+	_, ts := setupTestServer(t)
+	defer ts.Close()
+
+	m, err := management.New(ts.URL, management.WithStaticToken("mock_token"), management.WithInsecure())
+	if err != nil {
+		t.Fatalf("management.New: %v", err)
+	}
+	ctx := context.Background()
+
+	role := &management.Role{Name: auth0String("survivor")}
+	if err := m.Role.Create(ctx, role); err != nil {
+		t.Fatalf("Role.Create: %v", err)
+	}
+	roleID := role.GetID()
+
+	t.Run("RemovePermissions", func(t *testing.T) {
+		err := m.Role.RemovePermissions(ctx, roleID, []*management.Permission{
+			{Name: auth0String("p"), ResourceServerIdentifier: auth0String("api")},
+		})
+		assertStatus(t, err, http.StatusNotFound)
+
+		if _, err := m.Role.Read(ctx, roleID); err != nil {
+			t.Fatalf("the role was destroyed by a permissions subpath: %v", err)
+		}
+	})
+
+	t.Run("ReadPermissions", func(t *testing.T) {
+		_, err := m.Role.Permissions(ctx, roleID)
+		assertStatus(t, err, http.StatusNotFound)
+		if _, err := m.Role.Read(ctx, roleID); err != nil {
+			t.Fatalf("the role went missing: %v", err)
+		}
+	})
+
+	t.Run("Users", func(t *testing.T) {
+		_, err := m.Role.Users(ctx, roleID)
+		assertStatus(t, err, http.StatusNotFound)
+		if _, err := m.Role.Read(ctx, roleID); err != nil {
+			t.Fatalf("the role went missing: %v", err)
+		}
+	})
+
+	t.Run("DeleteStillWorksOnTheExactPath", func(t *testing.T) {
+		if err := m.Role.Delete(ctx, roleID); err != nil {
+			t.Fatalf("Role.Delete: %v", err)
+		}
+		_, err := m.Role.Read(ctx, roleID)
+		assertStatus(t, err, http.StatusNotFound)
+	})
+}
+
+// TestFailedRedemptionLeavesNoUser covers the ordering: the role has to
+// resolve before find-or-create, or a refused acceptance strands an account.
+func TestFailedRedemptionLeavesNoUser(t *testing.T) {
+	f, cleanup := newInviteFixture(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const email = "never-created@example.test"
+	inv := f.createInvitation(t, email)
+	if err := f.m.Role.Delete(ctx, f.adminRoleID); err != nil {
+		t.Fatalf("Role.Delete: %v", err)
+	}
+
+	if tokens, _, _ := followInvitation(t, f.ts.URL, inv.GetInvitationURL(), email, f.clientID); tokens != nil {
+		t.Fatal("acceptance succeeded despite the role being gone")
+	}
+
+	if user := f.srv.findUser(email); user != nil {
+		t.Errorf("a failed redemption left an orphaned account: %s", user.ID)
+	}
+}
+
 // TestOrgRolesNotSeededWithoutOrganization covers the Action's non-org guard:
 // a login carrying no organization must not write org_roles at all.
 func TestOrgRolesNotSeededWithoutOrganization(t *testing.T) {

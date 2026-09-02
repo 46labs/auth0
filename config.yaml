@@ -145,7 +145,7 @@ clients:
       - "authorization_code"
     # Required on the client an invitation names: Auth0 roots the
     # invitation_url at it and rejects invitation creation without it.
-    initiate_login_uri: "http://localhost:3000/login"
+    initiate_login_uri: "https://localhost:3000/login"
 
   - client_id: "dev_m2m_client"
     name: "Dev M2M Client"

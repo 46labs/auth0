@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"testing"
 	"time"
 
@@ -568,14 +567,11 @@ func TestInvitationURLConstruction(t *testing.T) {
 	tests := []struct {
 		name             string
 		initiateLoginURI string
-		wantFragment     string
 	}{
-		{"plain path", "https://app.test/login", ""},
-		{"existing query", "https://app.test/login?tenant=x", ""},
-		{"hash routed", "https://app.test/#/login", "/login"},
-		{"hash routed with query", "https://app.test/?tenant=x#/login", "/login"},
-		{"trailing slash", "https://app.test/", ""},
-		{"bare host", "https://app.test", ""},
+		{"plain path", "https://app.test/login"},
+		{"existing query", "https://app.test/login?tenant=x"},
+		{"trailing slash", "https://app.test/"},
+		{"bare host", "https://app.test"},
 	}
 
 	for _, tc := range tests {
@@ -599,11 +595,8 @@ func TestInvitationURLConstruction(t *testing.T) {
 			if q.Get("organization_name") != "acme" {
 				t.Errorf("organization_name param missing from the query: %q", got)
 			}
-			if u.Fragment != tc.wantFragment {
-				t.Errorf("fragment = %q, want %q (%q)", u.Fragment, tc.wantFragment, got)
-			}
-			if strings.Contains(u.Fragment, "invitation=") {
-				t.Errorf("invitation parameters landed inside the fragment: %q", got)
+			if u.Fragment != "" {
+				t.Errorf("unexpected fragment %q in %q", u.Fragment, got)
 			}
 		})
 	}
@@ -622,15 +615,20 @@ func TestInvitationURLConstruction(t *testing.T) {
 	t.Run("rejects uris that cannot root a followable link", func(t *testing.T) {
 		// url.Parse accepts all of these, so parse-error checking alone is
 		// not enough to keep a useless invitation_url from being minted.
+		// go-auth0 documents the field as "must be https and cannot contain a
+		// fragment", so http and hash-routed URIs are refused too.
 		for _, bad := range []string{
-			"http://[::1",      // unparseable
-			"/login",           // relative path
-			"login",            // bare relative reference
-			"//app.test/login", // protocol-relative, no scheme
-			"app.test/login",   // no scheme
-			"ftp://app.test",   // wrong scheme
-			"mailto:a@b.test",  // opaque, no host
-			"https://",         // scheme with no host
+			"http://[::1",              // unparseable
+			"/login",                   // relative path
+			"login",                    // bare relative reference
+			"//app.test/login",         // protocol-relative, no scheme
+			"app.test/login",           // no scheme
+			"ftp://app.test",           // wrong scheme
+			"mailto:a@b.test",          // opaque, no host
+			"https://",                 // scheme with no host
+			"http://app.test/login",    // http, not https
+			"https://app.test/#/login", // fragment
+			"https://app.test/login#x", // fragment
 		} {
 			if _, err := invitationURL(bad, "tkt_1", org); err == nil {
 				t.Errorf("expected %q to be rejected as an initiate_login_uri", bad)
@@ -639,26 +637,45 @@ func TestInvitationURLConstruction(t *testing.T) {
 	})
 }
 
-// TestInvitationRejectsRelativeLoginURI is the request-level counterpart: a
-// client configured with a relative initiate_login_uri must fail the invite
-// rather than hand back a link that is not rooted at the application.
-func TestInvitationRejectsRelativeLoginURI(t *testing.T) {
+// TestClientRejectsInvalidInitiateLoginURI pins the field's contract at the
+// point it is set, so a client that real Auth0 would refuse cannot be stored
+// and only fail later when someone tries to invite through it.
+func TestClientRejectsInvalidInitiateLoginURI(t *testing.T) {
 	f, cleanup := newInviteFixture(t)
 	defer cleanup()
 	ctx := context.Background()
 
-	name := "Relative URI SPA"
-	appType := "spa"
-	relative := "/login"
-	c := &management.Client{Name: &name, AppType: &appType, InitiateLoginURI: &relative}
-	if err := f.m.Client.Create(ctx, c); err != nil {
-		t.Fatalf("Client.Create: %v", err)
-	}
+	for _, bad := range []string{
+		"/login",
+		"http://app.example.test/login",
+		"https://app.example.test/#/login",
+		"http://[::1",
+	} {
+		t.Run("create "+bad, func(t *testing.T) {
+			err := f.m.Client.Create(ctx, &management.Client{
+				Name:             auth0String("Bad URI " + bad),
+				AppType:          auth0String("spa"),
+				InitiateLoginURI: auth0String(bad),
+			})
+			assertStatus(t, err, http.StatusBadRequest)
+		})
 
-	inv := f.invitation("relative@example.test")
-	inv.ClientID = c.ClientID
-	err := f.m.Organization.CreateInvitation(ctx, f.orgID, inv)
-	assertStatus(t, err, http.StatusBadRequest)
+		t.Run("update "+bad, func(t *testing.T) {
+			err := f.m.Client.Update(ctx, f.clientID,
+				&management.Client{InitiateLoginURI: auth0String(bad)})
+			assertStatus(t, err, http.StatusBadRequest)
+
+			// The rejected update must not have disturbed the stored value.
+			read, err := f.m.Client.Read(ctx, f.clientID)
+			if err != nil {
+				t.Fatalf("Client.Read: %v", err)
+			}
+			if read.GetInitiateLoginURI() != f.loginURI {
+				t.Errorf("initiate_login_uri = %q, want it left at %q",
+					read.GetInitiateLoginURI(), f.loginURI)
+			}
+		})
+	}
 }
 
 // TestRevokeExpiredInvitationIsOrderIndependent pins that revoking an expired
@@ -800,23 +817,15 @@ func TestInvitationRejectsConnectionNotEnabledOnOrg(t *testing.T) {
 	}
 }
 
-// TestInvitationRejectsUnparseableLoginURI keeps a bad initiate_login_uri from
-// producing an invitation whose link cannot be followed.
-func TestInvitationRejectsUnparseableLoginURI(t *testing.T) {
+// TestRejectedInvitationIsNotStored keeps a refused create from leaving a
+// half-made invitation behind.
+func TestRejectedInvitationIsNotStored(t *testing.T) {
 	f, cleanup := newInviteFixture(t)
 	defer cleanup()
 	ctx := context.Background()
 
-	name := "Broken URI SPA"
-	appType := "spa"
-	bad := "http://[::1"
-	c := &management.Client{Name: &name, AppType: &appType, InitiateLoginURI: &bad}
-	if err := f.m.Client.Create(ctx, c); err != nil {
-		t.Fatalf("Client.Create: %v", err)
-	}
-
-	inv := f.invitation("broken@example.test")
-	inv.ClientID = c.ClientID
+	inv := f.invitation("rejected@example.test")
+	inv.Roles = []string{"rol_nope"}
 	err := f.m.Organization.CreateInvitation(ctx, f.orgID, inv)
 	assertStatus(t, err, http.StatusBadRequest)
 
