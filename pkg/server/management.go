@@ -3,10 +3,62 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/46labs/auth0/pkg/config"
 )
+
+// Management API pagination defaults, matching Auth0's list endpoints.
+const (
+	defaultPerPage = 50
+	maxPerPage     = 100
+)
+
+// listWindow is the envelope Auth0 returns alongside a page of a collection.
+// The SDK decodes it into management.List, whose HasNext compares
+// total > start+limit, so these values decide whether a paginating caller
+// stops.
+type listWindow struct {
+	Start int
+	Limit int
+	Total int
+}
+
+// paginate resolves the page/per_page query parameters against a collection
+// size, returning half-open [lo, hi) bounds and the response envelope.
+//
+// Ignoring these parameters is not a harmless simplification: a caller that
+// walks pages until it sees an empty result — which is exactly what the SDK's
+// documentation tells organization-invitation callers to do — would be served
+// page 0 forever and never terminate.
+func paginate(r *http.Request, total int) (lo, hi int, window listWindow) {
+	perPage := defaultPerPage
+	if v := r.URL.Query().Get("per_page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			perPage = min(n, maxPerPage)
+		}
+	}
+
+	page := 0
+	if v := r.URL.Query().Get("page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			page = n
+		}
+	}
+
+	// Clamp the page before multiplying. A syntactically valid but huge page
+	// value would overflow int, yield a negative lower bound, and panic every
+	// handler that slices its collection with it. perPage is always >= 1 here.
+	if maxPage := total/perPage + 1; page > maxPage {
+		page = maxPage
+	}
+
+	lo = min(page*perPage, total)
+	hi = min(lo+perPage, total)
+	return lo, hi, listWindow{Start: lo, Limit: perPage, Total: total}
+}
 
 // writeAuth0Error renders an error body in the Management API's shape, which
 // the SDK decodes into a management.Error carrying the right status.
@@ -47,6 +99,14 @@ func (s *Server) routeOrganizationPath(w http.ResponseWriter, r *http.Request) {
 		s.handleOrganizationMembers(w, r)
 	case len(segments) == 4 && segments[1] == "members" && segments[3] == "roles":
 		s.handleOrganizationMemberRoles(w, r)
+	case len(segments) == 2 && segments[1] == "enabled_connections":
+		s.handleOrganizationConnections(w, r)
+	case len(segments) == 3 && segments[1] == "enabled_connections":
+		s.handleOrganizationConnection(w, r)
+	case len(segments) == 2 && segments[1] == "invitations":
+		s.handleOrganizationInvitations(w, r)
+	case len(segments) == 3 && segments[1] == "invitations":
+		s.handleOrganizationInvitation(w, r)
 	default:
 		s.setCORS(w, r)
 		if r.Method == http.MethodOptions {
@@ -99,26 +159,45 @@ func (s *Server) listOrganizations(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	orgs := make([]config.Organization, 0, len(s.organizations))
+	all := make([]config.Organization, 0, len(s.organizations))
 	for _, org := range s.organizations {
-		orgs = append(orgs, *org.Clone())
+		all = append(all, *org.Clone())
 	}
+	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
+
+	lo, hi, window := paginate(r, len(all))
+	orgs := all[lo:hi]
 
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"organizations": orgs,
-		"start":         0,
-		"limit":         50,
-		"total":         len(orgs),
+		"start":         window.Start,
+		"limit":         window.Limit,
+		"length":        len(orgs),
+		"total":         window.Total,
 	})
 }
 
 func (s *Server) createOrganization(w http.ResponseWriter, r *http.Request) {
-	var org config.Organization
-	if err := json.NewDecoder(r.Body).Decode(&org); err != nil {
+	// enabled_connections rides along on organization creation in the
+	// Management API (and in the SDK's Organization struct). Dropping it would
+	// answer 201 while leaving the organization with no connections, so an
+	// invitation created straight afterwards would be rejected for a reason
+	// the caller cannot see.
+	var req struct {
+		config.Organization
+		EnabledConnections []struct {
+			ConnectionID            string `json:"connection_id"`
+			AssignMembershipOnLogin *bool  `json:"assign_membership_on_login"`
+			IsSignupEnabled         *bool  `json:"is_signup_enabled"`
+			ShowAsButton            *bool  `json:"show_as_button"`
+		} `json:"enabled_connections"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid_body"}`, http.StatusBadRequest)
 		return
 	}
 
+	org := req.Organization
 	if org.Name == "" {
 		http.Error(w, `{"error":"name_required"}`, http.StatusBadRequest)
 		return
@@ -131,8 +210,58 @@ func (s *Server) createOrganization(w http.ResponseWriter, r *http.Request) {
 	// Store a copy so the response we serialize below shares no memory with
 	// the stored record a concurrent PATCH could be mutating.
 	stored := org.Clone()
+
 	s.mu.Lock()
+	pairings := make([]config.OrganizationConnection, 0, len(req.EnabledConnections))
+	for _, ec := range req.EnabledConnections {
+		if ec.ConnectionID == "" {
+			s.mu.Unlock()
+			writeAuth0Error(w, http.StatusBadRequest, "enabled_connections[].connection_id is required")
+			return
+		}
+		if _, ok := s.connections[ec.ConnectionID]; !ok {
+			s.mu.Unlock()
+			writeAuth0Error(w, http.StatusBadRequest, "connection "+ec.ConnectionID+" does not exist")
+			return
+		}
+		// A repeated connection_id would store two pairings for one
+		// connection, and a later DeleteConnection would remove only the
+		// first while answering 204.
+		for _, existing := range pairings {
+			if existing.ConnectionID == ec.ConnectionID {
+				s.mu.Unlock()
+				writeAuth0Error(w, http.StatusBadRequest,
+					"connection "+ec.ConnectionID+" is listed twice in enabled_connections")
+				return
+			}
+		}
+
+		oc := config.OrganizationConnection{
+			OrgID:        org.ID,
+			ConnectionID: ec.ConnectionID,
+			ShowAsButton: true,
+		}
+		if ec.AssignMembershipOnLogin != nil {
+			oc.AssignMembershipOnLogin = *ec.AssignMembershipOnLogin
+		}
+		if ec.IsSignupEnabled != nil {
+			oc.IsSignupEnabled = *ec.IsSignupEnabled
+		}
+		if ec.ShowAsButton != nil {
+			oc.ShowAsButton = *ec.ShowAsButton
+		}
+		if err := validOrgConnection(oc); err != nil {
+			s.mu.Unlock()
+			writeAuth0Error(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		pairings = append(pairings, oc)
+	}
+
 	s.organizations[stored.ID] = stored
+	if len(pairings) > 0 {
+		s.orgConnections[org.ID] = pairings
+	}
 	s.mu.Unlock()
 
 	w.WriteHeader(http.StatusCreated)
@@ -202,6 +331,8 @@ func (s *Server) deleteOrganization(w http.ResponseWriter, r *http.Request, orgI
 
 	delete(s.organizations, orgID)
 	delete(s.members, orgID)
+	delete(s.orgConnections, orgID)
+	delete(s.invitations, orgID)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -302,11 +433,17 @@ func (s *Server) handleUserOrganizations(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	sort.Slice(orgs, func(i, j int) bool { return orgs[i].ID < orgs[j].ID })
+
+	lo, hi, window := paginate(r, len(orgs))
+	page := orgs[lo:hi]
+
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"organizations": orgs,
-		"start":         0,
-		"limit":         50,
-		"total":         len(orgs),
+		"organizations": page,
+		"start":         window.Start,
+		"limit":         window.Limit,
+		"length":        len(page),
+		"total":         window.Total,
 	})
 }
 
@@ -354,11 +491,15 @@ func (s *Server) listOrganizationMembers(w http.ResponseWriter, r *http.Request,
 		responseMembers = append(responseMembers, responseMember)
 	}
 
+	lo, hi, window := paginate(r, len(responseMembers))
+	page := responseMembers[lo:hi]
+
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"members": responseMembers,
-		"start":   0,
-		"limit":   50,
-		"total":   len(responseMembers),
+		"members": page,
+		"start":   window.Start,
+		"limit":   window.Limit,
+		"length":  len(page),
+		"total":   window.Total,
 	})
 }
 
@@ -496,16 +637,21 @@ func (s *Server) listConnections(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	conns := make([]config.Connection, 0, len(s.connections))
+	all := make([]config.Connection, 0, len(s.connections))
 	for _, conn := range s.connections {
-		conns = append(conns, *conn.Clone())
+		all = append(all, *conn.Clone())
 	}
+	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
+
+	lo, hi, window := paginate(r, len(all))
+	conns := all[lo:hi]
 
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"connections": conns,
-		"start":       0,
-		"limit":       50,
-		"total":       len(conns),
+		"start":       window.Start,
+		"limit":       window.Limit,
+		"length":      len(conns),
+		"total":       window.Total,
 	})
 }
 
@@ -786,17 +932,21 @@ func (s *Server) listClients(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	clients := make([]config.Client, 0, len(s.clients))
+	all := make([]config.Client, 0, len(s.clients))
 	for _, client := range s.clients {
-		clients = append(clients, *client.Clone())
+		all = append(all, *client.Clone())
 	}
+	sort.Slice(all, func(i, j int) bool { return all[i].ClientID < all[j].ClientID })
 
-	// Match Auth0 API format with pagination metadata
+	lo, hi, window := paginate(r, len(all))
+	clients := all[lo:hi]
+
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"clients": clients,
-		"start":   0,
-		"limit":   50,
-		"total":   len(clients),
+		"start":   window.Start,
+		"limit":   window.Limit,
+		"length":  len(clients),
+		"total":   window.Total,
 	})
 }
 
@@ -860,30 +1010,53 @@ func (s *Server) updateClient(w http.ResponseWriter, r *http.Request, clientID s
 		return
 	}
 
-	var updates config.Client
+	// Pointer fields distinguish "absent" from "present and empty", which is
+	// what lets a PATCH clear a value rather than only ever overwrite it with
+	// something non-empty. Mirrors the SDK's own client patch shape.
+	var updates struct {
+		Name             *string         `json:"name"`
+		Description      *string         `json:"description"`
+		AppType          *string         `json:"app_type"`
+		Callbacks        *[]string       `json:"callbacks"`
+		GrantTypes       *[]string       `json:"grant_types"`
+		JWTConfig        *map[string]any `json:"jwt_configuration"`
+		InitiateLoginURI *string         `json:"initiate_login_uri"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
 		s.mu.Unlock()
 		http.Error(w, `{"error":"invalid_body"}`, http.StatusBadRequest)
 		return
 	}
 
-	if updates.Name != "" {
-		client.Name = updates.Name
+	// Clear semantics apply only to optional fields. name is required at
+	// creation, so a present-but-empty name is a bad request rather than an
+	// instruction to blank it out.
+	if updates.Name != nil && *updates.Name == "" {
+		s.mu.Unlock()
+		writeAuth0Error(w, http.StatusBadRequest, "name cannot be empty")
+		return
 	}
-	if updates.Description != "" {
-		client.Description = updates.Description
+
+	if updates.Name != nil {
+		client.Name = *updates.Name
 	}
-	if updates.AppType != "" {
-		client.AppType = updates.AppType
+	if updates.Description != nil {
+		client.Description = *updates.Description
 	}
-	if len(updates.Callbacks) > 0 {
-		client.Callbacks = updates.Callbacks
+	if updates.AppType != nil {
+		client.AppType = *updates.AppType
 	}
-	if len(updates.GrantTypes) > 0 {
-		client.GrantTypes = updates.GrantTypes
+	if updates.Callbacks != nil {
+		client.Callbacks = *updates.Callbacks
+	}
+	if updates.GrantTypes != nil {
+		client.GrantTypes = *updates.GrantTypes
 	}
 	if updates.JWTConfig != nil {
-		client.JWTConfig = updates.JWTConfig
+		client.JWTConfig = *updates.JWTConfig
+	}
+	if updates.InitiateLoginURI != nil {
+		client.InitiateLoginURI = *updates.InitiateLoginURI
 	}
 	response := client.Clone()
 	s.mu.Unlock()

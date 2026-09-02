@@ -34,6 +34,12 @@ type Server struct {
 	members       map[string][]config.OrganizationMember
 	clients       map[string]*config.Client
 
+	// orgConnections holds the enabled_connections pairings, keyed by org id.
+	orgConnections map[string][]config.OrganizationConnection
+	// invitations holds pending organization invitations, keyed by org id and
+	// kept in creation order.
+	invitations map[string][]config.OrganizationInvitation
+
 	mu sync.RWMutex
 }
 
@@ -73,22 +79,69 @@ func New(cfg *config.Config) (*Server, error) {
 		clients[cfg.Clients[i].ClientID] = &cfg.Clients[i]
 	}
 
+	orgConnections := buildOrgConnections(cfg)
+
 	return &Server{
-		cfg:           cfg,
-		privateKey:    key,
-		templates:     tmpl,
-		pending:       make(map[string]string),
-		verified:      make(map[string]config.User),
-		verifiers:     make(map[string]string),
-		nonces:        make(map[string]string),
-		scopes:        make(map[string]string),
-		refreshTokens: make(map[string]string),
-		users:         users,
-		organizations: organizations,
-		connections:   connections,
-		members:       members,
-		clients:       clients,
+		cfg:            cfg,
+		privateKey:     key,
+		templates:      tmpl,
+		pending:        make(map[string]string),
+		verified:       make(map[string]config.User),
+		verifiers:      make(map[string]string),
+		nonces:         make(map[string]string),
+		scopes:         make(map[string]string),
+		refreshTokens:  make(map[string]string),
+		users:          users,
+		organizations:  organizations,
+		connections:    connections,
+		members:        members,
+		clients:        clients,
+		orgConnections: orgConnections,
+		invitations:    make(map[string][]config.OrganizationInvitation),
 	}, nil
+}
+
+// buildOrgConnections seeds the enabled_connections pairings. Each connection
+// names the organizations it is enabled on, which is the shape existing config
+// files use; explicit OrganizationConnections entries carry per-organization
+// login settings and win over a derived pairing for the same pair.
+func buildOrgConnections(cfg *config.Config) map[string][]config.OrganizationConnection {
+	out := make(map[string][]config.OrganizationConnection)
+
+	enabled := func(orgID, connID string) bool {
+		for _, oc := range out[orgID] {
+			if oc.ConnectionID == connID {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, declared := range cfg.OrganizationConnections {
+		if declared.OrgID == "" || declared.ConnectionID == "" ||
+			enabled(declared.OrgID, declared.ConnectionID) {
+			continue
+		}
+		// Resolve applies Auth0's defaults so a config-declared pairing and one
+		// created over HTTP report identically.
+		oc := declared.Resolve()
+		out[oc.OrgID] = append(out[oc.OrgID], oc)
+	}
+
+	for _, conn := range cfg.Connections {
+		for _, orgID := range conn.Organizations {
+			if enabled(orgID, conn.ID) {
+				continue
+			}
+			out[orgID] = append(out[orgID], config.OrganizationConnection{
+				OrgID:        orgID,
+				ConnectionID: conn.ID,
+				ShowAsButton: true,
+			})
+		}
+	}
+
+	return out
 }
 
 func (s *Server) Handler() http.Handler {
@@ -123,10 +176,13 @@ func (s *Server) Start() error {
 	return http.ListenAndServe(addr, s.Handler())
 }
 
+// generateID mints an opaque identifier. Unpadded, because real Auth0 ids
+// carry no "==" tail and these land in URL paths and query strings where the
+// padding only invites encoding mistakes in consumers.
 func (s *Server) generateID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
-	return base64.URLEncoding.EncodeToString(b)
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 func (s *Server) findUser(identifier string) *config.User {

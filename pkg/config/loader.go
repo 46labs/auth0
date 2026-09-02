@@ -73,6 +73,10 @@ func Load(opts ...Option) (*Config, error) {
 		return nil, fmt.Errorf("unmarshal members: %w", err)
 	}
 
+	if err := viper.UnmarshalKey("organizationConnections", &cfg.OrganizationConnections); err != nil {
+		return nil, fmt.Errorf("unmarshal organizationConnections: %w", err)
+	}
+
 	if err := viper.UnmarshalKey("clients", &cfg.Clients); err != nil {
 		return nil, fmt.Errorf("unmarshal clients: %w", err)
 	}

@@ -50,15 +50,10 @@ func TestUnimplementedOrgSubresourceDoesNotMutateOrg(t *testing.T) {
 		}
 	})
 
-	t.Run("EnabledConnections", func(t *testing.T) {
-		// Not implemented yet; must 404 rather than answer with the org.
-		_, err := m.Organization.Connections(ctx, "org_test")
-		assertStatus(t, err, http.StatusNotFound)
-		assertOrgPresent(t, "after Connections")
-	})
-
-	t.Run("DeleteEnabledConnection", func(t *testing.T) {
-		err := m.Organization.DeleteConnection(ctx, "org_test", "con_sms")
+	t.Run("DeleteUnknownEnabledConnection", func(t *testing.T) {
+		// The subresource is implemented; an unknown connection id within it
+		// must still 404 without touching the organization.
+		err := m.Organization.DeleteConnection(ctx, "org_test", "con_does_not_exist")
 		assertStatus(t, err, http.StatusNotFound)
 		assertOrgPresent(t, "after DeleteConnection")
 	})

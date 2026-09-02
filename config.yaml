@@ -89,6 +89,19 @@ connections:
     organizations:
       - "org_nextel_test"
 
+  # Organization invitations are invalid against a passwordless connection, so
+  # a non-passwordless one has to exist for the invite flow to be modelled at
+  # all. Both connections above are passwordless.
+  - id: "con_enterprise"
+    name: "enterprise-sso"
+    strategy: "oidc"
+    display_name: "Enterprise SSO"
+    is_domain_connection: false
+    enabled_clients:
+      - "*"
+    organizations:
+      - "org_nextel_test"
+
 members:
   - user_id: "auth0|user_devone"
     org_id: "org_nextel_test"
@@ -111,6 +124,9 @@ clients:
       - "http://localhost:3000/callback"
     grant_types:
       - "authorization_code"
+    # Required on the client an invitation names: Auth0 roots the
+    # invitation_url at it and rejects invitation creation without it.
+    initiate_login_uri: "http://localhost:3000/login"
 
   - client_id: "dev_m2m_client"
     name: "Dev M2M Client"
