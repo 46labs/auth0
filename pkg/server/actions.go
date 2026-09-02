@@ -164,7 +164,7 @@ func (s *Server) lookupClient(clientID string) *config.Client {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if c, ok := s.clients[clientID]; ok {
-		return c
+		return c.Clone()
 	}
 	return nil
 }

@@ -101,19 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v2/logout", s.handleLogout)
 
 	mux.HandleFunc("/api/v2/organizations", s.handleOrganizations)
-	mux.HandleFunc("/api/v2/organizations/", func(w http.ResponseWriter, r *http.Request) {
-		rest := strings.TrimPrefix(r.URL.Path, "/api/v2/organizations/")
-		switch {
-		case strings.HasPrefix(rest, "name/"):
-			s.handleOrganizationByName(w, r)
-		case strings.Contains(r.URL.Path, "/members/") && strings.Contains(r.URL.Path, "/roles"):
-			s.handleOrganizationMemberRoles(w, r)
-		case strings.Contains(r.URL.Path, "/members"):
-			s.handleOrganizationMembers(w, r)
-		default:
-			s.handleOrganization(w, r)
-		}
-	})
+	mux.HandleFunc("/api/v2/organizations/", s.routeOrganizationPath)
 	mux.HandleFunc("/api/v2/connections", s.handleConnections)
 	mux.HandleFunc("/api/v2/users/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/organizations") {
@@ -150,7 +138,7 @@ func (s *Server) findUser(identifier string) *config.User {
 		// Email - exact match
 		for _, u := range s.users {
 			if u.Email == identifier {
-				return u
+				return u.Clone()
 			}
 		}
 	} else {
@@ -161,7 +149,7 @@ func (s *Server) findUser(identifier string) *config.User {
 				if u.Phone != "" {
 					normalizedPhone, err := contact.NormalizePhoneToE164(u.Phone)
 					if err == nil && normalizedPhone == normalizedIdentifier {
-						return u
+						return u.Clone()
 					}
 				}
 			}
@@ -215,17 +203,20 @@ func (s *Server) autoCreateUser(identifier string) *config.User {
 		}
 	}
 
-	s.users[userID] = user
+	s.users[userID] = user.Clone()
 	log.Printf("Auto-created user: %s (%s)", userID, identifier)
 	return user
 }
 
+// getUserByID returns a copy of the stored user, or nil when unknown. The copy
+// is what lets callers serialize or read the record after the lock is released
+// without racing an in-flight PATCH.
 func (s *Server) getUserByID(userID string) *config.User {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	if user, ok := s.users[userID]; ok {
-		return user
+		return user.Clone()
 	}
 	return nil
 }
@@ -237,12 +228,14 @@ func (s *Server) SetUser(userID string, user *config.User) {
 	s.users[userID] = user
 }
 
-// GetOrgMembers returns the members of an organization (for testing)
+// GetOrgMembers returns a copy of an organization's members (for testing).
 func (s *Server) GetOrgMembers(orgID string) []config.OrganizationMember {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if members, ok := s.members[orgID]; ok {
-		return members
+		out := make([]config.OrganizationMember, len(members))
+		copy(out, members)
+		return out
 	}
 	return []config.OrganizationMember{}
 }

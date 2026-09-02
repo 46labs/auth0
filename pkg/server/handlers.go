@@ -133,7 +133,9 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		}
 
 		sessionID := s.generateID()
+		s.mu.Lock()
 		s.pending[sessionID] = r.URL.RawQuery
+		s.mu.Unlock()
 
 		loginHint := r.URL.Query().Get("login_hint")
 		data := map[string]interface{}{
@@ -159,7 +161,9 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		}
 		code := r.FormValue("code")
 
+		s.mu.RLock()
 		originalQuery, exists := s.pending[sessionID]
+		s.mu.RUnlock()
 		if !exists {
 			http.Error(w, "Invalid session", 400)
 			return
@@ -174,9 +178,20 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 				}
 				if user != nil {
 					params, _ := url.ParseQuery(originalQuery)
-					authCode := s.generateID()
-					s.verified[authCode] = *user
 
+					// Validate the redirect target before minting the code, so a
+					// bad redirect_uri cannot leave an orphaned auth code behind.
+					redirectURI := params.Get("redirect_uri")
+					redirectURL := parseRedirectURI(redirectURI)
+					if redirectURL == nil {
+						http.Error(w, "Invalid redirect_uri", 400)
+						return
+					}
+
+					authCode := s.generateID()
+
+					s.mu.Lock()
+					s.verified[authCode] = *user
 					if codeChallenge := params.Get("code_challenge"); codeChallenge != "" {
 						s.verifiers[authCode] = codeChallenge
 					}
@@ -186,13 +201,9 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 					if scope := params.Get("scope"); scope != "" {
 						s.scopes[authCode] = scope
 					}
+					delete(s.pending, sessionID)
+					s.mu.Unlock()
 
-					redirectURI := params.Get("redirect_uri")
-					redirectURL := parseRedirectURI(redirectURI)
-					if redirectURL == nil {
-						http.Error(w, "Invalid redirect_uri", 400)
-						return
-					}
 					query := redirectURL.Query()
 					query.Set("code", authCode)
 					if state := params.Get("state"); state != "" {
@@ -200,7 +211,6 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 					}
 					redirectURL.RawQuery = query.Encode()
 
-					delete(s.pending, sessionID)
 					http.Redirect(w, r, redirectURL.String(), http.StatusFound)
 					return
 				}
@@ -415,7 +425,24 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 
 	// Handle authorization_code flow (existing logic)
 	code := r.FormValue("code")
+
+	// Claim the code and everything hanging off it in one write lock, before
+	// issuing anything. Authorization codes are single-use, so a concurrent
+	// second exchange of the same code has to lose here rather than race the
+	// delete and also get a 200 (with the nonce and requested scope already
+	// pulled out from under it).
+	s.mu.Lock()
 	user, exists := s.verified[code]
+	nonce, hasNonce := s.nonces[code]
+	requestedScope := s.scopes[code]
+	if exists {
+		delete(s.verified, code)
+		delete(s.verifiers, code)
+		delete(s.nonces, code)
+		delete(s.scopes, code)
+	}
+	s.mu.Unlock()
+
 	if !exists {
 		http.Error(w, "Invalid code", 400)
 		return
@@ -450,7 +477,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		idClaims["picture"] = user.Picture
 	}
 
-	if nonce, ok := s.nonces[code]; ok {
+	if hasNonce {
 		idClaims["nonce"] = nonce
 	}
 
@@ -507,20 +534,15 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate refresh token if offline_access scope was requested
-	s.mu.Lock()
-	requestedScope := s.scopes[code]
+	// Generate refresh token if offline_access scope was requested. The scope
+	// was captured when the code was claimed above.
 	var refreshToken string
 	if strings.Contains(requestedScope, "offline_access") {
 		refreshToken = "rt_" + base64.RawURLEncoding.EncodeToString([]byte(s.generateID()))
+		s.mu.Lock()
 		s.refreshTokens[refreshToken] = user.ID
+		s.mu.Unlock()
 	}
-	s.mu.Unlock()
-
-	delete(s.verified, code)
-	delete(s.verifiers, code)
-	delete(s.nonces, code)
-	delete(s.scopes, code)
 
 	w.Header().Set("Content-Type", "application/json")
 	response := map[string]interface{}{

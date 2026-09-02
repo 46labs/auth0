@@ -8,6 +8,54 @@ import (
 	"github.com/46labs/auth0/pkg/config"
 )
 
+// writeAuth0Error renders an error body in the Management API's shape, which
+// the SDK decodes into a management.Error carrying the right status.
+func writeAuth0Error(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"statusCode": status,
+		"error":      http.StatusText(status),
+		"message":    message,
+	})
+}
+
+// routeOrganizationPath dispatches /api/v2/organizations/{id} and its
+// subresources.
+//
+// An unrecognized subresource must 404. The previous router fell through to
+// the bare-organization handlers, which truncate the path at the first slash:
+// a DELETE on an unimplemented subpath (say .../invitations/{iid}) resolved to
+// the org id and deleted the organization itself, returning 204. Matching on
+// exact segment counts keeps an unimplemented route from mutating a different
+// resource than the caller named.
+func (s *Server) routeOrganizationPath(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v2/organizations/")
+
+	if strings.HasPrefix(rest, "name/") {
+		s.handleOrganizationByName(w, r)
+		return
+	}
+
+	// segments[0] is the organization id; the rest name the subresource.
+	segments := strings.Split(strings.Trim(rest, "/"), "/")
+
+	switch {
+	case len(segments) == 1:
+		s.handleOrganization(w, r)
+	case len(segments) == 2 && segments[1] == "members":
+		s.handleOrganizationMembers(w, r)
+	case len(segments) == 4 && segments[1] == "members" && segments[3] == "roles":
+		s.handleOrganizationMemberRoles(w, r)
+	default:
+		s.setCORS(w, r)
+		if r.Method == http.MethodOptions {
+			return
+		}
+		writeAuth0Error(w, http.StatusNotFound, "route not implemented by the auth0 mock: "+r.URL.Path)
+	}
+}
+
 func (s *Server) handleOrganizations(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w, r)
 	w.Header().Set("Content-Type", "application/json")
@@ -53,7 +101,7 @@ func (s *Server) listOrganizations(w http.ResponseWriter, r *http.Request) {
 
 	orgs := make([]config.Organization, 0, len(s.organizations))
 	for _, org := range s.organizations {
-		orgs = append(orgs, *org)
+		orgs = append(orgs, *org.Clone())
 	}
 
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -80,8 +128,11 @@ func (s *Server) createOrganization(w http.ResponseWriter, r *http.Request) {
 		org.ID = "org_" + s.generateID()
 	}
 
+	// Store a copy so the response we serialize below shares no memory with
+	// the stored record a concurrent PATCH could be mutating.
+	stored := org.Clone()
 	s.mu.Lock()
-	s.organizations[org.ID] = &org
+	s.organizations[stored.ID] = stored
 	s.mu.Unlock()
 
 	w.WriteHeader(http.StatusCreated)
@@ -91,6 +142,9 @@ func (s *Server) createOrganization(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getOrganization(w http.ResponseWriter, r *http.Request, orgID string) {
 	s.mu.RLock()
 	org, exists := s.organizations[orgID]
+	if exists {
+		org = org.Clone()
+	}
 	s.mu.RUnlock()
 
 	if !exists {
@@ -131,9 +185,10 @@ func (s *Server) updateOrganization(w http.ResponseWriter, r *http.Request, orgI
 			org.Metadata[k] = v
 		}
 	}
+	response := org.Clone()
 	s.mu.Unlock()
 
-	_ = json.NewEncoder(w).Encode(org)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func (s *Server) deleteOrganization(w http.ResponseWriter, r *http.Request, orgID string) {
@@ -201,7 +256,7 @@ func (s *Server) handleOrganizationByName(w http.ResponseWriter, r *http.Request
 	defer s.mu.RUnlock()
 	for _, org := range s.organizations {
 		if org.Name == name {
-			_ = json.NewEncoder(w).Encode(org)
+			_ = json.NewEncoder(w).Encode(org.Clone())
 			return
 		}
 	}
@@ -241,7 +296,7 @@ func (s *Server) handleUserOrganizations(w http.ResponseWriter, r *http.Request)
 				continue
 			}
 			if org, ok := s.organizations[orgID]; ok {
-				orgs = append(orgs, *org)
+				orgs = append(orgs, *org.Clone())
 			}
 			break
 		}
@@ -256,10 +311,11 @@ func (s *Server) handleUserOrganizations(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) listOrganizationMembers(w http.ResponseWriter, r *http.Request, orgID string) {
+	// Held across the member/user join below: both maps are read.
 	s.mu.RLock()
-	members, exists := s.members[orgID]
-	s.mu.RUnlock()
+	defer s.mu.RUnlock()
 
+	members, exists := s.members[orgID]
 	if !exists {
 		members = []config.OrganizationMember{}
 	}
@@ -442,7 +498,7 @@ func (s *Server) listConnections(w http.ResponseWriter, r *http.Request) {
 
 	conns := make([]config.Connection, 0, len(s.connections))
 	for _, conn := range s.connections {
-		conns = append(conns, *conn)
+		conns = append(conns, *conn.Clone())
 	}
 
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -469,8 +525,9 @@ func (s *Server) createConnection(w http.ResponseWriter, r *http.Request) {
 		conn.ID = "con_" + s.generateID()
 	}
 
+	stored := conn.Clone()
 	s.mu.Lock()
-	s.connections[conn.ID] = &conn
+	s.connections[stored.ID] = stored
 	s.mu.Unlock()
 
 	w.WriteHeader(http.StatusCreated)
@@ -731,7 +788,7 @@ func (s *Server) listClients(w http.ResponseWriter, r *http.Request) {
 
 	clients := make([]config.Client, 0, len(s.clients))
 	for _, client := range s.clients {
-		clients = append(clients, *client)
+		clients = append(clients, *client.Clone())
 	}
 
 	// Match Auth0 API format with pagination metadata
@@ -769,8 +826,9 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	stored := client.Clone()
 	s.mu.Lock()
-	s.clients[client.ClientID] = &client
+	s.clients[stored.ClientID] = stored
 	s.mu.Unlock()
 
 	w.WriteHeader(http.StatusCreated)
@@ -780,6 +838,9 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getClient(w http.ResponseWriter, r *http.Request, clientID string) {
 	s.mu.RLock()
 	client, exists := s.clients[clientID]
+	if exists {
+		client = client.Clone()
+	}
 	s.mu.RUnlock()
 
 	if !exists {
@@ -824,9 +885,10 @@ func (s *Server) updateClient(w http.ResponseWriter, r *http.Request, clientID s
 	if updates.JWTConfig != nil {
 		client.JWTConfig = updates.JWTConfig
 	}
+	response := client.Clone()
 	s.mu.Unlock()
 
-	_ = json.NewEncoder(w).Encode(client)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func (s *Server) deleteClient(w http.ResponseWriter, r *http.Request, clientID string) {
