@@ -312,7 +312,7 @@ func (s *Server) createOrganizationInvitation(w http.ResponseWriter, r *http.Req
 			inv.InviteeEmail, orgID, inv.InvitationURL)
 	}
 
-	// Auth0 answers 200 here, not 201.
+	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(viewInvitation(&inv))
 }
 

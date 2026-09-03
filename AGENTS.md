@@ -73,6 +73,12 @@ just ci
 
 - Match Auth0's wire shapes exactly. Verify against `github.com/auth0/go-auth0/management` rather
   than from memory — the SDK's structs and doc comments are the contract consumers decode with.
+- For **status codes, use the SDK's recorded traffic**, not the docs site:
+  `$(go env GOMODCACHE)/github.com/auth0/go-auth0@*/test/data/recordings/*.yaml` holds real
+  request/response pairs. The published OpenAPI page disagrees with them in places — it lists 200
+  for `POST /organizations/{id}/invitations`, which actually returns 201. Auth0 is not uniform
+  here: role create and delete return 200, organization/client/invitation/enabled-connection
+  create return 201, and member-role writes return 204.
 - Errors use `writeAuth0Error`, which renders `{statusCode, error, message}`. The SDK decodes that
   into `management.Error`; a bare `{"error": "..."}` still yields the right status but loses the
   message.

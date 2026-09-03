@@ -110,7 +110,7 @@ func (s *Server) createRole(w http.ResponseWriter, r *http.Request) {
 	stored := req
 	s.roles[stored.ID] = &stored
 
-	// Auth0 answers 200 here, not 201.
+	// 200, not 201: see test/data/recordings/TestRoleManager_Create.yaml.
 	_ = json.NewEncoder(w).Encode(req)
 }
 

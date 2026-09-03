@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -510,5 +511,102 @@ func TestOrgRolesNotSeededWithoutOrganization(t *testing.T) {
 	}
 	if _, present := after.AppMetadata["org_roles"]; present {
 		t.Errorf("org_roles was written for a login with no organization: %#v", after.AppMetadata)
+	}
+}
+
+// TestManagementStatusCodes pins the success codes against the SDK's recorded
+// traffic (test/data/recordings/*.yaml). Auth0 is not uniform: role writes
+// answer 200, most creates 201, member-role writes 204. The docs site
+// disagrees with the recordings on invitations, so the recordings win.
+func TestManagementStatusCodes(t *testing.T) {
+	f, cleanup := newInviteFixture(t)
+	defer cleanup()
+
+	body := func(v string) io.Reader { return strings.NewReader(v) }
+
+	cases := []struct {
+		name, method, path string
+		payload            string
+		want               int
+	}{
+		{"create role", http.MethodPost, "/api/v2/roles", `{"name":"pinned"}`, http.StatusOK},
+		{"create organization", http.MethodPost, "/api/v2/organizations", `{"name":"pinned-org"}`, http.StatusCreated},
+		{"create client", http.MethodPost, "/api/v2/clients", `{"name":"Pinned"}`, http.StatusCreated},
+		{
+			"create invitation", http.MethodPost,
+			"/api/v2/organizations/" + f.orgID + "/invitations",
+			`{"inviter":{"name":"A"},"invitee":{"email":"pin@example.test"},"client_id":"` + f.clientID + `"}`,
+			http.StatusCreated,
+		},
+		{
+			"assign member roles", http.MethodPost,
+			"/api/v2/organizations/" + f.orgID + "/members/test_user_1/roles",
+			`{"roles":["` + f.adminRoleID + `"]}`, http.StatusNoContent,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(tc.method, f.ts.URL+tc.path, body(tc.payload))
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("%s %s: %v", tc.method, tc.path, err)
+			}
+			got, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+
+			if resp.StatusCode != tc.want {
+				t.Errorf("%s %s = %d, want %d: %s", tc.method, tc.path, resp.StatusCode, tc.want, got)
+			}
+		})
+	}
+
+	t.Run("delete role", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodDelete, f.ts.URL+"/api/v2/roles/"+f.adminRoleID, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("delete role: %v", err)
+		}
+		_, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("DELETE role = %d, want 200", resp.StatusCode)
+		}
+	})
+}
+
+// TestInvitationRolesMinItems covers the schema's minItems 1: an omitted
+// roles field is fine, an explicit empty array is not.
+func TestInvitationRolesMinItems(t *testing.T) {
+	f, cleanup := newInviteFixture(t)
+	defer cleanup()
+
+	post := func(t *testing.T, payload string) int {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost,
+			f.ts.URL+"/api/v2/organizations/"+f.orgID+"/invitations",
+			strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		_, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	base := `"inviter":{"name":"A"},"client_id":"` + f.clientID + `"`
+
+	if got := post(t, `{`+base+`,"invitee":{"email":"omitted@example.test"}}`); got != http.StatusCreated {
+		t.Errorf("omitted roles = %d, want 201", got)
+	}
+	if got := post(t, `{`+base+`,"invitee":{"email":"empty@example.test"},"roles":[]}`); got != http.StatusBadRequest {
+		t.Errorf("explicit empty roles = %d, want 400 (minItems 1)", got)
 	}
 }
