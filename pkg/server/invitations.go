@@ -172,7 +172,7 @@ func (s *Server) createOrganizationInvitation(w http.ResponseWriter, r *http.Req
 		TTLSec              *int           `json:"ttl_sec"`
 		AppMetadata         map[string]any `json:"app_metadata"`
 		UserMetadata        map[string]any `json:"user_metadata"`
-		Roles               []string       `json:"roles"`
+		Roles               *[]string      `json:"roles"`
 		SendInvitationEmail *bool          `json:"send_invitation_email"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -253,16 +253,26 @@ func (s *Server) createOrganizationInvitation(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	var roles []string
+	if req.Roles != nil {
+		roles = *req.Roles
+		// The schema sets minItems 1, so an explicit empty array is invalid
+		// where an omitted field is fine.
+		if len(roles) == 0 {
+			writeAuth0Error(w, http.StatusBadRequest, "roles should NOT have fewer than 1 items")
+			return
+		}
+	}
 	// The mock's member role is a single value, so more than one role cannot
 	// be modelled through acceptance. Refuse rather than silently drop.
-	if len(req.Roles) > 1 {
+	if len(roles) > 1 {
 		writeAuth0Error(w, http.StatusBadRequest,
-			"the auth0 mock models one role per invitation; got "+strconv.Itoa(len(req.Roles)))
+			"the auth0 mock models one role per invitation; got "+strconv.Itoa(len(roles)))
 		return
 	}
 	// A role id that names nothing would carry a grant that resolves to
 	// nothing on acceptance.
-	if unknown := s.unknownRoleIDs(req.Roles); len(unknown) > 0 {
+	if unknown := s.unknownRoleIDs(roles); len(unknown) > 0 {
 		writeAuth0Error(w, http.StatusBadRequest,
 			"unknown role ids: "+strings.Join(unknown, ", "))
 		return
@@ -290,7 +300,7 @@ func (s *Server) createOrganizationInvitation(w http.ResponseWriter, r *http.Req
 		InvitationURL:       link,
 		AppMetadata:         config.AppMetadata(req.AppMetadata).Clone(),
 		UserMetadata:        config.AppMetadata(req.UserMetadata).Clone(),
-		Roles:               req.Roles,
+		Roles:               roles,
 		SendInvitationEmail: req.SendInvitationEmail == nil || *req.SendInvitationEmail,
 		CreatedAt:           now,
 		ExpiresAt:           now.Add(time.Duration(ttlSec) * time.Second),
@@ -302,7 +312,7 @@ func (s *Server) createOrganizationInvitation(w http.ResponseWriter, r *http.Req
 			inv.InviteeEmail, orgID, inv.InvitationURL)
 	}
 
-	w.WriteHeader(http.StatusCreated)
+	// Auth0 answers 200 here, not 201.
 	_ = json.NewEncoder(w).Encode(viewInvitation(&inv))
 }
 
