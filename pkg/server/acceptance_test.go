@@ -391,8 +391,8 @@ func TestInvitationAcceptanceRejections(t *testing.T) {
 }
 
 // TestInvitationForcedConnectionIsEnforced covers connection_id on the
-// invitation: it forces authentication through that connection, so a login on
-// any other one cannot redeem it.
+// invitation: the link carries it, and a login on any other connection cannot
+// redeem the ticket.
 func TestInvitationForcedConnectionIsEnforced(t *testing.T) {
 	f, cleanup := newInviteFixture(t)
 	defer cleanup()
@@ -405,24 +405,39 @@ func TestInvitationForcedConnectionIsEnforced(t *testing.T) {
 		t.Fatalf("CreateInvitation: %v", err)
 	}
 
-	// The invitation URL carries no connection, so a plain follow is refused.
-	if tokens, _, msg := followInvitation(t, f.ts.URL, inv.GetInvitationURL(), email, f.clientID); tokens != nil {
-		t.Error("an invitation with a forced connection was redeemed without it")
+	// The generated link names the connection, so following it works as-is.
+	link := inv.GetInvitationURL()
+	if got := mustQuery(t, link).Get("connection"); got != f.connectionID {
+		t.Fatalf("invitation_url connection = %q, want %q", got, f.connectionID)
+	}
+	if tokens, st, msg := followInvitation(t, f.ts.URL, link, email, f.clientID); tokens == nil {
+		t.Fatalf("the forced connection should be accepted: %d %s", st, msg)
+	}
+
+	// A tampered link naming a different connection is refused.
+	second := f.invitation("forced-conn-2@example.test")
+	second.ConnectionID = &f.connectionID
+	if err := f.m.Organization.CreateInvitation(ctx, f.orgID, second); err != nil {
+		t.Fatalf("CreateInvitation: %v", err)
+	}
+	tampered := strings.Replace(second.GetInvitationURL(),
+		"connection="+f.connectionID, "connection=con_email", 1)
+
+	tokens, _, msg := followInvitation(t, f.ts.URL, tampered, "forced-conn-2@example.test", f.clientID)
+	if tokens != nil {
+		t.Error("an invitation was redeemed through the wrong connection")
 	} else if !strings.Contains(msg, "different connection") {
 		t.Errorf("unexpected refusal: %s", msg)
 	}
+}
 
-	// A different connection is refused too.
-	wrong := inv.GetInvitationURL() + "&connection=con_email"
-	if tokens, _, _ := followInvitation(t, f.ts.URL, wrong, email, f.clientID); tokens != nil {
-		t.Error("an invitation was redeemed through the wrong connection")
+func mustQuery(t *testing.T, raw string) url.Values {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %q: %v", raw, err)
 	}
-
-	// The named one works.
-	right := inv.GetInvitationURL() + "&connection=" + f.connectionID
-	if tokens, st, msg := followInvitation(t, f.ts.URL, right, email, f.clientID); tokens == nil {
-		t.Fatalf("the forced connection should be accepted: %d %s", st, msg)
-	}
+	return u.Query()
 }
 
 // TestInvitationIsSingleUse covers the replay half of requirement 4: once

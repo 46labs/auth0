@@ -1,7 +1,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"log"
 
 	"github.com/spf13/viper"
 )
@@ -21,7 +23,15 @@ func init() {
 	viper.AddConfigPath("/config")
 	viper.AddConfigPath(".")
 
-	_ = viper.ReadInConfig()
+	// A missing file is fine; a malformed one is not. Swallowing this left the
+	// server running with no file-backed users, organizations or clients and
+	// no indication why.
+	if err := viper.ReadInConfig(); err != nil {
+		var notFound viper.ConfigFileNotFoundError
+		if !errors.As(err, &notFound) {
+			log.Fatalf("reading config %s: %v", viper.ConfigFileUsed(), err)
+		}
+	}
 }
 
 type Option func(*Config)

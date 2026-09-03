@@ -11,6 +11,10 @@ spec:
       {{- include "auth0.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        # subPath mounts do not refresh in a running container, and the server
+        # reads config only at startup, so a config change has to roll the pod.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
       labels:
         {{- include "auth0.selectorLabels" . | nindent 8 }}
     spec:

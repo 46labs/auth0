@@ -1044,12 +1044,19 @@ func (s *Server) updateClient(w http.ResponseWriter, r *http.Request, clientID s
 		return
 	}
 
-	// name is required at creation, so an empty one is a bad request rather
-	// than an instruction to clear it.
+	// Validate the whole patch before applying any of it: a rejected request
+	// must not leave earlier fields written.
 	if updates.Name != nil && *updates.Name == "" {
 		s.mu.Unlock()
 		writeAuth0Error(w, http.StatusBadRequest, "name cannot be empty")
 		return
+	}
+	if updates.InitiateLoginURI != nil && *updates.InitiateLoginURI != "" {
+		if err := validateInitiateLoginURI(*updates.InitiateLoginURI); err != nil {
+			s.mu.Unlock()
+			writeAuth0Error(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	if updates.Name != nil {
@@ -1071,13 +1078,6 @@ func (s *Server) updateClient(w http.ResponseWriter, r *http.Request, clientID s
 		client.JWTConfig = *updates.JWTConfig
 	}
 	if updates.InitiateLoginURI != nil {
-		if *updates.InitiateLoginURI != "" {
-			if err := validateInitiateLoginURI(*updates.InitiateLoginURI); err != nil {
-				s.mu.Unlock()
-				writeAuth0Error(w, http.StatusBadRequest, err.Error())
-				return
-			}
-		}
 		client.InitiateLoginURI = *updates.InitiateLoginURI
 	}
 	response := client.Clone()

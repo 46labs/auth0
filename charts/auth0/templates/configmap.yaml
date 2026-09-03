@@ -11,7 +11,7 @@ data:
     port: {{ .Values.config.port }}
     corsOrigins:
     {{- range .Values.config.corsOrigins }}
-    - {{ . }}
+    - {{ . | quote }}
     {{- end }}
     users:
     {{- toYaml .Values.config.users | nindent 4 }}
