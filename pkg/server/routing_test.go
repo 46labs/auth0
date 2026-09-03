@@ -58,6 +58,8 @@ func TestUnimplementedOrgSubresourceDoesNotMutateOrg(t *testing.T) {
 		assertOrgPresent(t, "after DeleteConnection")
 	})
 
+	// Raw HTTP by necessity: the SDK has no method for a path that does not
+	// exist, and an invented subresource is the point of the test.
 	t.Run("DeepUnknownSubpath", func(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/v2/organizations/org_test/not/a/real/route", nil)
 		resp, err := http.DefaultClient.Do(req)

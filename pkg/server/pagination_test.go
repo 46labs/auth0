@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -239,31 +238,40 @@ func TestPaginateHugePageDoesNotOverflow(t *testing.T) {
 	}
 }
 
-// TestPaginateOverflowThroughAHandler proves the guard holds end to end, since
-// a panic in a handler surfaces as a broken response rather than a Go panic in
-// the test process.
+// TestPaginateOverflowThroughAHandler proves the guard holds end to end
+// across every paginated collection. Driven through the SDK: a panicking
+// handler surfaces to a real client as a broken connection, which is exactly
+// what a consumer would hit.
 func TestPaginateOverflowThroughAHandler(t *testing.T) {
-	_, ts := setupTestServer(t)
-	defer ts.Close()
+	f, cleanup := newInviteFixture(t)
+	defer cleanup()
+	ctx := context.Background()
 
-	for _, path := range []string{
-		"/api/v2/organizations?page=9223372036854775807",
-		"/api/v2/connections?page=9223372036854775807&per_page=100",
-		"/api/v2/clients?page=9223372036854775807",
-		"/api/v2/organizations/org_test/members?page=9223372036854775807",
-		"/api/v2/organizations/org_test/enabled_connections?page=9223372036854775807",
-		"/api/v2/organizations/org_test/invitations?page=9223372036854775807",
-		"/api/v2/users/test_user_1/organizations?page=9223372036854775807",
-	} {
-		resp, err := http.Get(ts.URL + path)
-		if err != nil {
-			t.Errorf("GET %s: %v", path, err)
-			continue
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("GET %s: got %d, want 200", path, resp.StatusCode)
-		}
+	// Give every collection something to page over.
+	if err := f.m.Organization.CreateInvitation(ctx, f.orgID,
+		f.invitation("overflow@example.test")); err != nil {
+		t.Fatalf("CreateInvitation: %v", err)
+	}
+
+	huge := management.Page(math.MaxInt)
+	perPage := management.PerPage(100)
+
+	calls := map[string]func() error{
+		"Organization.List":        func() error { _, err := f.m.Organization.List(ctx, huge, perPage); return err },
+		"Connection.List":          func() error { _, err := f.m.Connection.List(ctx, huge, perPage); return err },
+		"Client.List":              func() error { _, err := f.m.Client.List(ctx, huge, perPage); return err },
+		"Role.List":                func() error { _, err := f.m.Role.List(ctx, huge, perPage); return err },
+		"Organization.Members":     func() error { _, err := f.m.Organization.Members(ctx, f.orgID, huge, perPage); return err },
+		"Organization.Connections": func() error { _, err := f.m.Organization.Connections(ctx, f.orgID, huge, perPage); return err },
+		"Organization.Invitations": func() error { _, err := f.m.Organization.Invitations(ctx, f.orgID, huge, perPage); return err },
+		"User.Organizations":       func() error { _, err := f.m.User.Organizations(ctx, "test_user_1", huge, perPage); return err },
+	}
+
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			if err := call(); err != nil {
+				t.Errorf("%s with page=MaxInt: %v", name, err)
+			}
+		})
 	}
 }

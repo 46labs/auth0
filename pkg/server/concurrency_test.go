@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/url"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/auth0/go-auth0/management"
 )
 
 var sessionIDRe = regexp.MustCompile(`name="session_id"[^>]*value="([^"]*)"`)
@@ -147,26 +150,26 @@ func TestConcurrentLoginAndManagementAPI(t *testing.T) {
 		}(i)
 	}
 
+	m, err := management.New(ts.URL, management.WithStaticToken("mock_token"), management.WithInsecure())
+	if err != nil {
+		t.Fatalf("management.New: %v", err)
+	}
+	ctx := context.Background()
+
 	// Concurrent readers of the member/user join and the user record.
 	for range 12 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for _, path := range []string{
-				"/api/v2/organizations/org_test/members",
-				"/api/v2/users/test_user_1",
-				"/api/v2/users/test_user_1/organizations",
-				"/api/v2/organizations",
-			} {
-				resp, err := http.Get(ts.URL + path)
-				if err != nil {
-					t.Errorf("GET %s: %v", path, err)
-					continue
-				}
-				_, _ = io.Copy(io.Discard, resp.Body)
-				_ = resp.Body.Close()
-				if resp.StatusCode != http.StatusOK {
-					t.Errorf("GET %s: got %d", path, resp.StatusCode)
+			reads := map[string]func() error{
+				"Organization.Members": func() error { _, err := m.Organization.Members(ctx, "org_test"); return err },
+				"User.Read":            func() error { _, err := m.User.Read(ctx, "test_user_1"); return err },
+				"User.Organizations":   func() error { _, err := m.User.Organizations(ctx, "test_user_1"); return err },
+				"Organization.List":    func() error { _, err := m.Organization.List(ctx); return err },
+			}
+			for name, read := range reads {
+				if err := read(); err != nil {
+					t.Errorf("%s: %v", name, err)
 				}
 			}
 		}()
@@ -177,17 +180,10 @@ func TestConcurrentLoginAndManagementAPI(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			req, _ := http.NewRequest(http.MethodPatch,
-				ts.URL+"/api/v2/users/test_user_1",
-				strings.NewReader(`{"app_metadata":{"tenant_id":"org_test","role":"admin"}}`))
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Errorf("PATCH user: %v", err)
-				return
+			appMeta := map[string]any{"tenant_id": "org_test", "role": "admin"}
+			if err := m.User.Update(ctx, "test_user_1", &management.User{AppMetadata: &appMeta}); err != nil {
+				t.Errorf("User.Update: %v", err)
 			}
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
 		}()
 	}
 

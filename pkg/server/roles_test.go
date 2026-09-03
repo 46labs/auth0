@@ -360,6 +360,10 @@ func TestMultipleRolesAreRefused(t *testing.T) {
 // TestListsHonourIncludeTotals covers the envelope-versus-array contract:
 // Auth0 returns a bare array unless include_totals=true, which is what
 // go-auth0 always sends.
+//
+// Raw HTTP by necessity: the assertion is about the JSON shape itself, and the
+// SDK's typed decode hides the difference between an array and an object. Every
+// other Management API test goes through the SDK.
 func TestListsHonourIncludeTotals(t *testing.T) {
 	_, ts := setupTestServer(t)
 	defer ts.Close()
@@ -391,6 +395,7 @@ func TestListsHonourIncludeTotals(t *testing.T) {
 	}
 }
 
+// decodeAny reads a list body as untyped JSON, to compare its shape.
 func decodeAny(t *testing.T, url string) any {
 	t.Helper()
 	resp, err := http.Get(url)

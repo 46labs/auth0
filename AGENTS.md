@@ -92,7 +92,14 @@ just ci
 - Great test coverage is a goal, not an afterthought.
 - **Drive the Management API through the official SDK**, not raw HTTP. It is the only way to prove
   the wire shapes decode for a real client. Raw HTTP is for the OIDC browser flows the SDK does not
-  cover.
+  cover (`/authorize`, `/oauth/token`, `/userinfo`, `.well-known/*`).
+- Need a status code? Wrap the transport: `management.WithClient` over a recording RoundTripper.
+  Need a body the SDK's typed struct cannot express (an empty `roles` array, which its `omitempty`
+  tag drops)? Use the exported `Management.Request`. Neither is a reason to reach for `http.Get`.
+- Only two things justify raw HTTP against `/api/v2`, and both carry a comment saying so: a path
+  that does not exist (no SDK method can name it) and an assertion about the JSON shape itself
+  (the SDK's typed decode hides array-versus-object). Audit with:
+  `grep -n 'http.Get\|http.NewRequest' pkg/**/*_test.go | grep -v OIDC-endpoints`.
 - Prove a test catches its bug: revert the fix, watch it fail, restore. A test that passes both ways
   documents nothing.
 - Concurrency belongs under `-race` with real goroutines. Single-goroutine tests make `-race` a
