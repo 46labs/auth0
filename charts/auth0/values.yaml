@@ -21,10 +21,19 @@ config:
   corsOrigins:
     - "*"
   users:
-    - id: user_1
+    - user_id: user_1
       phone: "+14155551234"
       email: test@46labs.test
       name: Test User
+  # Organization invitations need a non-passwordless connection and a client
+  # with an initiate_login_uri, so both are rendered by the configmap.
+  organizations: []
+  connections: []
+  roles: []
+  members: []
+  organizationConnections: []
+  clients: []
+  actions: {}
   branding:
     serviceName: Auth Service
     logoUrl: ""

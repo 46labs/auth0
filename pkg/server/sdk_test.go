@@ -372,9 +372,7 @@ func TestSDKRefreshTokenFlow(t *testing.T) {
 		// Simulate the authorization code flow
 		// In a real scenario, this would come from the redirect after user login
 		// For testing, we'll manually create a verified session
-		authCode := srv.generateID()
-		srv.verified[authCode] = *srv.getUserByID("test_user_1")
-		srv.scopes[authCode] = "openid profile email offline_access" // Store the requested scopes
+		authCode := srv.IssueAuthCode("test_user_1", "openid profile email offline_access", "", "test_client")
 
 		// Exchange authorization code for tokens
 		token, err := conf.Exchange(ctx, authCode)
@@ -425,9 +423,7 @@ func TestSDKRefreshTokenFlow(t *testing.T) {
 
 	t.Run("VerifyCustomClaimsAfterRefresh", func(t *testing.T) {
 		// Setup: Get initial tokens with offline_access
-		authCode := srv.generateID()
-		srv.verified[authCode] = *srv.getUserByID("test_user_1")
-		srv.scopes[authCode] = "openid profile email offline_access"
+		authCode := srv.IssueAuthCode("test_user_1", "openid profile email offline_access", "", "test_client")
 
 		token, err := conf.Exchange(ctx, authCode)
 		if err != nil {
@@ -482,9 +478,7 @@ func TestSDKRefreshTokenFlow(t *testing.T) {
 			Scopes:      []string{"openid", "profile", "email"}, // No offline_access
 		}
 
-		authCode := srv.generateID()
-		srv.verified[authCode] = *srv.getUserByID("test_user_1")
-		srv.scopes[authCode] = "openid profile email" // No offline_access
+		authCode := srv.IssueAuthCode("test_user_1", "openid profile email", "", "test_client")
 
 		token, err := confNoOffline.Exchange(ctx, authCode)
 		if err != nil {

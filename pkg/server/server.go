@@ -16,23 +16,47 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// authCode is the state a pending authorization code carries from the
+// /authorize redirect to its single exchange at /oauth/token. The client,
+// organization and connection are the ones the login was authorized for; the
+// exchange and the refresh path must not be able to substitute others.
+type authCode struct {
+	User          config.User
+	CodeChallenge string
+	Nonce         string
+	Scope         string
+	ClientID      string
+	OrgID         string
+	ConnectionID  string
+}
+
+// refreshTokenState carries the bindings of the login that issued the token,
+// so a refresh cannot re-scope it to another client or organization.
+type refreshTokenState struct {
+	UserID   string
+	OrgID    string
+	ClientID string
+}
+
 type Server struct {
 	cfg        *config.Config
 	privateKey *rsa.PrivateKey
 	templates  *templates.Loader
 
 	pending       map[string]string
-	verified      map[string]config.User
-	verifiers     map[string]string
-	nonces        map[string]string
-	scopes        map[string]string // maps auth_code -> requested scopes
-	refreshTokens map[string]string // maps refresh_token -> user_id
+	authCodes     map[string]*authCode
+	refreshTokens map[string]*refreshTokenState
 
 	users         map[string]*config.User
 	organizations map[string]*config.Organization
 	connections   map[string]*config.Connection
 	members       map[string][]config.OrganizationMember
 	clients       map[string]*config.Client
+	roles         map[string]*config.Role
+
+	orgConnections map[string][]config.OrganizationConnection
+	// keyed by org id, in creation order
+	invitations map[string][]config.OrganizationInvitation
 
 	mu sync.RWMutex
 }
@@ -73,22 +97,69 @@ func New(cfg *config.Config) (*Server, error) {
 		clients[cfg.Clients[i].ClientID] = &cfg.Clients[i]
 	}
 
+	roles := make(map[string]*config.Role)
+	for i := range cfg.Roles {
+		roles[cfg.Roles[i].ID] = &cfg.Roles[i]
+	}
+
+	orgConnections := buildOrgConnections(cfg)
+
 	return &Server{
-		cfg:           cfg,
-		privateKey:    key,
-		templates:     tmpl,
-		pending:       make(map[string]string),
-		verified:      make(map[string]config.User),
-		verifiers:     make(map[string]string),
-		nonces:        make(map[string]string),
-		scopes:        make(map[string]string),
-		refreshTokens: make(map[string]string),
-		users:         users,
-		organizations: organizations,
-		connections:   connections,
-		members:       members,
-		clients:       clients,
+		cfg:            cfg,
+		privateKey:     key,
+		templates:      tmpl,
+		pending:        make(map[string]string),
+		authCodes:      make(map[string]*authCode),
+		refreshTokens:  make(map[string]*refreshTokenState),
+		users:          users,
+		organizations:  organizations,
+		connections:    connections,
+		members:        members,
+		clients:        clients,
+		roles:          roles,
+		orgConnections: orgConnections,
+		invitations:    make(map[string][]config.OrganizationInvitation),
 	}, nil
+}
+
+// buildOrgConnections seeds the enabled_connections pairings from each
+// connection's Organizations list. An explicit OrganizationConnections entry
+// wins over a derived pairing for the same pair.
+func buildOrgConnections(cfg *config.Config) map[string][]config.OrganizationConnection {
+	out := make(map[string][]config.OrganizationConnection)
+
+	enabled := func(orgID, connID string) bool {
+		for _, oc := range out[orgID] {
+			if oc.ConnectionID == connID {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, declared := range cfg.OrganizationConnections {
+		if declared.OrgID == "" || declared.ConnectionID == "" ||
+			enabled(declared.OrgID, declared.ConnectionID) {
+			continue
+		}
+		oc := declared.Resolve()
+		out[oc.OrgID] = append(out[oc.OrgID], oc)
+	}
+
+	for _, conn := range cfg.Connections {
+		for _, orgID := range conn.Organizations {
+			if enabled(orgID, conn.ID) {
+				continue
+			}
+			out[orgID] = append(out[orgID], config.OrganizationConnection{
+				OrgID:        orgID,
+				ConnectionID: conn.ID,
+				ShowAsButton: true,
+			})
+		}
+	}
+
+	return out
 }
 
 func (s *Server) Handler() http.Handler {
@@ -101,19 +172,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v2/logout", s.handleLogout)
 
 	mux.HandleFunc("/api/v2/organizations", s.handleOrganizations)
-	mux.HandleFunc("/api/v2/organizations/", func(w http.ResponseWriter, r *http.Request) {
-		rest := strings.TrimPrefix(r.URL.Path, "/api/v2/organizations/")
-		switch {
-		case strings.HasPrefix(rest, "name/"):
-			s.handleOrganizationByName(w, r)
-		case strings.Contains(r.URL.Path, "/members/") && strings.Contains(r.URL.Path, "/roles"):
-			s.handleOrganizationMemberRoles(w, r)
-		case strings.Contains(r.URL.Path, "/members"):
-			s.handleOrganizationMembers(w, r)
-		default:
-			s.handleOrganization(w, r)
-		}
-	})
+	mux.HandleFunc("/api/v2/organizations/", s.routeOrganizationPath)
 	mux.HandleFunc("/api/v2/connections", s.handleConnections)
 	mux.HandleFunc("/api/v2/users/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/organizations") {
@@ -124,6 +183,8 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("/api/v2/clients", s.handleClients)
 	mux.HandleFunc("/api/v2/clients/", s.handleClient)
+	mux.HandleFunc("/api/v2/roles", s.handleRoles)
+	mux.HandleFunc("/api/v2/roles/", s.handleRole)
 
 	return mux
 }
@@ -135,22 +196,29 @@ func (s *Server) Start() error {
 	return http.ListenAndServe(addr, s.Handler())
 }
 
+// generateID mints an opaque identifier. Unpadded: real Auth0 ids carry no
+// "==" tail, and these land in URL paths and query strings.
 func (s *Server) generateID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
-	return base64.URLEncoding.EncodeToString(b)
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 func (s *Server) findUser(identifier string) *config.User {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.findUserLocked(identifier)
+}
 
+// findUserLocked requires the caller to hold the lock.
+func (s *Server) findUserLocked(identifier string) *config.User {
 	// Determine if email or phone
 	if contact.IsEmail(identifier) {
-		// Email - exact match
+		// Case-insensitive, as Auth0 treats email identifiers; an exact
+		// compare would miss an account whose stored casing differs.
 		for _, u := range s.users {
-			if u.Email == identifier {
-				return u
+			if strings.EqualFold(u.Email, identifier) {
+				return u.Clone()
 			}
 		}
 	} else {
@@ -161,7 +229,7 @@ func (s *Server) findUser(identifier string) *config.User {
 				if u.Phone != "" {
 					normalizedPhone, err := contact.NormalizePhoneToE164(u.Phone)
 					if err == nil && normalizedPhone == normalizedIdentifier {
-						return u
+						return u.Clone()
 					}
 				}
 			}
@@ -173,7 +241,11 @@ func (s *Server) findUser(identifier string) *config.User {
 func (s *Server) autoCreateUser(identifier string) *config.User {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.autoCreateUserLocked(identifier)
+}
 
+// autoCreateUserLocked requires the caller to hold the write lock.
+func (s *Server) autoCreateUserLocked(identifier string) *config.User {
 	userID := "auth0|" + s.generateID()
 	userIDPart := userID[6:] // Extract part after "auth0|"
 
@@ -215,19 +287,44 @@ func (s *Server) autoCreateUser(identifier string) *config.User {
 		}
 	}
 
-	s.users[userID] = user
+	s.users[userID] = user.Clone()
 	log.Printf("Auto-created user: %s (%s)", userID, identifier)
 	return user
 }
 
+// getUserByID returns a copy of the stored user, or nil when unknown. The copy
+// lets callers read it after the lock is released without racing a PATCH.
 func (s *Server) getUserByID(userID string) *config.User {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	if user, ok := s.users[userID]; ok {
-		return user
+		return user.Clone()
 	}
 	return nil
+}
+
+// IssueAuthCode mints an authorization code without driving the login UI, so
+// tests can exercise the token endpoint directly. An empty clientID leaves the
+// code unbound.
+func (s *Server) IssueAuthCode(userID, scope, orgID, clientID string) string {
+	user := s.getUserByID(userID)
+	if user == nil {
+		return ""
+	}
+
+	code := s.generateID()
+	s.mu.Lock()
+	s.authCodes[code] = &authCode{User: *user, Scope: scope, OrgID: orgID, ClientID: clientID}
+	s.mu.Unlock()
+	return code
+}
+
+// SetOrgConnectionForTest enables a connection on an organization (for tests).
+func (s *Server) SetOrgConnectionForTest(oc config.OrganizationConnection) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.orgConnections[oc.OrgID] = append(s.orgConnections[oc.OrgID], oc)
 }
 
 // SetUser adds or updates a user in the mock server (for testing)
@@ -237,12 +334,14 @@ func (s *Server) SetUser(userID string, user *config.User) {
 	s.users[userID] = user
 }
 
-// GetOrgMembers returns the members of an organization (for testing)
+// GetOrgMembers returns a copy of an organization's members (for testing).
 func (s *Server) GetOrgMembers(orgID string) []config.OrganizationMember {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if members, ok := s.members[orgID]; ok {
-		return members
+		out := make([]config.OrganizationMember, len(members))
+		copy(out, members)
+		return out
 	}
 	return []config.OrganizationMember{}
 }

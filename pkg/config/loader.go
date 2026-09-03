@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/viper"
@@ -21,7 +22,6 @@ func init() {
 	viper.AddConfigPath("/config")
 	viper.AddConfigPath(".")
 
-	_ = viper.ReadInConfig()
 }
 
 type Option func(*Config)
@@ -39,6 +39,17 @@ func WithBranding(b Branding) Option {
 }
 
 func Load(opts ...Option) (*Config, error) {
+	// A missing file is fine; a malformed one is not. Swallowing this left the
+	// server running with no file-backed users, organizations or clients and
+	// no indication why. Returned rather than fatal, so importing this package
+	// cannot kill the process.
+	if err := viper.ReadInConfig(); err != nil {
+		var notFound viper.ConfigFileNotFoundError
+		if !errors.As(err, &notFound) {
+			return nil, fmt.Errorf("reading config %s: %w", viper.ConfigFileUsed(), err)
+		}
+	}
+
 	cfg := &Config{
 		Issuer:      viper.GetString("issuer"),
 		Audience:    viper.GetString("audience"),
@@ -69,8 +80,16 @@ func Load(opts ...Option) (*Config, error) {
 		return nil, fmt.Errorf("unmarshal connections: %w", err)
 	}
 
+	if err := viper.UnmarshalKey("roles", &cfg.Roles); err != nil {
+		return nil, fmt.Errorf("unmarshal roles: %w", err)
+	}
+
 	if err := viper.UnmarshalKey("members", &cfg.Members); err != nil {
 		return nil, fmt.Errorf("unmarshal members: %w", err)
+	}
+
+	if err := viper.UnmarshalKey("organizationConnections", &cfg.OrganizationConnections); err != nil {
+		return nil, fmt.Errorf("unmarshal organizationConnections: %w", err)
 	}
 
 	if err := viper.UnmarshalKey("clients", &cfg.Clients); err != nil {

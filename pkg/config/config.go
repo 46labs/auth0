@@ -1,5 +1,7 @@
 package config
 
+import "time"
+
 // AppMetadata mirrors Auth0's user.app_metadata — an open map, not a typed
 // struct. Two keys have first-class meaning to the mock's JWT wiring
 // (tenant_id, role) and are exposed via helper methods, but every other key
@@ -54,7 +56,7 @@ type User struct {
 	Email         string                 `json:"email" yaml:"email" mapstructure:"email"`
 	Name          string                 `json:"name" yaml:"name" mapstructure:"name"`
 	EmailVerified bool                   `json:"email_verified" yaml:"email_verified" mapstructure:"email_verified"`
-	Blocked       *bool                  `json:"blocked,omitempty" yaml:"blocked,omitempty" mapstructure:"blocked"`           // True if user is blocked from the application
+	Blocked       *bool                  `json:"blocked,omitempty" yaml:"blocked,omitempty" mapstructure:"blocked"`          // True if user is blocked from the application
 	Identities    []UserIdentity         `json:"identities,omitempty" yaml:"identities,omitempty" mapstructure:"identities"` // Auth0 identities array
 	AppMetadata   AppMetadata            `json:"app_metadata,omitempty" yaml:"app_metadata,omitempty" mapstructure:"app_metadata"`
 	UserMetadata  map[string]interface{} `json:"user_metadata,omitempty" yaml:"user_metadata,omitempty" mapstructure:"user_metadata"`
@@ -88,10 +90,115 @@ type Connection struct {
 	Organizations  []string               `json:"organizations,omitempty" yaml:"organizations,omitempty" mapstructure:"organizations"` // Linked org IDs
 }
 
+// Role is a tenant-level role. PEE resolves its admin carrier role by name at
+// runtime, so ids are generated rather than configured.
+type Role struct {
+	ID          string `json:"id" yaml:"id" mapstructure:"id"`
+	Name        string `json:"name" yaml:"name" mapstructure:"name"`
+	Description string `json:"description,omitempty" yaml:"description,omitempty" mapstructure:"description"`
+}
+
 type OrganizationMember struct {
 	UserID string `json:"user_id" yaml:"user_id" mapstructure:"user_id"`
 	OrgID  string `json:"org_id" yaml:"org_id" mapstructure:"org_id"`
 	Role   string `json:"role,omitempty" yaml:"role,omitempty" mapstructure:"role"`
+}
+
+// OrganizationConnection is a connection enabled on an organization, the
+// enabled_connections sub-resource. Distinct from Connection: it holds the
+// per-organization login settings, not the connection definition. Name and
+// strategy are projected from the connection registry at response time.
+type OrganizationConnection struct {
+	OrgID                   string `json:"org_id"`
+	ConnectionID            string `json:"connection_id"`
+	AssignMembershipOnLogin bool   `json:"assign_membership_on_login"`
+	IsSignupEnabled         bool   `json:"is_signup_enabled"`
+	ShowAsButton            bool   `json:"show_as_button"`
+}
+
+// DeclaredOrganizationConnection is the config-file form of a pairing.
+// Separate from the resolved form because an omitted show_as_button must pick
+// up Auth0's true default, not Go's false zero value.
+type DeclaredOrganizationConnection struct {
+	OrgID                   string `yaml:"org_id" mapstructure:"org_id"`
+	ConnectionID            string `yaml:"connection_id" mapstructure:"connection_id"`
+	AssignMembershipOnLogin bool   `yaml:"assign_membership_on_login" mapstructure:"assign_membership_on_login"`
+	IsSignupEnabled         bool   `yaml:"is_signup_enabled" mapstructure:"is_signup_enabled"`
+	ShowAsButton            *bool  `yaml:"show_as_button" mapstructure:"show_as_button"`
+}
+
+// Resolve applies Auth0's defaults, yielding the pairing as stored.
+func (d DeclaredOrganizationConnection) Resolve() OrganizationConnection {
+	showAsButton := true
+	if d.ShowAsButton != nil {
+		showAsButton = *d.ShowAsButton
+	}
+	return OrganizationConnection{
+		OrgID:                   d.OrgID,
+		ConnectionID:            d.ConnectionID,
+		AssignMembershipOnLogin: d.AssignMembershipOnLogin,
+		IsSignupEnabled:         d.IsSignupEnabled,
+		ShowAsButton:            showAsButton,
+	}
+}
+
+// Invitation TTL bounds, per the Management API's ttl_sec schema.
+const (
+	InvitationDefaultTTLSec = 604800  // 7 days
+	InvitationMaxTTLSec     = 2592000 // 30 days
+)
+
+// OrganizationInvitation is a pending invitation: created on POST, removed on
+// acceptance or expiry.
+type OrganizationInvitation struct {
+	ID             string `json:"id" yaml:"id" mapstructure:"id"`
+	OrganizationID string `json:"organization_id" yaml:"organization_id" mapstructure:"organization_id"`
+	InviterName    string `json:"inviter_name" yaml:"inviter_name" mapstructure:"inviter_name"`
+	InviteeEmail   string `json:"invitee_email" yaml:"invitee_email" mapstructure:"invitee_email"`
+	ClientID       string `json:"client_id" yaml:"client_id" mapstructure:"client_id"`
+	ConnectionID   string `json:"connection_id,omitempty" yaml:"connection_id,omitempty" mapstructure:"connection_id"`
+	// carried in the invitation URL's `invitation` parameter, redeemed at login
+	TicketID      string      `json:"ticket_id" yaml:"ticket_id" mapstructure:"ticket_id"`
+	InvitationURL string      `json:"invitation_url" yaml:"invitation_url" mapstructure:"invitation_url"`
+	AppMetadata   AppMetadata `json:"app_metadata,omitempty" yaml:"app_metadata,omitempty" mapstructure:"app_metadata"`
+	UserMetadata  map[string]any
+	// role ids granted on acceptance; the carrier for the admin grant
+	Roles               []string  `json:"roles,omitempty" yaml:"roles,omitempty" mapstructure:"roles"`
+	SendInvitationEmail bool      `json:"send_invitation_email" yaml:"send_invitation_email" mapstructure:"send_invitation_email"`
+	CreatedAt           time.Time `json:"created_at" yaml:"created_at" mapstructure:"created_at"`
+	ExpiresAt           time.Time `json:"expires_at" yaml:"expires_at" mapstructure:"expires_at"`
+}
+
+// IsExpired reports whether the invitation has passed its expiry.
+func (i *OrganizationInvitation) IsExpired(now time.Time) bool {
+	return !i.ExpiresAt.IsZero() && now.After(i.ExpiresAt)
+}
+
+// Clone returns a deep copy of the invitation. Nil-safe.
+func (i *OrganizationInvitation) Clone() *OrganizationInvitation {
+	if i == nil {
+		return nil
+	}
+	out := *i
+	out.AppMetadata = i.AppMetadata.Clone()
+	out.UserMetadata = cloneAnyMap(i.UserMetadata)
+	if i.Roles != nil {
+		out.Roles = make([]string, len(i.Roles))
+		copy(out.Roles, i.Roles)
+	}
+	return &out
+}
+
+// Auth0 refuses to create an invitation for a passwordless connection.
+const (
+	StrategyEmail = "email"
+	StrategySMS   = "sms"
+)
+
+// IsPasswordless reports whether the connection's strategy is one of Auth0's
+// passwordless strategies.
+func (c *Connection) IsPasswordless() bool {
+	return c.Strategy == StrategyEmail || c.Strategy == StrategySMS
 }
 
 type Client struct {
@@ -103,6 +210,8 @@ type Client struct {
 	Callbacks    []string               `json:"callbacks,omitempty" yaml:"callbacks,omitempty" mapstructure:"callbacks"`
 	GrantTypes   []string               `json:"grant_types,omitempty" yaml:"grant_types,omitempty" mapstructure:"grant_types"`
 	JWTConfig    map[string]interface{} `json:"jwt_configuration,omitempty" yaml:"jwt_configuration,omitempty" mapstructure:"jwt_configuration"`
+	// login initiation endpoint; invitation_url is resolved against it
+	InitiateLoginURI string `json:"initiate_login_uri,omitempty" yaml:"initiate_login_uri,omitempty" mapstructure:"initiate_login_uri"`
 }
 
 type Branding struct {
@@ -114,17 +223,21 @@ type Branding struct {
 }
 
 type Config struct {
-	Issuer        string
-	Audience      string
-	Port          int
-	CORSOrigins   []string
-	Users         []User
-	Organizations []Organization
-	Connections   []Connection
-	Members       []OrganizationMember
-	Clients       []Client
-	Branding      Branding
-	Actions       Actions
+	Issuer      string
+	Audience    string
+	Port        int
+	CORSOrigins []string
+	Users       []User
+	// explicit pairings, for per-organization login settings; also derived
+	// from each Connection's Organizations list, and an entry here wins
+	OrganizationConnections []DeclaredOrganizationConnection
+	Organizations           []Organization
+	Connections             []Connection
+	Roles                   []Role
+	Members                 []OrganizationMember
+	Clients                 []Client
+	Branding                Branding
+	Actions                 Actions
 }
 
 type Actions struct {
