@@ -23,10 +23,12 @@ var (
 
 // invitationTicket identifies an invitation in a login request.
 type invitationTicket struct {
-	OrgID        string
-	TicketID     string
-	ClientID     string
-	ConnectionID string
+	OrgID    string
+	TicketID string
+	ClientID string
+	// ConnectionName is the `connection` authorize parameter, which Auth0
+	// defines as a connection name rather than an id.
+	ConnectionName string
 }
 
 // ticketFromQuery returns false for an ordinary login carrying no invitation.
@@ -36,10 +38,10 @@ func ticketFromQuery(q url.Values) (invitationTicket, bool) {
 		return invitationTicket{}, false
 	}
 	return invitationTicket{
-		OrgID:        q.Get("organization"),
-		TicketID:     ticketID,
-		ClientID:     q.Get("client_id"),
-		ConnectionID: q.Get("connection"),
+		OrgID:          q.Get("organization"),
+		TicketID:       ticketID,
+		ClientID:       q.Get("client_id"),
+		ConnectionName: q.Get("connection"),
 	}, true
 }
 
@@ -64,8 +66,11 @@ func (s *Server) lookupInvitation(t invitationTicket, now time.Time) (*config.Or
 			return nil, errInvitationWrongClient
 		}
 		// An invitation that names a connection forces authentication through
-		// it, so a login on any other connection cannot redeem it.
-		if pending[i].ConnectionID != "" && t.ConnectionID != pending[i].ConnectionID {
+		// it. The link carries no connection (the spec fixes its shape), so an
+		// omitted one means "use the ticket's"; an explicit mismatch is
+		// refused. Auth0's `connection` parameter is a name, not an id.
+		if pending[i].ConnectionID != "" && t.ConnectionName != "" &&
+			s.connectionIDByName(t.ConnectionName) != pending[i].ConnectionID {
 			return nil, errInvitationWrongConnection
 		}
 		return &pending[i], nil
@@ -76,7 +81,7 @@ func (s *Server) lookupInvitation(t invitationTicket, now time.Time) (*config.Or
 // authorizeOrgLoginLocked authorizes an org-scoped login that is not an
 // invitation redemption. Without it any caller could name an arbitrary
 // organization and get a token carrying its org_id. Caller holds the lock.
-func (s *Server) authorizeOrgLoginLocked(user *config.User, orgID, connectionID string) error {
+func (s *Server) authorizeOrgLoginLocked(user *config.User, orgID, connectionName string) error {
 	if orgID == "" {
 		return nil
 	}
@@ -94,6 +99,10 @@ func (s *Server) authorizeOrgLoginLocked(user *config.User, orgID, connectionID 
 	// authenticating against a connection that grants membership on login.
 	// It has to be *that* connection — otherwise an email OTP would autojoin
 	// through an unrelated enterprise pairing.
+	if connectionName == "" {
+		return errOrgNotMember
+	}
+	connectionID := s.connectionIDByName(connectionName)
 	if connectionID == "" {
 		return errOrgNotMember
 	}
@@ -119,10 +128,21 @@ var (
 )
 
 // authorizeOrgLogin is authorizeOrgLoginLocked with the lock taken.
-func (s *Server) authorizeOrgLogin(user *config.User, orgID, connectionID string) error {
+func (s *Server) authorizeOrgLogin(user *config.User, orgID, connectionName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.authorizeOrgLoginLocked(user, orgID, connectionID)
+	return s.authorizeOrgLoginLocked(user, orgID, connectionName)
+}
+
+// connectionIDByName resolves the `connection` authorize parameter, which
+// Auth0 expresses as a name, to the stored id. Caller holds the lock.
+func (s *Server) connectionIDByName(name string) string {
+	for _, c := range s.connections {
+		if c.Name == name {
+			return c.ID
+		}
+	}
+	return ""
 }
 
 // roleForOrg resolves the role claim for the scoped organization. org_roles is

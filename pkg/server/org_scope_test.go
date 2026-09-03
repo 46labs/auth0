@@ -171,12 +171,12 @@ func TestOrgScopedLoginRequiresMembership(t *testing.T) {
 
 		// A different connection, without the flag, must not admit them either.
 		if tokens, _, _ := loginToOrgVia(t, f.ts.URL, "+14155551234",
-			otherOrg.GetID(), "openid", "con_sms"); tokens != nil {
+			otherOrg.GetID(), "openid", "sms"); tokens != nil {
 			t.Error("a non-member was admitted through a connection lacking the flag")
 		}
 
 		tokens, status, msg := loginToOrgVia(t, f.ts.URL, "+14155551234",
-			otherOrg.GetID(), "openid", f.connectionID)
+			otherOrg.GetID(), "openid", "enterprise-sso")
 		if tokens == nil {
 			t.Fatalf("assign_membership_on_login should admit a non-member: %d %s", status, msg)
 		}

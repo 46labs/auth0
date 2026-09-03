@@ -576,7 +576,7 @@ func TestInvitationURLConstruction(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := invitationURL(tc.initiateLoginURI, "tkt_1", org, "")
+			got, err := invitationURL(tc.initiateLoginURI, "tkt_1", org)
 			if err != nil {
 				t.Fatalf("invitationURL: %v", err)
 			}
@@ -602,7 +602,7 @@ func TestInvitationURLConstruction(t *testing.T) {
 	}
 
 	t.Run("preserves an existing query parameter", func(t *testing.T) {
-		got, err := invitationURL("https://app.test/login?tenant=x", "tkt_1", org, "")
+		got, err := invitationURL("https://app.test/login?tenant=x", "tkt_1", org)
 		if err != nil {
 			t.Fatalf("invitationURL: %v", err)
 		}
@@ -630,7 +630,7 @@ func TestInvitationURLConstruction(t *testing.T) {
 			"https://app.test/#/login", // fragment
 			"https://app.test/login#x", // fragment
 		} {
-			if _, err := invitationURL(bad, "tkt_1", org, ""); err == nil {
+			if _, err := invitationURL(bad, "tkt_1", org); err == nil {
 				t.Errorf("expected %q to be rejected as an initiate_login_uri", bad)
 			}
 		}

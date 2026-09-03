@@ -271,7 +271,7 @@ func (s *Server) createOrganizationInvitation(w http.ResponseWriter, r *http.Req
 	// Build the URL first: a bad initiate_login_uri must fail the request, not
 	// yield an invitation whose link cannot be followed.
 	ticketID := "tkt_" + s.generateID()
-	link, err := invitationURL(client.InitiateLoginURI, ticketID, org, req.ConnectionID)
+	link, err := invitationURL(client.InitiateLoginURI, ticketID, org)
 	if err != nil {
 		writeAuth0Error(w, http.StatusBadRequest,
 			"client "+req.ClientID+": "+err.Error())
@@ -353,7 +353,7 @@ func (s *Server) deleteOrganizationInvitation(w http.ResponseWriter, orgID, invi
 // invitationURL builds <login_uri>?invitation=<ticket>&organization=<org>
 // &organization_name=<name>, which the SPA forwards to loginWithRedirect.
 // Parsed rather than concatenated so an existing query survives.
-func invitationURL(initiateLoginURI, ticketID string, org *config.Organization, connectionID string) (string, error) {
+func invitationURL(initiateLoginURI, ticketID string, org *config.Organization) (string, error) {
 	u, err := url.Parse(initiateLoginURI)
 	if err != nil {
 		return "", err
@@ -366,11 +366,6 @@ func invitationURL(initiateLoginURI, ticketID string, org *config.Organization, 
 	q.Set("invitation", ticketID)
 	q.Set("organization", org.ID)
 	q.Set("organization_name", org.Name)
-	// An invitation that forces a connection has to say so in its own link,
-	// or the SPA has nothing to forward and the ticket cannot be redeemed.
-	if connectionID != "" {
-		q.Set("connection", connectionID)
-	}
 	u.RawQuery = q.Encode()
 
 	return u.String(), nil

@@ -391,44 +391,55 @@ func TestInvitationAcceptanceRejections(t *testing.T) {
 }
 
 // TestInvitationForcedConnectionIsEnforced covers connection_id on the
-// invitation: the link carries it, and a login on any other connection cannot
-// redeem the ticket.
+// invitation. The link's shape is fixed by the spec and carries no
+// connection, so an omitted one falls back to the ticket's; an explicit
+// mismatch is refused. Auth0's `connection` parameter is a name.
 func TestInvitationForcedConnectionIsEnforced(t *testing.T) {
 	f, cleanup := newInviteFixture(t)
 	defer cleanup()
 	ctx := context.Background()
 
-	const email = "forced-conn@example.test"
-	inv := f.invitation(email)
-	inv.ConnectionID = &f.connectionID
-	if err := f.m.Organization.CreateInvitation(ctx, f.orgID, inv); err != nil {
-		t.Fatalf("CreateInvitation: %v", err)
+	newInvite := func(t *testing.T, email string) *management.OrganizationInvitation {
+		t.Helper()
+		inv := f.invitation(email)
+		inv.ConnectionID = &f.connectionID
+		if err := f.m.Organization.CreateInvitation(ctx, f.orgID, inv); err != nil {
+			t.Fatalf("CreateInvitation: %v", err)
+		}
+		return inv
 	}
 
-	// The generated link names the connection, so following it works as-is.
-	link := inv.GetInvitationURL()
-	if got := mustQuery(t, link).Get("connection"); got != f.connectionID {
-		t.Fatalf("invitation_url connection = %q, want %q", got, f.connectionID)
-	}
-	if tokens, st, msg := followInvitation(t, f.ts.URL, link, email, f.clientID); tokens == nil {
-		t.Fatalf("the forced connection should be accepted: %d %s", st, msg)
-	}
+	t.Run("LinkCarriesNoConnection", func(t *testing.T) {
+		inv := newInvite(t, "forced-a@example.test")
+		if got := mustQuery(t, inv.GetInvitationURL()).Get("connection"); got != "" {
+			t.Errorf("invitation_url should not carry a connection, got %q", got)
+		}
+		if tokens, st, msg := followInvitation(t, f.ts.URL, inv.GetInvitationURL(),
+			"forced-a@example.test", f.clientID); tokens == nil {
+			t.Fatalf("an omitted connection should fall back to the ticket: %d %s", st, msg)
+		}
+	})
 
-	// A tampered link naming a different connection is refused.
-	second := f.invitation("forced-conn-2@example.test")
-	second.ConnectionID = &f.connectionID
-	if err := f.m.Organization.CreateInvitation(ctx, f.orgID, second); err != nil {
-		t.Fatalf("CreateInvitation: %v", err)
-	}
-	tampered := strings.Replace(second.GetInvitationURL(),
-		"connection="+f.connectionID, "connection=con_email", 1)
+	t.Run("MatchingConnectionNameAccepted", func(t *testing.T) {
+		inv := newInvite(t, "forced-b@example.test")
+		// The fixture's connection is named enterprise-sso.
+		link := inv.GetInvitationURL() + "&connection=enterprise-sso"
+		if tokens, st, msg := followInvitation(t, f.ts.URL, link,
+			"forced-b@example.test", f.clientID); tokens == nil {
+			t.Fatalf("the matching connection name should be accepted: %d %s", st, msg)
+		}
+	})
 
-	tokens, _, msg := followInvitation(t, f.ts.URL, tampered, "forced-conn-2@example.test", f.clientID)
-	if tokens != nil {
-		t.Error("an invitation was redeemed through the wrong connection")
-	} else if !strings.Contains(msg, "different connection") {
-		t.Errorf("unexpected refusal: %s", msg)
-	}
+	t.Run("MismatchedConnectionRefused", func(t *testing.T) {
+		inv := newInvite(t, "forced-c@example.test")
+		link := inv.GetInvitationURL() + "&connection=email"
+		tokens, _, msg := followInvitation(t, f.ts.URL, link, "forced-c@example.test", f.clientID)
+		if tokens != nil {
+			t.Error("an invitation was redeemed through the wrong connection")
+		} else if !strings.Contains(msg, "different connection") {
+			t.Errorf("unexpected refusal: %s", msg)
+		}
+	})
 }
 
 func mustQuery(t *testing.T, raw string) url.Values {
