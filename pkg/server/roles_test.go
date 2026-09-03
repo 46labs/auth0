@@ -3,9 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/auth0/go-auth0/management"
@@ -514,99 +514,141 @@ func TestOrgRolesNotSeededWithoutOrganization(t *testing.T) {
 	}
 }
 
+// statusRecorder captures the status of each response the SDK receives, so a
+// status can be asserted while the request and its decoding still go through
+// the official client.
+type statusRecorder struct {
+	mu       sync.Mutex
+	statuses map[string]int
+	next     http.RoundTripper
+}
+
+func (r *statusRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := r.next.RoundTrip(req)
+	if resp != nil {
+		r.mu.Lock()
+		r.statuses[req.Method+" "+resp.Request.URL.Path] = resp.StatusCode
+		r.mu.Unlock()
+	}
+	return resp, err
+}
+
+func (r *statusRecorder) status(t *testing.T, method, path string) int {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	code, ok := r.statuses[method+" "+path]
+	if !ok {
+		t.Fatalf("no response recorded for %s %s (recorded: %v)", method, path, r.statuses)
+	}
+	return code
+}
+
+// sdkWithStatuses builds a Management client whose responses are recorded.
+func sdkWithStatuses(t *testing.T, baseURL string) (*management.Management, *statusRecorder) {
+	t.Helper()
+
+	rec := &statusRecorder{statuses: map[string]int{}, next: http.DefaultTransport}
+	m, err := management.New(baseURL,
+		management.WithStaticToken("mock_token"),
+		management.WithInsecure(),
+		management.WithClient(&http.Client{Transport: rec}),
+	)
+	if err != nil {
+		t.Fatalf("management.New: %v", err)
+	}
+	return m, rec
+}
+
 // TestManagementStatusCodes pins the success codes against the SDK's recorded
 // traffic (test/data/recordings/*.yaml). Auth0 is not uniform: role writes
 // answer 200, most creates 201, member-role writes 204. The docs site
 // disagrees with the recordings on invitations, so the recordings win.
+//
+// Driven through the SDK with a recording transport, so the assertion covers
+// what a real consumer sends and decodes, not just what the mock returns.
 func TestManagementStatusCodes(t *testing.T) {
 	f, cleanup := newInviteFixture(t)
 	defer cleanup()
 
-	body := func(v string) io.Reader { return strings.NewReader(v) }
+	m, rec := sdkWithStatuses(t, f.ts.URL)
+	ctx := context.Background()
 
-	cases := []struct {
-		name, method, path string
-		payload            string
-		want               int
-	}{
-		{"create role", http.MethodPost, "/api/v2/roles", `{"name":"pinned"}`, http.StatusOK},
-		{"create organization", http.MethodPost, "/api/v2/organizations", `{"name":"pinned-org"}`, http.StatusCreated},
-		{"create client", http.MethodPost, "/api/v2/clients", `{"name":"Pinned"}`, http.StatusCreated},
-		{
-			"create invitation", http.MethodPost,
-			"/api/v2/organizations/" + f.orgID + "/invitations",
-			`{"inviter":{"name":"A"},"invitee":{"email":"pin@example.test"},"client_id":"` + f.clientID + `"}`,
-			http.StatusCreated,
-		},
-		{
-			"assign member roles", http.MethodPost,
-			"/api/v2/organizations/" + f.orgID + "/members/test_user_1/roles",
-			`{"roles":["` + f.adminRoleID + `"]}`, http.StatusNoContent,
-		},
+	role := &management.Role{Name: auth0String("pinned")}
+	if err := m.Role.Create(ctx, role); err != nil {
+		t.Fatalf("Role.Create: %v", err)
+	}
+	if got := rec.status(t, http.MethodPost, "/api/v2/roles"); got != http.StatusOK {
+		t.Errorf("POST /roles = %d, want 200", got)
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			req, err := http.NewRequest(tc.method, f.ts.URL+tc.path, body(tc.payload))
-			if err != nil {
-				t.Fatalf("request: %v", err)
-			}
-			req.Header.Set("Content-Type", "application/json")
-
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatalf("%s %s: %v", tc.method, tc.path, err)
-			}
-			got, _ := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-
-			if resp.StatusCode != tc.want {
-				t.Errorf("%s %s = %d, want %d: %s", tc.method, tc.path, resp.StatusCode, tc.want, got)
-			}
-		})
+	org := &management.Organization{Name: auth0String("pinned-org")}
+	if err := m.Organization.Create(ctx, org); err != nil {
+		t.Fatalf("Organization.Create: %v", err)
+	}
+	if got := rec.status(t, http.MethodPost, "/api/v2/organizations"); got != http.StatusCreated {
+		t.Errorf("POST /organizations = %d, want 201", got)
 	}
 
-	t.Run("delete role", func(t *testing.T) {
-		req, _ := http.NewRequest(http.MethodDelete, f.ts.URL+"/api/v2/roles/"+f.adminRoleID, nil)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("delete role: %v", err)
-		}
-		_, _ = io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("DELETE role = %d, want 200", resp.StatusCode)
-		}
-	})
+	client := &management.Client{Name: auth0String("Pinned")}
+	if err := m.Client.Create(ctx, client); err != nil {
+		t.Fatalf("Client.Create: %v", err)
+	}
+	if got := rec.status(t, http.MethodPost, "/api/v2/clients"); got != http.StatusCreated {
+		t.Errorf("POST /clients = %d, want 201", got)
+	}
+
+	inv := f.invitation("pin@example.test")
+	if err := m.Organization.CreateInvitation(ctx, f.orgID, inv); err != nil {
+		t.Fatalf("CreateInvitation: %v", err)
+	}
+	invPath := "/api/v2/organizations/" + f.orgID + "/invitations"
+	if got := rec.status(t, http.MethodPost, invPath); got != http.StatusCreated {
+		t.Errorf("POST %s = %d, want 201 (the docs site says 200; the recordings say 201)", invPath, got)
+	}
+
+	if err := m.Organization.AssignMemberRoles(ctx, f.orgID, "test_user_1", []string{f.adminRoleID}); err != nil {
+		t.Fatalf("AssignMemberRoles: %v", err)
+	}
+	rolesPath := "/api/v2/organizations/" + f.orgID + "/members/test_user_1/roles"
+	if got := rec.status(t, http.MethodPost, rolesPath); got != http.StatusNoContent {
+		t.Errorf("POST %s = %d, want 204", rolesPath, got)
+	}
+
+	if err := m.Role.Delete(ctx, role.GetID()); err != nil {
+		t.Fatalf("Role.Delete: %v", err)
+	}
+	if got := rec.status(t, http.MethodDelete, "/api/v2/roles/"+role.GetID()); got != http.StatusOK {
+		t.Errorf("DELETE /roles/{id} = %d, want 200", got)
+	}
 }
 
 // TestInvitationRolesMinItems covers the schema's minItems 1: an omitted
 // roles field is fine, an explicit empty array is not.
+//
+// The SDK tags Roles omitempty, so its typed method cannot express an empty
+// array at all — the explicit case goes through Management.Request, which
+// still uses the SDK's transport and error decoding.
 func TestInvitationRolesMinItems(t *testing.T) {
 	f, cleanup := newInviteFixture(t)
 	defer cleanup()
 
-	post := func(t *testing.T, payload string) int {
-		t.Helper()
-		req, _ := http.NewRequest(http.MethodPost,
-			f.ts.URL+"/api/v2/organizations/"+f.orgID+"/invitations",
-			strings.NewReader(payload))
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("post: %v", err)
-		}
-		_, _ = io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		return resp.StatusCode
+	m, _ := sdkWithStatuses(t, f.ts.URL)
+	ctx := context.Background()
+
+	omitted := f.invitation("omitted@example.test")
+	omitted.Roles = nil
+	if err := m.Organization.CreateInvitation(ctx, f.orgID, omitted); err != nil {
+		t.Fatalf("an omitted roles field should be accepted: %v", err)
 	}
 
-	base := `"inviter":{"name":"A"},"client_id":"` + f.clientID + `"`
-
-	if got := post(t, `{`+base+`,"invitee":{"email":"omitted@example.test"}}`); got != http.StatusCreated {
-		t.Errorf("omitted roles = %d, want 201", got)
+	payload := map[string]any{
+		"inviter":   map[string]string{"name": "A"},
+		"invitee":   map[string]string{"email": "empty@example.test"},
+		"client_id": f.clientID,
+		"roles":     []string{},
 	}
-	if got := post(t, `{`+base+`,"invitee":{"email":"empty@example.test"},"roles":[]}`); got != http.StatusBadRequest {
-		t.Errorf("explicit empty roles = %d, want 400 (minItems 1)", got)
-	}
+	err := m.Request(ctx, http.MethodPost,
+		m.URI("organizations", f.orgID, "invitations"), payload)
+	assertStatus(t, err, http.StatusBadRequest)
 }
