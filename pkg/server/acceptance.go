@@ -261,7 +261,12 @@ func (s *Server) applyInvitationMetadataLocked(
 	} else {
 		delete(user.AppMetadata, config.AppMetaRole)
 	}
-	s.seedOrgRoleLocked(user, orgID, role)
+
+	// org_roles is deliberately NOT written here. Auth0 acceptance assigns the
+	// native role; the Post-Login Action converts it to org_roles at the next
+	// login. Seeding at acceptance would close a window production has — a
+	// member holding a native role with no metadata entry yet — and that window
+	// is exactly what pee's first-admin election has to cope with.
 }
 
 // removeInvitationLocked requires the caller to hold the write lock.

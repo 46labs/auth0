@@ -704,3 +704,71 @@ func TestOrgRolesSeedingDoesNotOverwrite(t *testing.T) {
 		t.Errorf("org_roles[org_test] = %q; seeding overwrote an existing entry", got)
 	}
 }
+
+// TestAcceptanceLeavesOrgRolesToTheAction pins the window PEE's first-admin
+// election has to cope with: Auth0 acceptance assigns the native role, and
+// org_roles only appears once the Post-Login Action runs at the next login.
+// Seeding at acceptance would make the mock kinder than production and hide
+// the race.
+func TestAcceptanceLeavesOrgRolesToTheAction(t *testing.T) {
+	f, cleanup := newInviteFixture(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const email = "window@example.test"
+	inv := f.createInvitation(t, email)
+
+	// Redeem without exchanging a token, which is where the Action runs.
+	ticket := invitationTicket{
+		OrgID:    f.orgID,
+		TicketID: inv.GetTicketID(),
+		ClientID: f.clientID,
+	}
+	if _, err := f.srv.redeemInvitation(ticket, email, time.Now()); err != nil {
+		t.Fatalf("redeemInvitation: %v", err)
+	}
+
+	user := f.srv.findUser(email)
+	if user == nil {
+		t.Fatal("invitee not created")
+	}
+
+	// The native role is assigned...
+	var memberRole string
+	for _, m := range f.srv.GetOrgMembers(f.orgID) {
+		if m.UserID == user.ID {
+			memberRole = m.Role
+		}
+	}
+	if memberRole != "admin" {
+		t.Errorf("member role = %q, want admin assigned at acceptance", memberRole)
+	}
+
+	// ...and the members endpoint reports it, so a consumer that wants to see
+	// this member before their first login can.
+	members, err := f.m.Organization.Members(ctx, f.orgID)
+	if err != nil {
+		t.Fatalf("Organization.Members: %v", err)
+	}
+	var reported string
+	for _, m := range members.Members {
+		if m.GetUserID() == user.ID && len(m.Roles) == 1 {
+			reported = m.Roles[0].GetName()
+		}
+	}
+	if reported != "admin" {
+		t.Errorf("members endpoint reports %q, want admin", reported)
+	}
+
+	// ...but org_roles is still absent until a login runs the Action.
+	if got := user.AppMetadata.OrgRole(f.orgID); got != "" {
+		t.Errorf("org_roles[%s] = %q at acceptance; the Action writes it at login", f.orgID, got)
+	}
+
+	// One login closes it.
+	if seeded := f.srv.seedOrgRoles(user.ID, f.orgID); seeded == nil {
+		t.Fatal("seedOrgRoles returned nil")
+	} else if got := seeded.AppMetadata.OrgRole(f.orgID); got != "admin" {
+		t.Errorf("org_roles[%s] = %q after the Action, want admin", f.orgID, got)
+	}
+}
