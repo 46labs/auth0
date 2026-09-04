@@ -441,3 +441,80 @@ func TestConnectionDisabledClientCannotAuthorize(t *testing.T) {
 		t.Fatal("the wildcard fixture connection refused a client")
 	}
 }
+
+// The states are distinct: never-declared means unrestricted, explicitly
+// emptied means nothing may authorize, and an unresolved name is refused.
+func TestConnectionClientGateFailsClosed(t *testing.T) {
+	srv, m := connMgmt(t)
+	ctx := context.Background()
+
+	conn := &management.Connection{
+		Name:           auth0.String("enterprise-closed"),
+		Strategy:       auth0.String("oidc"),
+		EnabledClients: &[]string{"mgmt_client_dev"},
+	}
+	if err := m.Connection.Create(ctx, conn); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if !srv.connectionAllowsClient("enterprise-closed", "mgmt_client_dev") {
+		t.Fatal("an enabled client was refused")
+	}
+
+	// Disabling the last one leaves an empty set, which must mean "none".
+	if err := m.Connection.UpdateEnabledClients(ctx, conn.GetID(), []management.ConnectionEnabledClient{
+		{ClientID: auth0.String("mgmt_client_dev"), Status: auth0.Bool(false)},
+	}); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if srv.connectionAllowsClient("enterprise-closed", "mgmt_client_dev") {
+		t.Fatal("an emptied enabled_clients set was read as unrestricted")
+	}
+
+	// A name that resolves to nothing must be refused, or deleting a connection
+	// never actually disables explicit login through it.
+	if srv.connectionAllowsClient("no-such-connection", "mgmt_client_dev") {
+		t.Fatal("an unresolved connection name was allowed")
+	}
+}
+
+// A wildcard must not survive a targeted disable: the read would stop listing
+// the client while authorization still succeeded through "*".
+func TestConnectionWildcardDisableIsEffective(t *testing.T) {
+	srv, m := connMgmt(t)
+
+	// con_sms ships as EnabledClients: ["*"].
+	if !srv.connectionAllowsClient("sms", "mgmt_client_test") {
+		t.Fatal("wildcard did not admit a client")
+	}
+	if err := m.Connection.UpdateEnabledClients(context.Background(), "con_sms",
+		[]management.ConnectionEnabledClient{
+			{ClientID: auth0.String("mgmt_client_test"), Status: auth0.Bool(false)},
+		}); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+
+	if srv.connectionAllowsClient("sms", "mgmt_client_test") {
+		t.Fatal("the disabled client still authorizes through the wildcard")
+	}
+	if !srv.connectionAllowsClient("sms", "mgmt_client_dev") {
+		t.Fatal("disabling one client removed the others")
+	}
+}
+
+// Omitting the connection parameter must not skip the gate: the login path
+// resolves one from the identifier, so the check has to resolve the same way.
+func TestAuthorizeGateAppliesToInferredConnection(t *testing.T) {
+	srv, m := connMgmt(t)
+
+	if err := m.Connection.UpdateEnabledClients(context.Background(), "con_email",
+		[]management.ConnectionEnabledClient{
+			{ClientID: auth0.String("mgmt_client_test"), Status: auth0.Bool(false)},
+		}); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+
+	if err := srv.authorizeClientAllowed("", "mgmt_client_test", "someone@example.test"); err == nil {
+		t.Fatal("an omitted connection skipped the client gate")
+	}
+}

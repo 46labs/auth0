@@ -261,6 +261,21 @@ func (s *Server) connectionAllowsClient(connName, clientID string) bool {
 	return s.connectionAllowsClientLocked(connName, clientID)
 }
 
+// authorizeClientAllowed gates an /authorize request on the connection's
+// enabled clients. An omitted connection is resolved the same way the login
+// path resolves it, so the gate is not skippable by leaving the parameter off.
+func (s *Server) authorizeClientAllowed(connName, clientID, identifier string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if connName == "" {
+		connName = s.inferConnectionNameLocked(identifier)
+	}
+	if !s.connectionAllowsClientLocked(connName, clientID) {
+		return errConnectionNotEnabled
+	}
+	return nil
+}
+
 // connectionIdentityLocked resolves a connection id to the (name, strategy)
 // pair an identity carries. Auth0 names the connection but reports the strategy
 // as the provider, so an enterprise-sso/oidc connection yields
