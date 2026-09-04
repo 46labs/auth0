@@ -76,21 +76,31 @@ func (s *Server) getConnection(w http.ResponseWriter, connID string) {
 // whole block; merging here would hide that from consumers until production.
 // name and strategy are immutable in Auth0 and are ignored.
 func (s *Server) updateConnection(w http.ResponseWriter, r *http.Request, connID string) {
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		writeAuth0Error(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	// Anything config.Connection cannot hold is refused rather than accepted
+	// and dropped. Silently ignoring a field answers 200 while the next read
+	// loses the write, which reads as a converged provisioning run that did
+	// nothing. name and strategy are immutable in Auth0 and ignored, matching it.
+	for k := range raw {
+		switch k {
+		case "display_name", "enabled_clients", "options", "name", "strategy", "id":
+		default:
+			writeAuth0Error(w, http.StatusBadRequest, "connection field not implemented by the auth0 mock: "+k)
+			return
+		}
+	}
 	var patch struct {
 		DisplayName    *string                `json:"display_name"`
 		EnabledClients *[]string              `json:"enabled_clients"`
 		Options        map[string]interface{} `json:"options"`
-		Metadata       map[string]string      `json:"metadata"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+	body, _ := json.Marshal(raw)
+	if err := json.Unmarshal(body, &patch); err != nil {
 		writeAuth0Error(w, http.StatusBadRequest, "invalid body")
-		return
-	}
-	// config.Connection has nowhere to keep metadata. Accepting it and dropping
-	// it would answer 200 while the next read loses the write, so refuse it
-	// outright until the type carries it.
-	if patch.Metadata != nil {
-		writeAuth0Error(w, http.StatusBadRequest, "connection metadata is not implemented by the auth0 mock")
 		return
 	}
 
@@ -131,7 +141,10 @@ func (s *Server) deleteConnection(w http.ResponseWriter, connID string) {
 	conn, ok := s.connections[connID]
 	if !ok {
 		s.mu.Unlock()
-		writeAuth0Error(w, http.StatusNotFound, "connection not found")
+		// Auth0 records a repeated delete of the same id as 204 with an empty
+		// body, not 404 (TestConnectionManager_Delete.yaml). Retried cleanup
+		// must not look like a different outcome locally.
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	connName := conn.Name
@@ -181,7 +194,10 @@ func (s *Server) deleteConnection(w http.ResponseWriter, connID string) {
 // which Auth0 takes as a bare JSON array rather than an object wrapper.
 type connectionClient struct {
 	ClientID string `json:"client_id"`
-	Status   bool   `json:"status"`
+	// Pointer, because the SDK omits status when the caller leaves it nil.
+	// Decoding into a plain bool would turn that omission into false and
+	// silently disable the client while answering 204.
+	Status *bool `json:"status"`
 }
 
 // connectionClientView is the GET shape, which carries client_id only. Echoing
@@ -253,6 +269,11 @@ func (s *Server) updateConnectionClients(w http.ResponseWriter, r *http.Request,
 			writeAuth0Error(w, http.StatusBadRequest, "client_id is required")
 			return
 		}
+		if c.Status == nil {
+			s.mu.Unlock()
+			writeAuth0Error(w, http.StatusBadRequest, "status is required for "+c.ClientID)
+			return
+		}
 		if _, exists := s.clients[c.ClientID]; !exists {
 			s.mu.Unlock()
 			writeAuth0Error(w, http.StatusBadRequest, "unknown client "+c.ClientID)
@@ -260,7 +281,7 @@ func (s *Server) updateConnectionClients(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	for _, c := range patch {
-		conn.EnabledClients = setClientEnabled(conn.EnabledClients, c.ClientID, c.Status)
+		conn.EnabledClients = setClientEnabled(conn.EnabledClients, c.ClientID, *c.Status)
 	}
 	s.mu.Unlock()
 

@@ -188,7 +188,16 @@ func (s *Server) redeemInvitation(t invitationTicket, identifier string, now tim
 
 	user := s.findUserLocked(inv.InviteeEmail)
 	if user == nil {
-		user = s.autoCreateUserLocked(inv.InviteeEmail)
+		// Record the connection the invitee actually redeemed through. Falling
+		// back to the identifier heuristic would stamp an enterprise user with
+		// an email identity, and connection deletion finds users by identity.
+		connName := ""
+		if inv.ConnectionID != "" {
+			if c, ok := s.connections[inv.ConnectionID]; ok {
+				connName = c.Name
+			}
+		}
+		user = s.autoCreateUserOnConnectionLocked(inv.InviteeEmail, connName)
 	}
 
 	stored, ok := s.users[user.ID]

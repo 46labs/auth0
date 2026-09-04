@@ -245,8 +245,20 @@ func (s *Server) autoCreateUser(identifier string) *config.User {
 	return s.autoCreateUserLocked(identifier)
 }
 
-// autoCreateUserLocked requires the caller to hold the write lock.
+// autoCreateUserLocked requires the caller to hold the write lock. The identity
+// connection is inferred from the identifier format.
 func (s *Server) autoCreateUserLocked(identifier string) *config.User {
+	return s.autoCreateUserOnConnectionLocked(identifier, "")
+}
+
+// autoCreateUserOnConnectionLocked records the connection the user actually
+// arrived through when the caller knows it. Inferring email or sms from the
+// identifier is wrong for anyone signing in via an enterprise connection: their
+// identity then names a connection they never used, and connection deletion,
+// which finds users by identity, misses them entirely.
+//
+// connName empty keeps the inferred behaviour.
+func (s *Server) autoCreateUserOnConnectionLocked(identifier, connName string) *config.User {
 	userID := "auth0|" + s.generateID()
 	userIDPart := userID[6:] // Extract part after "auth0|"
 
@@ -257,6 +269,16 @@ func (s *Server) autoCreateUserLocked(identifier string) *config.User {
 		AppMetadata:   config.AppMetadata{},
 		UserMetadata:  make(map[string]interface{}),
 	}
+
+	defer func() {
+		if connName == "" {
+			return
+		}
+		for i := range user.Identities {
+			user.Identities[i].Connection = connName
+			user.Identities[i].Provider = connName
+		}
+	}()
 
 	// Determine if email or phone based on format
 	if contact.IsEmail(identifier) {

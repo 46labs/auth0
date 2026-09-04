@@ -327,3 +327,76 @@ func TestConnectionUpdateRejectsUnsupportedMetadata(t *testing.T) {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
+
+// Auth0 records a repeated delete of the same id as 204 with an empty body, so
+// retried cleanup must not look like a different outcome locally.
+func TestConnectionDeleteIsIdempotent(t *testing.T) {
+	srv, m := connMgmt(t)
+	ctx := context.Background()
+
+	conn := &management.Connection{Name: auth0.String("enterprise-twice"), Strategy: auth0.String("oidc")}
+	if err := m.Connection.Create(ctx, conn); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := m.Connection.Delete(ctx, conn.GetID()); err != nil {
+		t.Fatalf("first Delete: %v", err)
+	}
+	if err := m.Connection.Delete(ctx, conn.GetID()); err != nil {
+		t.Fatalf("repeated Delete should be a no-op, got: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v2/connections/"+conn.GetID(), nil)
+	rec := httptest.NewRecorder()
+	srv.handleConnection(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("repeat status = %d, want 204", rec.Code)
+	}
+}
+
+// A field the mock cannot persist must be refused, not accepted and dropped:
+// answering 200 makes a provisioning run look converged when nothing changed.
+func TestConnectionUpdateRejectsUnpersistedFields(t *testing.T) {
+	srv, _ := connMgmt(t)
+
+	for _, body := range []string{
+		`{"metadata":{"k":"v"}}`,
+		`{"realms":["x"]}`,
+		`{"show_as_button":true}`,
+	} {
+		req := httptest.NewRequest(http.MethodPatch, "/api/v2/connections/con_sms", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		srv.handleConnection(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d, want 400", body, rec.Code)
+		}
+	}
+}
+
+// The SDK omits status when the caller leaves it nil. Decoding into a plain
+// bool would read that as "disable" and answer 204.
+func TestConnectionEnabledClientsRequiresStatus(t *testing.T) {
+	srv, _ := connMgmt(t)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v2/connections/con_sms/clients",
+		strings.NewReader(`[{"client_id":"mgmt_client_test"}]`))
+	rec := httptest.NewRecorder()
+	srv.handleConnection(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+// An invitee redeeming through an enterprise connection must carry that
+// connection on their identity, or deleting it leaves them behind.
+func TestAutoCreatedUserRecordsItsConnection(t *testing.T) {
+	srv, _ := connMgmt(t)
+
+	srv.mu.Lock()
+	u := srv.autoCreateUserOnConnectionLocked("enterprise.user@example.test", "enterprise-sso")
+	srv.mu.Unlock()
+
+	if len(u.Identities) != 1 || u.Identities[0].Connection != "enterprise-sso" {
+		t.Fatalf("identity = %+v, want the enterprise connection", u.Identities)
+	}
+}
