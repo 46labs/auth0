@@ -32,6 +32,11 @@ Probed against the published image booted on PEE's rendered `dev/auth` config.
 Create plus name-filtered list is enough for a first `EnsureConnection`, so this is not
 blocking. Everything after the first successful create is not.
 
+## Status
+
+Implemented on this branch. The table above is what 0.1.32 shipped; everything below now
+exists.
+
 ## Needed
 
 1. **`GET /api/v2/connections/{id}`**. Read-back after create, and the natural way to confirm a
@@ -68,6 +73,15 @@ earlier.
 
 ## Verification
 
-The consumer check that matters is PEE's `auth0.EnsureConnection` reaching read-or-create and
-enabled-clients convergence against this mock, driven through `go-auth0` v1.42.0 rather than
-hand-rolled HTTP, since the SDK's decoding is what actually has to hold.
+Tests are driven through `go-auth0` v1.42.0 rather than hand-rolled HTTP, since the SDK's
+decoding is what actually has to hold. `ReadEnabledClients` returns `clients` as a pointer to
+slice, so the payload is an object wrapper, not the bare array `UpdateEnabledClients` sends.
+
+Two behavioural tests were checked against a deliberately broken implementation:
+
+- treating the clients array as a replacement rather than a delta drops
+  `mgmt_client_dev`
+- skipping the pairing cleanup leaves `org_test` enabling a connection that no longer exists
+
+The remaining consumer check is PEE's `auth0.EnsureConnection` reaching read-or-create and
+enabled-clients convergence against a published image carrying this.
