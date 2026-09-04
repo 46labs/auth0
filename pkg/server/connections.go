@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,7 +88,7 @@ func (s *Server) updateConnection(w http.ResponseWriter, r *http.Request, connID
 	// nothing. name and strategy are immutable in Auth0 and ignored, matching it.
 	for k := range raw {
 		switch k {
-		case "display_name", "enabled_clients", "options", "name", "strategy", "id":
+		case "display_name", "enabled_clients", "options", "is_domain_connection", "name", "strategy", "id":
 		default:
 			writeAuth0Error(w, http.StatusBadRequest, "connection field not implemented by the auth0 mock: "+k)
 			return
@@ -97,6 +98,7 @@ func (s *Server) updateConnection(w http.ResponseWriter, r *http.Request, connID
 		DisplayName    *string                `json:"display_name"`
 		EnabledClients *[]string              `json:"enabled_clients"`
 		Options        map[string]interface{} `json:"options"`
+		IsDomainConn   *bool                  `json:"is_domain_connection"`
 	}
 	body, _ := json.Marshal(raw)
 	if err := json.Unmarshal(body, &patch); err != nil {
@@ -116,6 +118,9 @@ func (s *Server) updateConnection(w http.ResponseWriter, r *http.Request, connID
 	}
 	if patch.EnabledClients != nil {
 		conn.EnabledClients = append([]string(nil), (*patch.EnabledClients)...)
+	}
+	if patch.IsDomainConn != nil {
+		conn.IsDomainConn = *patch.IsDomainConn
 	}
 	if patch.Options != nil {
 		conn.Options = patch.Options
@@ -257,10 +262,38 @@ func (s *Server) listConnectionClients(w http.ResponseWriter, r *http.Request, c
 	}
 	sort.Slice(clients, func(i, j int) bool { return clients[i].ClientID < clients[j].ClientID })
 
-	// Windowed like every other list endpoint. Returning the whole slice for
-	// any page lets an SDK pager loop forever on the same content.
-	lo, hi, _ := paginate(r, len(clients))
-	_ = json.NewEncoder(w).Encode(map[string]any{"clients": clients[lo:hi]})
+	// This endpoint is checkpoint-paginated, not page/per_page: the cursor is
+	// `from`, the page size is `take`, and continuation is signalled by `next`.
+	// The recorded response carries neither start/limit/total nor next
+	// (TestConnectionManager_EnabledClients.yaml), so emitting a page window
+	// here would diverge from Auth0 — but omitting `next` on a truncated page
+	// makes the SDK's HasNext() false and silently drops the remaining clients.
+	from := r.URL.Query().Get("from")
+	lo := 0
+	if from != "" {
+		// Cursor is the client_id to resume after, so an id that has since been
+		// removed lands on the next one rather than restarting the scan.
+		lo = sort.Search(len(clients), func(i int) bool { return clients[i].ClientID > from })
+	}
+	hi := min(lo+checkpointTake(r), len(clients))
+
+	page := map[string]any{"clients": clients[lo:hi]}
+	if hi < len(clients) {
+		page["next"] = clients[hi-1].ClientID
+	}
+	_ = json.NewEncoder(w).Encode(page)
+}
+
+// checkpointTake reads the `take` page size. Auth0 defaults it to 50 and caps
+// it at 100 on the checkpoint-paginated endpoints.
+func checkpointTake(r *http.Request) int {
+	take := 50
+	if v := r.URL.Query().Get("take"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			take = min(n, 100)
+		}
+	}
+	return take
 }
 
 // updateConnectionClients enables or disables named clients. It is a delta, not

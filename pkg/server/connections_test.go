@@ -10,6 +10,8 @@ import (
 
 	"github.com/auth0/go-auth0"
 	"github.com/auth0/go-auth0/management"
+
+	"github.com/46labs/auth0/pkg/config"
 )
 
 // Driven through the official SDK rather than hand-rolled HTTP: the wire shapes
@@ -384,5 +386,100 @@ func TestConnectionEnabledClientsRequiresStatus(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+// The SDK emits is_domain_connection when patching IsDomainConnection, and
+// config.Connection already persists it, so rejecting it fails a valid
+// production update against the mock alone.
+func TestConnectionUpdatePersistsIsDomainConnection(t *testing.T) {
+	_, m := connMgmt(t)
+	ctx := context.Background()
+
+	conn := &management.Connection{
+		Name:     auth0.String("enterprise-domain"),
+		Strategy: auth0.String("oidc"),
+	}
+	if err := m.Connection.Create(ctx, conn); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := m.Connection.Update(ctx, conn.GetID(), &management.Connection{
+		IsDomainConnection: auth0.Bool(true),
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := m.Connection.Read(ctx, conn.GetID())
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !got.GetIsDomainConnection() {
+		t.Fatal("is_domain_connection did not survive the update")
+	}
+}
+
+// The enabled-clients endpoint is checkpoint-paginated. Without `next` on a
+// truncated page the SDK's HasNext() is false and a pager silently stops after
+// the first page, losing every remaining client.
+func TestConnectionEnabledClientsPagesWithACheckpoint(t *testing.T) {
+	srv, m := connMgmt(t)
+	ctx := context.Background()
+
+	conn := &management.Connection{
+		Name:     auth0.String("enterprise-paged"),
+		Strategy: auth0.String("oidc"),
+	}
+	if err := m.Connection.Create(ctx, conn); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	want := []string{}
+	patch := []management.ConnectionEnabledClient{}
+	for _, id := range []string{"client_a", "client_b", "client_c"} {
+		srv.clients[id] = &config.Client{ClientID: id, Name: id}
+		patch = append(patch, management.ConnectionEnabledClient{ClientID: auth0.String(id), Status: auth0.Bool(true)})
+		want = append(want, id)
+	}
+	if err := m.Connection.UpdateEnabledClients(ctx, conn.GetID(), patch); err != nil {
+		t.Fatalf("UpdateEnabledClients: %v", err)
+	}
+
+	var got []string
+	from := ""
+	for page := 0; page < 10; page++ {
+		opts := []management.RequestOption{management.Take(2)}
+		if from != "" {
+			opts = append(opts, management.From(from))
+		}
+		list, err := m.Connection.ReadEnabledClients(ctx, conn.GetID(), opts...)
+		if err != nil {
+			t.Fatalf("ReadEnabledClients: %v", err)
+		}
+		for _, c := range list.GetClients() {
+			got = append(got, c.GetClientID())
+		}
+		if !list.HasNext() {
+			break
+		}
+		from = list.Next
+	}
+
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("paged clients = %v, want %v", got, want)
+	}
+}
+
+// A set that fits in one page carries no `next`, matching the recorded response
+// (TestConnectionManager_EnabledClients.yaml).
+func TestConnectionEnabledClientsOmitsNextWhenComplete(t *testing.T) {
+	srv, _ := connMgmt(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/connections/con_email/clients", nil)
+	rec := httptest.NewRecorder()
+	srv.handleConnection(rec, req)
+
+	if strings.Contains(rec.Body.String(), "next") {
+		t.Fatalf("a complete page must not advertise a continuation: %s", rec.Body.String())
 	}
 }
