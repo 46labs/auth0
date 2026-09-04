@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/46labs/auth0/pkg/config"
 )
@@ -85,6 +86,13 @@ func (s *Server) updateConnection(w http.ResponseWriter, r *http.Request, connID
 		writeAuth0Error(w, http.StatusBadRequest, "invalid body")
 		return
 	}
+	// config.Connection has nowhere to keep metadata. Accepting it and dropping
+	// it would answer 200 while the next read loses the write, so refuse it
+	// outright until the type carries it.
+	if patch.Metadata != nil {
+		writeAuth0Error(w, http.StatusBadRequest, "connection metadata is not implemented by the auth0 mock")
+		return
+	}
 
 	s.mu.Lock()
 	conn, ok := s.connections[connID]
@@ -108,18 +116,50 @@ func (s *Server) updateConnection(w http.ResponseWriter, r *http.Request, connID
 	_ = json.NewEncoder(w).Encode(out)
 }
 
-// deleteConnection removes a connection and every organization pairing that
-// referenced it. Leaving the pairings behind would let an organization report
-// an enabled connection that no longer exists, which reads as a working login
-// path right up until someone tries it.
+// deleteConnection removes a connection, its users, and every organization
+// pairing that referenced it.
+//
+// The SDK documents Delete as removing the connection *and all its users*, so
+// dropping only the connection would leave those users readable and still able
+// to authenticate. Pairings go too: one left pointing at a deleted connection
+// reads as a working login path right up until someone tries it.
+//
+// Auth0 answers 202 with a deleted_at body here, not 204
+// (TestConnectionManager_Delete.yaml).
 func (s *Server) deleteConnection(w http.ResponseWriter, connID string) {
 	s.mu.Lock()
-	if _, ok := s.connections[connID]; !ok {
+	conn, ok := s.connections[connID]
+	if !ok {
 		s.mu.Unlock()
 		writeAuth0Error(w, http.StatusNotFound, "connection not found")
 		return
 	}
+	connName := conn.Name
 	delete(s.connections, connID)
+
+	orphaned := map[string]bool{}
+	for id, u := range s.users {
+		for _, ident := range u.Identities {
+			if ident.Connection == connName {
+				orphaned[id] = true
+				break
+			}
+		}
+	}
+	for id := range orphaned {
+		delete(s.users, id)
+	}
+	// Membership is per-organization state keyed by user, so it has to follow
+	// the user out or the org keeps listing a member who no longer exists.
+	for orgID, ms := range s.members {
+		kept := ms[:0]
+		for _, m := range ms {
+			if !orphaned[m.UserID] {
+				kept = append(kept, m)
+			}
+		}
+		s.members[orgID] = kept
+	}
 	for orgID, pairings := range s.orgConnections {
 		kept := pairings[:0]
 		for _, p := range pairings {
@@ -131,14 +171,25 @@ func (s *Server) deleteConnection(w http.ResponseWriter, connID string) {
 	}
 	s.mu.Unlock()
 
-	w.WriteHeader(http.StatusNoContent)
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"deleted_at": time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+	})
 }
 
-// connectionClient is one entry of the /connections/{id}/clients payload. Auth0
-// sends and receives a bare JSON array of these, not an object wrapper.
+// connectionClient is one entry of the PATCH /connections/{id}/clients request,
+// which Auth0 takes as a bare JSON array rather than an object wrapper.
 type connectionClient struct {
 	ClientID string `json:"client_id"`
 	Status   bool   `json:"status"`
+}
+
+// connectionClientView is the GET shape, which carries client_id only. Echoing
+// status back would make the SDK's GetStatus() report true locally and false
+// against Auth0, where the field is absent
+// (TestConnectionManager_EnabledClients.yaml).
+type connectionClientView struct {
+	ClientID string `json:"client_id"`
 }
 
 // handleConnectionClients serves the enabled-clients subresource. A connection
@@ -161,11 +212,11 @@ func (s *Server) handleConnectionClients(w http.ResponseWriter, r *http.Request,
 func (s *Server) listConnectionClients(w http.ResponseWriter, connID string) {
 	s.mu.RLock()
 	conn, ok := s.connections[connID]
-	var clients []connectionClient
+	var clients []connectionClientView
 	if ok {
-		clients = make([]connectionClient, 0, len(conn.EnabledClients))
+		clients = make([]connectionClientView, 0, len(conn.EnabledClients))
 		for _, id := range conn.EnabledClients {
-			clients = append(clients, connectionClient{ClientID: id, Status: true})
+			clients = append(clients, connectionClientView{ClientID: id})
 		}
 	}
 	s.mu.RUnlock()

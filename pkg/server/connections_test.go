@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/auth0/go-auth0"
@@ -232,5 +234,96 @@ func TestConnectionUnknownSubresourceDoesNotDeleteTheConnection(t *testing.T) {
 	defer srv.mu.RUnlock()
 	if _, ok := srv.connections["con_sms"]; !ok {
 		t.Fatal("an unimplemented subresource deleted the connection")
+	}
+}
+
+// Auth0 answers 202 with a deleted_at body, not 204
+// (TestConnectionManager_Delete.yaml). A status-aware consumer sees different
+// behaviour locally otherwise.
+func TestConnectionDeleteUsesRecordedStatus(t *testing.T) {
+	srv, m := connMgmt(t)
+	ctx := context.Background()
+
+	conn := &management.Connection{Name: auth0.String("enterprise-status"), Strategy: auth0.String("oidc")}
+	if err := m.Connection.Create(ctx, conn); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v2/connections/"+conn.GetID(), nil)
+	rec := httptest.NewRecorder()
+	srv.handleConnection(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["deleted_at"] == "" {
+		t.Fatalf("expected a deleted_at body, got %s", rec.Body.String())
+	}
+}
+
+// The SDK documents Delete as removing the connection and all its users.
+// Leaving them behind keeps them readable and able to authenticate.
+func TestConnectionDeleteRemovesItsUsers(t *testing.T) {
+	srv, m := connMgmt(t)
+
+	srv.mu.RLock()
+	_, hadUser := srv.users["test_user_1"]
+	srv.mu.RUnlock()
+	if !hadUser {
+		t.Skip("fixture user absent")
+	}
+
+	// test_user_1's identity is on the sms connection.
+	if err := m.Connection.Delete(context.Background(), "con_sms"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+	if _, ok := srv.users["test_user_1"]; ok {
+		t.Fatal("user on the deleted connection survived")
+	}
+	for orgID, ms := range srv.members {
+		for _, m := range ms {
+			if m.UserID == "test_user_1" {
+				t.Fatalf("org %s still lists the deleted user as a member", orgID)
+			}
+		}
+	}
+}
+
+// Auth0's GET carries client_id only. Echoing status back makes the SDK's
+// GetStatus() report true locally and false against Auth0.
+func TestConnectionEnabledClientsReadOmitsStatus(t *testing.T) {
+	srv, _ := connMgmt(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/connections/con_email/clients", nil)
+	rec := httptest.NewRecorder()
+	srv.handleConnection(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "status") {
+		t.Fatalf("response carries a status field Auth0 omits: %s", rec.Body.String())
+	}
+}
+
+// Accepting metadata and dropping it would answer 200 while the next read loses
+// the write.
+func TestConnectionUpdateRejectsUnsupportedMetadata(t *testing.T) {
+	srv, _ := connMgmt(t)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v2/connections/con_sms",
+		strings.NewReader(`{"metadata":{"k":"v"}}`))
+	rec := httptest.NewRecorder()
+	srv.handleConnection(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }

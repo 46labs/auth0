@@ -77,6 +77,19 @@ Tests are driven through `go-auth0` v1.42.0 rather than hand-rolled HTTP, since 
 decoding is what actually has to hold. `ReadEnabledClients` returns `clients` as a pointer to
 slice, so the payload is an object wrapper, not the bare array `UpdateEnabledClients` sends.
 
+Four behaviours are pinned against the SDK's own recordings rather than the published docs
+page, which disagrees with them:
+
+- `DELETE /connections/{id}` answers **202** with a `deleted_at` body, not 204
+  (`TestConnectionManager_Delete.yaml`), and removes the connection's users along with it, per
+  the SDK's documented contract.
+- `GET /connections/{id}/clients` carries `client_id` only
+  (`TestConnectionManager_EnabledClients.yaml`). Echoing `status` back would make the SDK's
+  `GetStatus()` report true locally and false against Auth0.
+
+`config.Connection` has nowhere to keep connection metadata, so `PATCH` rejects it with 400
+rather than accepting a write the next read would lose.
+
 Two behavioural tests were checked against a deliberately broken implementation:
 
 - treating the clients array as a replacement rather than a delta drops
