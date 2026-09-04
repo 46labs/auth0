@@ -1565,12 +1565,12 @@ func TestClientsFromConfig(t *testing.T) {
 		},
 		Clients: []config.Client{
 			{
-				ClientID:     "preconfigured_spa",
-				Name:         "Preconfigured SPA",
-				Description:  "SPA app from config",
-				AppType:      "spa",
-				Callbacks:    []string{"http://localhost:3000/callback"},
-				GrantTypes:   []string{"authorization_code"},
+				ClientID:    "preconfigured_spa",
+				Name:        "Preconfigured SPA",
+				Description: "SPA app from config",
+				AppType:     "spa",
+				Callbacks:   []string{"http://localhost:3000/callback"},
+				GrantTypes:  []string{"authorization_code"},
 			},
 			{
 				ClientID:     "preconfigured_m2m",

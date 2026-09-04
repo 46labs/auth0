@@ -239,16 +239,38 @@ func (s *Server) findUserLocked(identifier string) *config.User {
 	return nil
 }
 
-func (s *Server) autoCreateUser(identifier string) *config.User {
+// autoCreateUserForConnectionName creates a user recording the connection they
+// signed in through, given its name as the authorize parameter carries it.
+func (s *Server) autoCreateUserForConnectionName(identifier, connName string) *config.User {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.autoCreateUserLocked(identifier)
+	provider := ""
+	for _, c := range s.connections {
+		if c.Name == connName {
+			provider = c.Strategy
+			break
+		}
+	}
+	return s.autoCreateUserOnConnectionLocked(identifier, connName, provider)
 }
 
-// autoCreateUserLocked requires the caller to hold the write lock. The identity
-// connection is inferred from the identifier format.
-func (s *Server) autoCreateUserLocked(identifier string) *config.User {
-	return s.autoCreateUserOnConnectionLocked(identifier, "")
+// connectionAllowsClient is connectionAllowsClientLocked with the lock taken.
+func (s *Server) connectionAllowsClient(connName, clientID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.connectionAllowsClientLocked(connName, clientID)
+}
+
+// connectionIdentityLocked resolves a connection id to the (name, strategy)
+// pair an identity carries. Auth0 names the connection but reports the strategy
+// as the provider, so an enterprise-sso/oidc connection yields
+// {connection: "enterprise-sso", provider: "oidc"}, not the name twice.
+func (s *Server) connectionIdentityLocked(connID string) (name, provider string) {
+	c, ok := s.connections[connID]
+	if !ok {
+		return "", ""
+	}
+	return c.Name, c.Strategy
 }
 
 // autoCreateUserOnConnectionLocked records the connection the user actually
@@ -258,7 +280,7 @@ func (s *Server) autoCreateUserLocked(identifier string) *config.User {
 // which finds users by identity, misses them entirely.
 //
 // connName empty keeps the inferred behaviour.
-func (s *Server) autoCreateUserOnConnectionLocked(identifier, connName string) *config.User {
+func (s *Server) autoCreateUserOnConnectionLocked(identifier, connName, provider string) *config.User {
 	userID := "auth0|" + s.generateID()
 	userIDPart := userID[6:] // Extract part after "auth0|"
 
@@ -269,16 +291,6 @@ func (s *Server) autoCreateUserOnConnectionLocked(identifier, connName string) *
 		AppMetadata:   config.AppMetadata{},
 		UserMetadata:  make(map[string]interface{}),
 	}
-
-	defer func() {
-		if connName == "" {
-			return
-		}
-		for i := range user.Identities {
-			user.Identities[i].Connection = connName
-			user.Identities[i].Provider = connName
-		}
-	}()
 
 	// Determine if email or phone based on format
 	if contact.IsEmail(identifier) {
@@ -307,6 +319,19 @@ func (s *Server) autoCreateUserOnConnectionLocked(identifier, connName string) *
 				UserID:     userIDPart,
 				IsSocial:   false,
 			},
+		}
+	}
+
+	// Stamp before storing. Doing this in a defer would run after the clone
+	// below, leaving the stored user on the inferred connection while only the
+	// returned pointer looked right, which is exactly the kind of divergence a
+	// test that inspects the return value cannot see.
+	if connName != "" {
+		for i := range user.Identities {
+			user.Identities[i].Connection = connName
+			if provider != "" {
+				user.Identities[i].Provider = provider
+			}
 		}
 	}
 

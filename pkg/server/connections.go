@@ -182,6 +182,20 @@ func (s *Server) deleteConnection(w http.ResponseWriter, connID string) {
 		}
 		s.orgConnections[orgID] = kept
 	}
+	// Pending invitations that named this connection have to go too. An
+	// invitation URL can omit `connection`, and redemption does not revalidate
+	// that the stored one still exists, so a ticket issued before the delete
+	// would still mint a user and a membership against a connection nobody can
+	// authenticate through.
+	for orgID, invites := range s.invitations {
+		kept := invites[:0]
+		for _, inv := range invites {
+			if inv.ConnectionID != connID {
+				kept = append(kept, inv)
+			}
+		}
+		s.invitations[orgID] = kept
+	}
 	s.mu.Unlock()
 
 	w.WriteHeader(http.StatusAccepted)
@@ -215,7 +229,7 @@ type connectionClientView struct {
 func (s *Server) handleConnectionClients(w http.ResponseWriter, r *http.Request, connID string) {
 	switch r.Method {
 	case http.MethodGet:
-		s.listConnectionClients(w, connID)
+		s.listConnectionClients(w, r, connID)
 	case http.MethodPatch:
 		s.updateConnectionClients(w, r, connID)
 	case http.MethodOptions:
@@ -225,7 +239,7 @@ func (s *Server) handleConnectionClients(w http.ResponseWriter, r *http.Request,
 	}
 }
 
-func (s *Server) listConnectionClients(w http.ResponseWriter, connID string) {
+func (s *Server) listConnectionClients(w http.ResponseWriter, r *http.Request, connID string) {
 	s.mu.RLock()
 	conn, ok := s.connections[connID]
 	var clients []connectionClientView
@@ -242,7 +256,11 @@ func (s *Server) listConnectionClients(w http.ResponseWriter, connID string) {
 		return
 	}
 	sort.Slice(clients, func(i, j int) bool { return clients[i].ClientID < clients[j].ClientID })
-	_ = json.NewEncoder(w).Encode(map[string]any{"clients": clients})
+
+	// Windowed like every other list endpoint. Returning the whole slice for
+	// any page lets an SDK pager loop forever on the same content.
+	lo, hi, _ := paginate(r, len(clients))
+	_ = json.NewEncoder(w).Encode(map[string]any{"clients": clients[lo:hi]})
 }
 
 // updateConnectionClients enables or disables named clients. It is a delta, not
@@ -286,6 +304,35 @@ func (s *Server) updateConnectionClients(w http.ResponseWriter, r *http.Request,
 	s.mu.Unlock()
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// connectionAllowsClient reports whether clientID may authenticate against the
+// named connection. The mock's fixtures use "*" to mean every client, and a
+// connection with no list at all is treated as unrestricted so existing
+// fixtures keep working; an explicit list is enforced.
+//
+// Without this, disabling a client returns 204 and reads back as disabled while
+// that client can still sign in, which is the false-success the enabled_clients
+// endpoint exists to prevent.
+func (s *Server) connectionAllowsClientLocked(connName, clientID string) bool {
+	if connName == "" || clientID == "" {
+		return true
+	}
+	for _, c := range s.connections {
+		if c.Name != connName {
+			continue
+		}
+		if len(c.EnabledClients) == 0 {
+			return true
+		}
+		for _, id := range c.EnabledClients {
+			if id == "*" || id == clientID {
+				return true
+			}
+		}
+		return false
+	}
+	return true
 }
 
 func setClientEnabled(current []string, clientID string, enabled bool) []string {

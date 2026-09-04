@@ -389,14 +389,55 @@ func TestConnectionEnabledClientsRequiresStatus(t *testing.T) {
 
 // An invitee redeeming through an enterprise connection must carry that
 // connection on their identity, or deleting it leaves them behind.
+//
+// Asserts on the STORED user, not the returned pointer: an earlier version
+// stamped the identity in a defer that ran after the clone, so the return value
+// looked right while the stored copy kept the inferred email identity, and a
+// test reading the return value passed while delete still missed the user.
 func TestAutoCreatedUserRecordsItsConnection(t *testing.T) {
 	srv, _ := connMgmt(t)
 
 	srv.mu.Lock()
-	u := srv.autoCreateUserOnConnectionLocked("enterprise.user@example.test", "enterprise-sso")
+	u := srv.autoCreateUserOnConnectionLocked("enterprise.user@example.test", "enterprise-sso", "oidc")
+	stored := srv.users[u.ID]
 	srv.mu.Unlock()
 
-	if len(u.Identities) != 1 || u.Identities[0].Connection != "enterprise-sso" {
-		t.Fatalf("identity = %+v, want the enterprise connection", u.Identities)
+	if len(stored.Identities) != 1 {
+		t.Fatalf("stored identities = %+v", stored.Identities)
+	}
+	got := stored.Identities[0]
+	if got.Connection != "enterprise-sso" {
+		t.Fatalf("stored connection = %q, want enterprise-sso", got.Connection)
+	}
+	// Auth0 reports the strategy as the provider, not the connection name.
+	if got.Provider != "oidc" {
+		t.Fatalf("stored provider = %q, want oidc", got.Provider)
+	}
+}
+
+// Disabling a client must actually stop it authenticating, not just read back
+// as disabled.
+func TestConnectionDisabledClientCannotAuthorize(t *testing.T) {
+	srv, m := connMgmt(t)
+	ctx := context.Background()
+
+	conn := &management.Connection{
+		Name:           auth0.String("enterprise-gate"),
+		Strategy:       auth0.String("oidc"),
+		EnabledClients: &[]string{"mgmt_client_dev"},
+	}
+	if err := m.Connection.Create(ctx, conn); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if srv.connectionAllowsClient("enterprise-gate", "mgmt_client_test") {
+		t.Fatal("a client absent from enabled_clients was allowed to authorize")
+	}
+	if !srv.connectionAllowsClient("enterprise-gate", "mgmt_client_dev") {
+		t.Fatal("an enabled client was refused")
+	}
+	// The fixture convention: "*" means every client.
+	if !srv.connectionAllowsClient("sms", "anything") {
+		t.Fatal("the wildcard fixture connection refused a client")
 	}
 }
