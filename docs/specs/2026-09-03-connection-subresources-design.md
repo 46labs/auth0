@@ -71,6 +71,20 @@ earlier.
 [{"client_id": "peeredge_web", "status": true}]
 ```
 
+## Deliberately out of scope
+
+Enforcing `enabled_clients` during `/authorize` is not part of this change. The endpoints
+record and report the state; the login path does not yet consult it, so disabling a client
+reads back as disabled while that client can still sign in. That is a gap in the mock's
+fidelity, not in these endpoints, and it belongs with the login flow rather than bolted onto a
+CRUD PR.
+
+The same goes for identity provenance: `autoCreateUser` infers the connection from the
+identifier, so a user arriving through an enterprise connection is filed under `email`. That
+predates this work and means `DELETE /connections/{id}` will not sweep such users.
+
+Both are worth fixing. Neither is this PR.
+
 ## Verification
 
 Tests are driven through `go-auth0` v1.42.0 rather than hand-rolled HTTP, since the SDK's

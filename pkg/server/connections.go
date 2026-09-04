@@ -7,8 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/46labs/auth0/pkg/contact"
-
 	"github.com/46labs/auth0/pkg/config"
 )
 
@@ -190,20 +188,11 @@ func (s *Server) deleteConnection(w http.ResponseWriter, connID string) {
 	// would still mint a user and a membership against a connection nobody can
 	// authenticate through.
 	for orgID, invites := range s.invitations {
-		// An invitation with no connection_id relies on the organization still
-		// having some connection it could be redeemed through. Once the last
-		// non-passwordless one is gone, creating that invitation would now be
-		// rejected, so an outstanding ticket must not stay redeemable either.
-		unbindable := !s.orgHasInvitableConnectionLocked(orgID)
 		kept := invites[:0]
 		for _, inv := range invites {
-			if inv.ConnectionID == connID {
-				continue
+			if inv.ConnectionID != connID {
+				kept = append(kept, inv)
 			}
-			if inv.ConnectionID == "" && unbindable {
-				continue
-			}
-			kept = append(kept, inv)
 		}
 		s.invitations[orgID] = kept
 	}
@@ -213,19 +202,6 @@ func (s *Server) deleteConnection(w http.ResponseWriter, connID string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"deleted_at": time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 	})
-}
-
-// orgHasInvitableConnectionLocked reports whether the organization still
-// enables a connection an invitation could be redeemed through. Auth0 refuses
-// invitations on passwordless connections, so those do not count.
-func (s *Server) orgHasInvitableConnectionLocked(orgID string) bool {
-	for _, oc := range s.orgConnections[orgID] {
-		c, ok := s.connections[oc.ConnectionID]
-		if ok && !c.IsPasswordless() {
-			return true
-		}
-	}
-	return false
 }
 
 // connectionClient is one entry of the PATCH /connections/{id}/clients request,
@@ -322,99 +298,25 @@ func (s *Server) updateConnectionClients(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	}
-	all := make([]string, 0, len(s.clients))
-	for id := range s.clients {
-		all = append(all, id)
-	}
 	for _, c := range patch {
-		conn.EnabledClients = setClientEnabled(conn.EnabledClients, all, c.ClientID, *c.Status)
+		conn.EnabledClients = setClientEnabled(conn.EnabledClients, c.ClientID, *c.Status)
 	}
 	s.mu.Unlock()
 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// connectionAllowsClientLocked reports whether clientID may authenticate
-// against the named connection.
-//
-// Fail-closed on everything ambiguous. The states are deliberately distinct:
-//
-//	nil EnabledClients   legacy fixture that never declared a list, unrestricted
-//	empty EnabledClients every client was disabled, so nothing may authorize
-//	unknown connName     a deleted or typoed connection, refused
-//
-// Treating the empty set as unrestricted would let the last disable read back
-// as "no clients" while that client kept signing in, which is the whole failure
-// this endpoint exists to make visible.
-func (s *Server) connectionAllowsClientLocked(connName, clientID string) bool {
-	if connName == "" {
-		return true // caller resolved nothing to check against
-	}
-	for _, c := range s.connections {
-		if c.Name != connName {
-			continue
-		}
-		if c.EnabledClients == nil {
-			return true
-		}
-		for _, id := range c.EnabledClients {
-			if id == "*" || id == clientID {
-				return true
-			}
-		}
-		return false
-	}
-	// Nonempty name that resolves to nothing: deleted, or a typo. Allowing it
-	// would mean deletion never actually disables explicit login.
-	return false
-}
-
-// inferConnectionNameLocked resolves the connection an /authorize request will
-// actually use when the caller omitted one, mirroring how the login path picks
-// email or sms from the identifier. Without this the client gate only applies
-// to callers who explicitly pin a connection.
-func (s *Server) inferConnectionNameLocked(identifier string) string {
-	want := config.StrategySMS
-	if contact.IsEmail(identifier) {
-		want = config.StrategyEmail
-	}
-	for _, c := range s.connections {
-		if c.Strategy == want {
-			return c.Name
-		}
-	}
-	return ""
-}
-
-// setClientEnabled applies one client's status.
-//
-// allClients is used to expand a "*" wildcard when a specific client is being
-// disabled: leaving the wildcard in place would drop the client from the read
-// while authorization still succeeded through "*".
-func setClientEnabled(current, allClients []string, clientID string, enabled bool) []string {
-	expanded := current
-	if !enabled && containsString(current, "*") {
-		expanded = append([]string(nil), allClients...)
-	}
-
-	out := make([]string, 0, len(expanded)+1)
-	for _, id := range expanded {
+// setClientEnabled applies one client's status to the list.
+func setClientEnabled(current []string, clientID string, enabled bool) []string {
+	out := make([]string, 0, len(current)+1)
+	for _, id := range current {
 		if id != clientID {
 			out = append(out, id)
 		}
 	}
-	if enabled && !containsString(out, "*") {
+	if enabled {
 		out = append(out, clientID)
 	}
 	sort.Strings(out)
 	return out
-}
-
-func containsString(in []string, want string) bool {
-	for _, v := range in {
-		if v == want {
-			return true
-		}
-	}
-	return false
 }

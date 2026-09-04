@@ -244,14 +244,6 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			orgID := params.Get("organization")
 			connectionID := params.Get("connection")
 
-			// The client gate applies to both branches. Scoping it to the
-			// non-invitation path would let a client removed from a connection
-			// after an invitation was issued still redeem the ticket.
-			if err := s.authorizeClientAllowed(connectionID, params.Get("client_id"), identifier); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-
 			if ticket, ok := ticketFromQuery(params); ok {
 				redeemed, err := s.redeemInvitation(ticket, identifier, time.Now())
 				if err != nil {
@@ -262,11 +254,9 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 				orgID = ticket.OrgID
 			} else {
 				user = s.findUser(identifier)
-				// Auto-create user if not found (like real Auth0 passwordless).
-				// Record the connection actually selected, so an enterprise
-				// sign-in is not filed under an email identity it never used.
+				// Auto-create user if not found (like real Auth0 passwordless)
 				if user == nil {
-					user = s.autoCreateUserForConnectionName(identifier, connectionID)
+					user = s.autoCreateUser(identifier)
 				}
 				if user == nil {
 					http.Error(w, "Invalid code", 400)

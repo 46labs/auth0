@@ -123,9 +123,8 @@ func (s *Server) authorizeOrgLoginLocked(user *config.User, orgID, connectionNam
 
 // Org-scoped login failures.
 var (
-	errOrgNotFound          = errors.New("the organization does not exist")
-	errOrgNotMember         = errors.New("the user is not a member of the organization")
-	errConnectionNotEnabled = errors.New("the connection is not enabled for this application")
+	errOrgNotFound  = errors.New("the organization does not exist")
+	errOrgNotMember = errors.New("the user is not a member of the organization")
 )
 
 // authorizeOrgLogin is authorizeOrgLoginLocked with the lock taken.
@@ -189,11 +188,7 @@ func (s *Server) redeemInvitation(t invitationTicket, identifier string, now tim
 
 	user := s.findUserLocked(inv.InviteeEmail)
 	if user == nil {
-		// Record the connection the invitee actually redeemed through. Falling
-		// back to the identifier heuristic would stamp an enterprise user with
-		// an email identity, and connection deletion finds users by identity.
-		connName, provider := s.connectionIdentityLocked(inv.ConnectionID)
-		user = s.autoCreateUserOnConnectionLocked(inv.InviteeEmail, connName, provider)
+		user = s.autoCreateUserLocked(inv.InviteeEmail)
 	}
 
 	stored, ok := s.users[user.ID]

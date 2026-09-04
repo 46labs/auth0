@@ -239,63 +239,14 @@ func (s *Server) findUserLocked(identifier string) *config.User {
 	return nil
 }
 
-// autoCreateUserForConnectionName creates a user recording the connection they
-// signed in through, given its name as the authorize parameter carries it.
-func (s *Server) autoCreateUserForConnectionName(identifier, connName string) *config.User {
+func (s *Server) autoCreateUser(identifier string) *config.User {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	provider := ""
-	for _, c := range s.connections {
-		if c.Name == connName {
-			provider = c.Strategy
-			break
-		}
-	}
-	return s.autoCreateUserOnConnectionLocked(identifier, connName, provider)
+	return s.autoCreateUserLocked(identifier)
 }
 
-// connectionAllowsClient is connectionAllowsClientLocked with the lock taken.
-func (s *Server) connectionAllowsClient(connName, clientID string) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.connectionAllowsClientLocked(connName, clientID)
-}
-
-// authorizeClientAllowed gates an /authorize request on the connection's
-// enabled clients. An omitted connection is resolved the same way the login
-// path resolves it, so the gate is not skippable by leaving the parameter off.
-func (s *Server) authorizeClientAllowed(connName, clientID, identifier string) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if connName == "" {
-		connName = s.inferConnectionNameLocked(identifier)
-	}
-	if !s.connectionAllowsClientLocked(connName, clientID) {
-		return errConnectionNotEnabled
-	}
-	return nil
-}
-
-// connectionIdentityLocked resolves a connection id to the (name, strategy)
-// pair an identity carries. Auth0 names the connection but reports the strategy
-// as the provider, so an enterprise-sso/oidc connection yields
-// {connection: "enterprise-sso", provider: "oidc"}, not the name twice.
-func (s *Server) connectionIdentityLocked(connID string) (name, provider string) {
-	c, ok := s.connections[connID]
-	if !ok {
-		return "", ""
-	}
-	return c.Name, c.Strategy
-}
-
-// autoCreateUserOnConnectionLocked records the connection the user actually
-// arrived through when the caller knows it. Inferring email or sms from the
-// identifier is wrong for anyone signing in via an enterprise connection: their
-// identity then names a connection they never used, and connection deletion,
-// which finds users by identity, misses them entirely.
-//
-// connName empty keeps the inferred behaviour.
-func (s *Server) autoCreateUserOnConnectionLocked(identifier, connName, provider string) *config.User {
+// autoCreateUserLocked requires the caller to hold the write lock.
+func (s *Server) autoCreateUserLocked(identifier string) *config.User {
 	userID := "auth0|" + s.generateID()
 	userIDPart := userID[6:] // Extract part after "auth0|"
 
@@ -334,19 +285,6 @@ func (s *Server) autoCreateUserOnConnectionLocked(identifier, connName, provider
 				UserID:     userIDPart,
 				IsSocial:   false,
 			},
-		}
-	}
-
-	// Stamp before storing. Doing this in a defer would run after the clone
-	// below, leaving the stored user on the inferred connection while only the
-	// returned pointer looked right, which is exactly the kind of divergence a
-	// test that inspects the return value cannot see.
-	if connName != "" {
-		for i := range user.Identities {
-			user.Identities[i].Connection = connName
-			if provider != "" {
-				user.Identities[i].Provider = provider
-			}
 		}
 	}
 
