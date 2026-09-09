@@ -180,3 +180,41 @@ func (s *Server) lookupClient(clientID string) *config.Client {
 	}
 	return nil
 }
+
+// applyCredentialsExchange merges configured credentials_exchange claims into a
+// client_credentials token. Namespaced like post_login, so a consumer reads the
+// same key shape whether the caller is a user or a machine.
+//
+// This is how a machine credential carries its organization. Auth0 reserves the
+// native org_id claim for the organization login context, which
+// client-credentials cannot enter without org-scoped M2M, so the value lives in
+// the application's metadata and an action copies it onto the token.
+func (s *Server) applyCredentialsExchange(client *config.Client, accessClaims jwt.MapClaims) {
+	ce := s.cfg.Actions.CredentialsExchange
+	if ce == nil || client == nil {
+		return
+	}
+
+	metadata := map[string]any{}
+	for k, v := range client.ClientMetadata {
+		metadata[k] = v
+	}
+	ctx := map[string]any{
+		"client": map[string]any{
+			"client_id": client.ClientID,
+			"name":      client.Name,
+			"metadata":  metadata,
+		},
+	}
+
+	ns := strings.TrimSuffix(s.cfg.Issuer, "/") + "/"
+	for name, tmpl := range ce.AccessTokenClaims {
+		value, ok := resolveTemplate(tmpl, ctx)
+		if !ok {
+			// An unset metadata key omits the claim rather than stamping an
+			// empty one, mirroring the `if (md.x)` guard a real action uses.
+			continue
+		}
+		accessClaims[ns+name] = value
+	}
+}

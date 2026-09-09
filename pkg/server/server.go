@@ -52,6 +52,7 @@ type Server struct {
 	connections   map[string]*config.Connection
 	members       map[string][]config.OrganizationMember
 	clients       map[string]*config.Client
+	clientGrants  map[string]*clientGrant
 	roles         map[string]*config.Role
 
 	orgConnections map[string][]config.OrganizationConnection
@@ -116,6 +117,7 @@ func New(cfg *config.Config) (*Server, error) {
 		connections:    connections,
 		members:        members,
 		clients:        clients,
+		clientGrants:   map[string]*clientGrant{},
 		roles:          roles,
 		orgConnections: orgConnections,
 		invitations:    make(map[string][]config.OrganizationInvitation),
@@ -183,6 +185,7 @@ func (s *Server) Handler() http.Handler {
 		s.handleUser(w, r)
 	})
 	mux.HandleFunc("/api/v2/clients", s.handleClients)
+	mux.HandleFunc("/api/v2/client-grants", s.handleClientGrants)
 	mux.HandleFunc("/api/v2/clients/", s.handleClient)
 	mux.HandleFunc("/api/v2/roles", s.handleRoles)
 	mux.HandleFunc("/api/v2/roles/", s.handleRole)
