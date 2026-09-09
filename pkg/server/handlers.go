@@ -366,6 +366,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			accessClaims["org_id"] = organization
 		}
 
+		// A credentials-exchange action stamps claims from the application's
+		// metadata, which is how an M2M credential carries an organization when
+		// the grant cannot enter an organization context.
+		s.applyCredentialsExchange(client, accessClaims)
+
 		accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
 		accessToken.Header["kid"] = "key-1"
 

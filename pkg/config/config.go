@@ -212,6 +212,12 @@ type Client struct {
 	JWTConfig    map[string]interface{} `json:"jwt_configuration,omitempty" yaml:"jwt_configuration,omitempty" mapstructure:"jwt_configuration"`
 	// login initiation endpoint; invitation_url is resolved against it
 	InitiateLoginURI string `json:"initiate_login_uri,omitempty" yaml:"initiate_login_uri,omitempty" mapstructure:"initiate_login_uri"`
+	// ClientMetadata is arbitrary key/value data on the application. A
+	// credentials-exchange action reads it to stamp claims on M2M tokens, which
+	// is how a machine credential carries an organization: Auth0 reserves the
+	// native org_id claim for the organization login context, and
+	// client-credentials cannot enter one.
+	ClientMetadata map[string]string `json:"client_metadata,omitempty" yaml:"client_metadata,omitempty" mapstructure:"client_metadata"`
 }
 
 type Branding struct {
@@ -241,9 +247,10 @@ type Config struct {
 }
 
 type Actions struct {
-	PostLogin        *PostLoginAction        `json:"post_login,omitempty" yaml:"post_login,omitempty" mapstructure:"post_login"`
-	PostRegistration *PostRegistrationAction `json:"post_registration,omitempty" yaml:"post_registration,omitempty" mapstructure:"post_registration"`
-	TokenExchange    *TokenExchangeAction    `json:"token_exchange,omitempty" yaml:"token_exchange,omitempty" mapstructure:"token_exchange"`
+	PostLogin           *PostLoginAction           `json:"post_login,omitempty" yaml:"post_login,omitempty" mapstructure:"post_login"`
+	CredentialsExchange *CredentialsExchangeAction `json:"credentials_exchange,omitempty" yaml:"credentials_exchange,omitempty" mapstructure:"credentials_exchange"`
+	PostRegistration    *PostRegistrationAction    `json:"post_registration,omitempty" yaml:"post_registration,omitempty" mapstructure:"post_registration"`
+	TokenExchange       *TokenExchangeAction       `json:"token_exchange,omitempty" yaml:"token_exchange,omitempty" mapstructure:"token_exchange"`
 }
 
 // TokenExchangeAction declares how the mock services RFC 8693 token exchange
@@ -287,6 +294,15 @@ type PostLoginAction struct {
 	IDTokenRawClaims     map[string]string `json:"id_token_raw_claims,omitempty" yaml:"id_token_raw_claims,omitempty" mapstructure:"id_token_raw_claims"`
 	AccessTokenClaims    map[string]string `json:"access_token_claims,omitempty" yaml:"access_token_claims,omitempty" mapstructure:"access_token_claims"`
 	AccessTokenRawClaims map[string]string `json:"access_token_raw_claims,omitempty" yaml:"access_token_raw_claims,omitempty" mapstructure:"access_token_raw_claims"`
+}
+
+// CredentialsExchangeAction declares custom claims added to tokens issued by
+// the client_credentials flow. Templates resolve against the exchange context
+// (client), so a metadata key reaches a token as
+// "${client.metadata.org_id}". A claim whose template resolves empty is
+// omitted, mirroring `if (md.org_id) api.accessToken.setCustomClaim(...)`.
+type CredentialsExchangeAction struct {
+	AccessTokenClaims map[string]string `json:"access_token_claims,omitempty" yaml:"access_token_claims,omitempty" mapstructure:"access_token_claims"`
 }
 
 // PostRegistrationAction declares defaults applied when a user is auto-created

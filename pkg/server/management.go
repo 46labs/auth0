@@ -929,7 +929,28 @@ func (s *Server) handleClient(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w, r)
 	w.Header().Set("Content-Type", "application/json")
 
-	clientID := strings.TrimPrefix(r.URL.Path, "/api/v2/clients/")
+	clientID, sub := clientSubPath(r.URL.Path)
+
+	// Secret rotation is the only recovery for a lost client secret, so a
+	// consumer that provisions credentials reaches for it.
+	if sub == "rotate-secret" {
+		if r.Method == http.MethodOptions {
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeAuth0Error(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.rotateClientSecret(w, clientID)
+		return
+	}
+	if sub != "" {
+		if r.Method == http.MethodOptions {
+			return
+		}
+		writeAuth0Error(w, http.StatusNotFound, "route not implemented by the auth0 mock: "+r.URL.Path)
+		return
+	}
 
 	switch r.Method {
 	case "GET":
@@ -1096,6 +1117,9 @@ func (s *Server) deleteClient(w http.ResponseWriter, r *http.Request, clientID s
 	}
 
 	delete(s.clients, clientID)
+	// A grant outliving its client keeps answering list queries and reads as a
+	// working authorization for an application that no longer exists.
+	s.deleteClientGrantsFor(clientID)
 
 	w.WriteHeader(http.StatusNoContent)
 }
