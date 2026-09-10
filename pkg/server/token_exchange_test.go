@@ -175,3 +175,91 @@ func TestTokenExchange_RejectsWrongSubjectTokenType(t *testing.T) {
 		t.Fatalf("expected 400 for unmatched subject_token_type, got %d (body=%s)", rec.Code, rec.Body.String())
 	}
 }
+
+// A consumer whose exchange crosses into an organization the caller does not
+// belong to cannot use the native org_id claim: real Auth0 only sets it through
+// setOrganization, which refuses a non-member. Minting it here regardless let
+// such a flow pass locally and fail against Auth0, so the claim is configurable.
+func TestTokenExchangeMintsTheConfiguredOrgClaim(t *testing.T) {
+	srv := exchangeServer(t, &config.TokenExchangeAction{
+		RequireClaim: exNS + "platform",
+		OrgClaim:     exNS + "org_id",
+		Actor:        true,
+	})
+
+	subject := srv.signSubject(t, jwt.MapClaims{
+		"sub":             "auth0|admin",
+		exNS + "platform": "admin",
+	})
+	rec := doExchange(t, srv, subject, "org_2")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	claims := srv.decodeMinted(t, rec)
+
+	if claims[exNS+"org_id"] != "org_2" {
+		t.Fatalf("namespaced org claim = %v, want org_2", claims[exNS+"org_id"])
+	}
+	// The native claim must be absent: Auth0 cannot produce it for a non-member,
+	// so minting it would hide exactly the failure this models.
+	if v, ok := claims["org_id"]; ok {
+		t.Fatalf("minted a native org_id (%v) that real Auth0 would refuse", v)
+	}
+}
+
+// Unset keeps the previous behaviour, for a consumer whose caller is a member.
+func TestTokenExchangeDefaultsToTheNativeOrgClaim(t *testing.T) {
+	srv := exchangeServer(t, &config.TokenExchangeAction{
+		RequireClaim: exNS + "platform",
+		Actor:        true,
+	})
+
+	subject := srv.signSubject(t, jwt.MapClaims{
+		"sub":             "auth0|admin",
+		exNS + "platform": "admin",
+	})
+	rec := doExchange(t, srv, subject, "org_2")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if claims := srv.decodeMinted(t, rec); claims["org_id"] != "org_2" {
+		t.Fatalf("native org_id = %v, want org_2", claims["org_id"])
+	}
+}
+
+// An overlay must not reach the organization claim. Carrying the subject's own
+// org_id scopes the token to where the caller came from rather than where it
+// asked to go, and in custom-org mode it restores the native claim real Auth0
+// cannot issue for a non-member.
+func TestTokenExchangeOverlaysCannotReachTheOrgClaim(t *testing.T) {
+	srv := exchangeServer(t, &config.TokenExchangeAction{
+		RequireClaim: exNS + "platform",
+		OrgClaim:     exNS + "org_id",
+		// Both overlays aimed at the organization, from either direction.
+		CarryClaims: []string{"org_id", exNS + "platform"},
+		SetClaims:   map[string]string{exNS + "org_id": "org_hijacked"},
+		Actor:       true,
+	})
+
+	subject := srv.signSubject(t, jwt.MapClaims{
+		"sub":             "auth0|admin",
+		"org_id":          "org_1",
+		exNS + "platform": "admin",
+	})
+	rec := doExchange(t, srv, subject, "org_2")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	claims := srv.decodeMinted(t, rec)
+
+	if claims[exNS+"org_id"] != "org_2" {
+		t.Fatalf("org claim = %v, want the requested target org_2", claims[exNS+"org_id"])
+	}
+	if v, ok := claims["org_id"]; ok {
+		t.Fatalf("an overlay restored the native org_id (%v)", v)
+	}
+	// Unrelated overlays still apply.
+	if claims[exNS+"platform"] != "admin" {
+		t.Fatalf("carry_claims dropped an unrelated claim: %v", claims[exNS+"platform"])
+	}
+}

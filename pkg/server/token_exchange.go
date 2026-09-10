@@ -82,20 +82,42 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	minted := jwt.MapClaims{
-		"sub":    sub,
-		"iss":    s.cfg.Issuer,
-		"aud":    s.cfg.Audience,
-		"exp":    now.Add(time.Hour).Unix(),
-		"iat":    now.Unix(),
-		"scope":  "openid profile email",
-		"org_id": organization,
+		"sub":   sub,
+		"iss":   s.cfg.Issuer,
+		"aud":   s.cfg.Audience,
+		"exp":   now.Add(time.Hour).Unix(),
+		"iat":   now.Unix(),
+		"scope": "openid profile email",
 	}
+
+	// Where the target organization lands. The native org_id claim is only
+	// reachable in real Auth0 when the caller is a member of the target, so a
+	// consumer that crosses into organizations it does not belong to configures
+	// a namespaced claim instead. Minting the native one unconditionally made
+	// that flow pass here and fail against Auth0.
+	orgClaim := ex.OrgClaim
+	if orgClaim == "" {
+		orgClaim = "org_id"
+	}
+	minted[orgClaim] = organization
+	// Overlays must not reach the organization claim. Carrying the subject's own
+	// org_id would scope the token to where the caller came from rather than
+	// where it asked to go, and in custom-org mode it would put back the native
+	// claim real Auth0 cannot issue for a non-member — the divergence org_claim
+	// exists to remove.
+	orgKeys := map[string]bool{orgClaim: true, "org_id": true}
 	for _, k := range ex.CarryClaims {
+		if orgKeys[k] {
+			continue
+		}
 		if v, ok := subClaims[k]; ok {
 			minted[k] = v
 		}
 	}
 	for k, v := range ex.SetClaims {
+		if orgKeys[k] {
+			continue
+		}
 		minted[k] = v
 	}
 	if ex.Actor {
