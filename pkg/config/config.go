@@ -282,6 +282,9 @@ type TokenExchangeAction struct {
 	// Actor, when true, stamps the RFC 8693 `act` claim {"sub": subject.sub}
 	// so the delegated token carries a native actor/audit trail.
 	Actor bool `json:"actor,omitempty" yaml:"actor,omitempty" mapstructure:"actor"`
+	// OrgClaim is the claim the target organization is minted under. Empty keeps
+	// the native org_id, which real Auth0 issues only for a member of the target.
+	OrgClaim string `json:"org_claim,omitempty" yaml:"org_claim,omitempty" mapstructure:"org_claim"`
 }
 
 // PostLoginAction declares custom claims to add to tokens issued by the

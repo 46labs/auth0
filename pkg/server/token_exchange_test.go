@@ -175,3 +175,78 @@ func TestTokenExchange_RejectsWrongSubjectTokenType(t *testing.T) {
 		t.Fatalf("expected 400 for unmatched subject_token_type, got %d (body=%s)", rec.Code, rec.Body.String())
 	}
 }
+
+func TestTokenExchangeMintsTheConfiguredOrgClaim(t *testing.T) {
+	srv := exchangeServer(t, &config.TokenExchangeAction{
+		RequireClaim: exNS + "platform",
+		OrgClaim:     exNS + "org_id",
+		Actor:        true,
+	})
+
+	subject := srv.signSubject(t, jwt.MapClaims{
+		"sub":             "auth0|admin",
+		exNS + "platform": "admin",
+	})
+	rec := doExchange(t, srv, subject, "org_2")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	claims := srv.decodeMinted(t, rec)
+
+	if claims[exNS+"org_id"] != "org_2" {
+		t.Fatalf("namespaced org claim = %v, want org_2", claims[exNS+"org_id"])
+	}
+	if v, ok := claims["org_id"]; ok {
+		t.Fatalf("minted a native org_id (%v) that real Auth0 would refuse", v)
+	}
+}
+
+func TestTokenExchangeDefaultsToTheNativeOrgClaim(t *testing.T) {
+	srv := exchangeServer(t, &config.TokenExchangeAction{
+		RequireClaim: exNS + "platform",
+		Actor:        true,
+	})
+
+	subject := srv.signSubject(t, jwt.MapClaims{
+		"sub":             "auth0|admin",
+		exNS + "platform": "admin",
+	})
+	rec := doExchange(t, srv, subject, "org_2")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if claims := srv.decodeMinted(t, rec); claims["org_id"] != "org_2" {
+		t.Fatalf("native org_id = %v, want org_2", claims["org_id"])
+	}
+}
+
+func TestTokenExchangeOverlaysCannotReachTheOrgClaim(t *testing.T) {
+	srv := exchangeServer(t, &config.TokenExchangeAction{
+		RequireClaim: exNS + "platform",
+		OrgClaim:     exNS + "org_id",
+		CarryClaims:  []string{"org_id", exNS + "platform"},
+		SetClaims:    map[string]string{exNS + "org_id": "org_hijacked"},
+		Actor:        true,
+	})
+
+	subject := srv.signSubject(t, jwt.MapClaims{
+		"sub":             "auth0|admin",
+		"org_id":          "org_1",
+		exNS + "platform": "admin",
+	})
+	rec := doExchange(t, srv, subject, "org_2")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	claims := srv.decodeMinted(t, rec)
+
+	if claims[exNS+"org_id"] != "org_2" {
+		t.Fatalf("org claim = %v, want the requested target org_2", claims[exNS+"org_id"])
+	}
+	if v, ok := claims["org_id"]; ok {
+		t.Fatalf("an overlay restored the native org_id (%v)", v)
+	}
+	if claims[exNS+"platform"] != "admin" {
+		t.Fatalf("carry_claims dropped an unrelated claim: %v", claims[exNS+"platform"])
+	}
+}

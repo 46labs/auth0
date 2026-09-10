@@ -82,20 +82,35 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	minted := jwt.MapClaims{
-		"sub":    sub,
-		"iss":    s.cfg.Issuer,
-		"aud":    s.cfg.Audience,
-		"exp":    now.Add(time.Hour).Unix(),
-		"iat":    now.Unix(),
-		"scope":  "openid profile email",
-		"org_id": organization,
+		"sub":   sub,
+		"iss":   s.cfg.Issuer,
+		"aud":   s.cfg.Audience,
+		"exp":   now.Add(time.Hour).Unix(),
+		"iat":   now.Unix(),
+		"scope": "openid profile email",
 	}
+
+	orgClaim := ex.OrgClaim
+	if orgClaim == "" {
+		orgClaim = "org_id"
+	}
+	minted[orgClaim] = organization
+	// Overlays must not reach the organization: real Auth0 cannot issue a native
+	// org_id for a non-member, and the subject's own would scope the token to
+	// where the caller came from.
+	orgKeys := map[string]bool{orgClaim: true, "org_id": true}
 	for _, k := range ex.CarryClaims {
+		if orgKeys[k] {
+			continue
+		}
 		if v, ok := subClaims[k]; ok {
 			minted[k] = v
 		}
 	}
 	for k, v := range ex.SetClaims {
+		if orgKeys[k] {
+			continue
+		}
 		minted[k] = v
 	}
 	if ex.Actor {
