@@ -282,6 +282,18 @@ type TokenExchangeAction struct {
 	// Actor, when true, stamps the RFC 8693 `act` claim {"sub": subject.sub}
 	// so the delegated token carries a native actor/audit trail.
 	Actor bool `json:"actor,omitempty" yaml:"actor,omitempty" mapstructure:"actor"`
+	// OrgClaim is the claim the target organization is minted under. Empty
+	// keeps the native org_id claim.
+	//
+	// Real Auth0 sets the organization with
+	// api.authentication.setOrganization, which refuses a user who is not a
+	// member of the target — "Provided user is not member of the
+	// organization". A consumer whose exchange deliberately crosses into an
+	// organization the caller does not belong to therefore cannot use the
+	// native claim at all, and carries the organization under a namespaced one
+	// instead. Minting the native claim here regardless would let a flow pass
+	// locally that Auth0 rejects outright.
+	OrgClaim string `json:"org_claim,omitempty" yaml:"org_claim,omitempty" mapstructure:"org_claim"`
 }
 
 // PostLoginAction declares custom claims to add to tokens issued by the
