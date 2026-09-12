@@ -642,8 +642,16 @@ func (s *Server) listConnections(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// Auth0 filters server-side, and a consumer that asks for one strategy and
+	// takes the first result would otherwise get whichever connection sorts
+	// first — passing locally against a tenant it would never match.
+	strategy := r.URL.Query().Get("strategy")
+
 	all := make([]config.Connection, 0, len(s.connections))
 	for _, conn := range s.connections {
+		if strategy != "" && conn.Strategy != strategy {
+			continue
+		}
 		all = append(all, *conn.Clone())
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })

@@ -51,11 +51,20 @@ type UserIdentity struct {
 }
 
 type User struct {
-	ID            string                 `json:"user_id" yaml:"user_id" mapstructure:"user_id"`
-	Phone         string                 `json:"phone_number,omitempty" yaml:"phone" mapstructure:"phone"`
-	Email         string                 `json:"email" yaml:"email" mapstructure:"email"`
-	Name          string                 `json:"name" yaml:"name" mapstructure:"name"`
+	ID    string `json:"user_id" yaml:"user_id" mapstructure:"user_id"`
+	Phone string `json:"phone_number,omitempty" yaml:"phone" mapstructure:"phone"`
+	Email string `json:"email" yaml:"email" mapstructure:"email"`
+	Name  string `json:"name" yaml:"name" mapstructure:"name"`
+	// RFC3339 strings, the form Auth0 returns and management.User decodes into
+	// *time.Time. Set on create; absent for users seeded from config.
+	CreatedAt     string                 `json:"created_at,omitempty" yaml:"created_at,omitempty" mapstructure:"created_at"`
+	UpdatedAt     string                 `json:"updated_at,omitempty" yaml:"updated_at,omitempty" mapstructure:"updated_at"`
+	GivenName     string                 `json:"given_name,omitempty" yaml:"given_name,omitempty" mapstructure:"given_name"`
+	FamilyName    string                 `json:"family_name,omitempty" yaml:"family_name,omitempty" mapstructure:"family_name"`
+	Nickname      string                 `json:"nickname,omitempty" yaml:"nickname,omitempty" mapstructure:"nickname"`
+	Username      string                 `json:"username,omitempty" yaml:"username,omitempty" mapstructure:"username"`
 	EmailVerified bool                   `json:"email_verified" yaml:"email_verified" mapstructure:"email_verified"`
+	PhoneVerified bool                   `json:"phone_verified" yaml:"phone_verified" mapstructure:"phone_verified"`
 	Blocked       *bool                  `json:"blocked,omitempty" yaml:"blocked,omitempty" mapstructure:"blocked"`          // True if user is blocked from the application
 	Identities    []UserIdentity         `json:"identities,omitempty" yaml:"identities,omitempty" mapstructure:"identities"` // Auth0 identities array
 	AppMetadata   AppMetadata            `json:"app_metadata,omitempty" yaml:"app_metadata,omitempty" mapstructure:"app_metadata"`

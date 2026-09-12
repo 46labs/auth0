@@ -253,10 +253,20 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 				user = redeemed
 				orgID = ticket.OrgID
 			} else {
-				user = s.findUser(identifier)
+				// Scoped to the requested connection: one address can hold an
+				// identity in several, and they are different users.
+				user = s.findUserForConnection(identifier, connectionID)
 				// Auto-create user if not found (like real Auth0 passwordless)
 				if user == nil {
-					user = s.autoCreateUser(identifier)
+					user = s.autoCreateUserForConnection(identifier, connectionID)
+				}
+				// A delivered one-time code is the proof of control Auth0
+				// treats as verification — but only for passwordless. An
+				// enterprise login proves nothing about the address here, and
+				// overwriting the provider's own verified flag would assert a
+				// check this never performed.
+				if s.isPasswordlessLogin(connectionID, user) {
+					user = s.markIdentifierVerified(user.ID, identifier)
 				}
 				if user == nil {
 					http.Error(w, "Invalid code", 400)
@@ -465,19 +475,34 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 
 		if user.Phone != "" {
 			idClaims["phone_number"] = user.Phone
-			idClaims["phone_number_verified"] = true
+			// The stored state, not a constant: a federated provider owns
+			// this flag and asserting true would vouch for a number nothing
+			// here verified.
+			idClaims["phone_number_verified"] = user.PhoneVerified
 		}
 
 		if user.Picture != "" {
 			idClaims["picture"] = user.Picture
 		}
 
+		// Explicit values win; splitting the display name is only a guess for
+		// users that carry none, and returning the guess over what the profile
+		// actually says would contradict what the Management API reports.
 		nameParts := strings.Split(user.Name, " ")
-		if len(nameParts) > 0 {
+		switch {
+		case user.GivenName != "":
+			idClaims["given_name"] = user.GivenName
+		case len(nameParts) > 0:
 			idClaims["given_name"] = nameParts[0]
 		}
-		if len(nameParts) > 1 {
+		switch {
+		case user.FamilyName != "":
+			idClaims["family_name"] = user.FamilyName
+		case len(nameParts) > 1:
 			idClaims["family_name"] = nameParts[1]
+		}
+		if user.Nickname != "" {
+			idClaims["nickname"] = user.Nickname
 		}
 
 		// org_id is a top-level claim (matches production Auth0 Organizations)
@@ -589,7 +614,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 
 	if user.Phone != "" {
 		idClaims["phone_number"] = user.Phone
-		idClaims["phone_number_verified"] = true
+		idClaims["phone_number_verified"] = user.PhoneVerified
 	}
 
 	if user.Picture != "" {
@@ -600,12 +625,23 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		idClaims["nonce"] = nonce
 	}
 
+	// Explicit values win; splitting the display name is only a guess for
+	// users that carry none.
 	nameParts := strings.Split(user.Name, " ")
-	if len(nameParts) > 0 {
+	switch {
+	case user.GivenName != "":
+		idClaims["given_name"] = user.GivenName
+	case len(nameParts) > 0:
 		idClaims["given_name"] = nameParts[0]
 	}
-	if len(nameParts) > 1 {
+	switch {
+	case user.FamilyName != "":
+		idClaims["family_name"] = user.FamilyName
+	case len(nameParts) > 1:
 		idClaims["family_name"] = nameParts[1]
+	}
+	if user.Nickname != "" {
+		idClaims["nickname"] = user.Nickname
 	}
 
 	if orgID != "" {

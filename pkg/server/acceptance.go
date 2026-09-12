@@ -186,9 +186,30 @@ func (s *Server) redeemInvitation(t invitationTicket, identifier string, now tim
 		}
 	}
 
-	user := s.findUserLocked(inv.InviteeEmail)
+	// Scoped to the connection the invitation is being redeemed through. One
+	// address can now hold an identity in several, and granting the invited
+	// role to whichever sorted first would hand the organization membership to
+	// a different subject than the one authenticating.
+	//
+	// An invitation that pins a connection wins over the link's parameter,
+	// which Auth0 may omit: without this the lookup falls back to unscoped and
+	// the role can land on the wrong subject.
+	connection := t.ConnectionName
+	if inv.ConnectionID != "" {
+		if name := s.connectionNameByIDLocked(inv.ConnectionID); name != "" {
+			connection = name
+		}
+	}
+
+	user := s.findUserStrictlyForConnectionLocked(inv.InviteeEmail, connection)
 	if user == nil {
-		user = s.autoCreateUserLocked(inv.InviteeEmail)
+		user = s.autoCreateUserForConnectionLocked(inv.InviteeEmail, connection)
+	}
+	if user == nil {
+		// The invitee's address cannot hold an identity in this connection —
+		// an email invitation pinned to sms, say. Refused rather than
+		// dereferenced.
+		return nil, errInvitationNotFound
 	}
 
 	stored, ok := s.users[user.ID]
@@ -330,4 +351,15 @@ func (s *Server) seedOrgRoles(userID, orgID string) *config.User {
 		log.Printf("Seeded app_metadata.org_roles[%s]=%q for %s", orgID, role, userID)
 	}
 	return user.Clone()
+}
+
+// connectionNameByIDLocked resolves a connection id to its name, the form the
+// authorize parameter and the identity both use. Requires the lock.
+func (s *Server) connectionNameByIDLocked(id string) string {
+	for _, c := range s.connections {
+		if c.ID == id {
+			return c.Name
+		}
+	}
+	return ""
 }
