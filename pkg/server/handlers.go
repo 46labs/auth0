@@ -176,6 +176,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 					params, _ := url.ParseQuery(originalQuery)
 					authCode := s.generateID()
 					s.verified[authCode] = *user
+					s.authQuery[authCode] = originalQuery
 
 					if codeChallenge := params.Get("code_challenge"); codeChallenge != "" {
 						s.verifiers[authCode] = codeChallenge
@@ -375,6 +376,10 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.applyPostLogin(user, s.lookupClient(clientID), idClaims, accessClaims)
+		if denied := s.runPostLoginActions(user, s.lookupClient(clientID), s.requestFromToken(r, "", "oauth2-refresh-token"), idClaims, accessClaims); denied != nil {
+			writeAccessDenied(w, denied)
+			return
+		}
 
 		accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
 		accessToken.Header["kid"] = "key-1"
@@ -483,6 +488,10 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.applyPostLogin(&user, s.lookupClient(clientID), idClaims, accessClaims)
+	if denied := s.runPostLoginActions(&user, s.lookupClient(clientID), s.requestFromToken(r, code, "oidc-basic-profile"), idClaims, accessClaims); denied != nil {
+		writeAccessDenied(w, denied)
+		return
+	}
 
 	accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
 	accessToken.Header["kid"] = "key-1"

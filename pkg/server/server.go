@@ -25,8 +25,12 @@ type Server struct {
 	verified      map[string]config.User
 	verifiers     map[string]string
 	nonces        map[string]string
-	scopes        map[string]string // maps auth_code -> requested scopes
-	refreshTokens map[string]string // maps refresh_token -> user_id
+	scopes        map[string]string         // maps auth_code -> requested scopes
+	refreshTokens map[string]string         // maps refresh_token -> user_id
+	authQuery     map[string]string         // maps auth_code -> the original /authorize query, for Actions
+	appMetaExtra  map[string]map[string]any // app_metadata keys beyond tenant_id/role, set by Actions
+
+	actions *actionStore
 
 	users         map[string]*config.User
 	organizations map[string]*config.Organization
@@ -83,6 +87,9 @@ func New(cfg *config.Config) (*Server, error) {
 		nonces:        make(map[string]string),
 		scopes:        make(map[string]string),
 		refreshTokens: make(map[string]string),
+		authQuery:     make(map[string]string),
+		appMetaExtra:  make(map[string]map[string]any),
+		actions:       newActionStore(),
 		users:         users,
 		organizations: organizations,
 		connections:   connections,
@@ -114,6 +121,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v2/users/", s.handleUser)
 	mux.HandleFunc("/api/v2/clients", s.handleClients)
 	mux.HandleFunc("/api/v2/clients/", s.handleClient)
+	mux.HandleFunc("/api/v2/actions/", s.handleActionsAPI)
 
 	return mux
 }
