@@ -1,11 +1,11 @@
 module github.com/46labs/auth0
 
-go 1.25.0
+go 1.24.0
 
 require (
 	github.com/auth0/go-auth0 v1.32.1
 	github.com/coreos/go-oidc/v3 v3.11.0
-	github.com/dop251/goja v0.0.0-20260926152631-39ec2650adc9
+	github.com/dop251/goja v0.0.0-20250309171923-bcd7cc6bf64c
 	github.com/dop251/goja_nodejs v0.0.0-20260918173711-b481721df8a2
 	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/spf13/viper v1.19.0
@@ -15,7 +15,7 @@ require (
 require (
 	github.com/PuerkitoBio/rehttp v1.4.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
-	github.com/dlclark/regexp2/v2 v2.5.2 // indirect
+	github.com/dlclark/regexp2 v1.11.4 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/go-jose/go-jose/v4 v4.0.2 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.4+incompatible // indirect
