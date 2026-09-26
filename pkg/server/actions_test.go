@@ -380,4 +380,3 @@ func TestPostLoginAction_AuthCodeFlow_E2E(t *testing.T) {
 		t.Errorf("access_token %sphone_number = %v, want %s", ns, accessClaims[ns+"phone_number"], phone)
 	}
 }
-

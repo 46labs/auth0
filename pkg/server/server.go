@@ -28,7 +28,6 @@ type Server struct {
 	scopes        map[string]string         // maps auth_code -> requested scopes
 	refreshTokens map[string]string         // maps refresh_token -> user_id
 	authQuery     map[string]string         // maps auth_code -> the original /authorize query, for Actions
-	appMetaExtra  map[string]map[string]any // app_metadata keys beyond tenant_id/role, set by Actions
 
 	actions *actionStore
 
@@ -88,7 +87,6 @@ func New(cfg *config.Config) (*Server, error) {
 		scopes:        make(map[string]string),
 		refreshTokens: make(map[string]string),
 		authQuery:     make(map[string]string),
-		appMetaExtra:  make(map[string]map[string]any),
 		actions:       newActionStore(),
 		users:         users,
 		organizations: organizations,

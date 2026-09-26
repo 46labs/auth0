@@ -118,6 +118,41 @@ type Action struct {
 	UpdatedAt          time.Time          `json:"updated_at"`
 
 	versions []*ActionVersion
+	// dirty: changed since the last deploy. Auth0 reports any edit as undeployed.
+	dirty bool
+}
+
+// clone is a deep copy: the store hands out snapshots, never its own records,
+// so a token request encoding or running an action cannot race a PATCH.
+func (a *Action) clone() *Action {
+	if a == nil {
+		return nil
+	}
+	c := *a
+	c.SupportedTriggers = append([]ActionTriggerRef(nil), a.SupportedTriggers...)
+	c.Dependencies = append([]ActionDependency(nil), a.Dependencies...)
+	c.Secrets = append([]ActionSecret(nil), a.Secrets...)
+	c.DeployedVersion = a.DeployedVersion.clone()
+	c.versions = nil
+	return &c
+}
+
+func (v *ActionVersion) clone() *ActionVersion {
+	if v == nil {
+		return nil
+	}
+	c := *v
+	c.Dependencies = append([]ActionDependency(nil), v.Dependencies...)
+	c.Secrets = append([]ActionSecret(nil), v.Secrets...)
+	c.SupportedTriggers = append([]ActionTriggerRef(nil), v.SupportedTriggers...)
+	return &c
+}
+
+func (b *ActionBinding) clone() *ActionBinding {
+	c := *b
+	c.Action = b.Action.clone()
+	c.Secrets = append([]ActionSecret(nil), b.Secrets...)
+	return &c
 }
 
 // ActionBinding places an action on a trigger, in order.
@@ -193,7 +228,7 @@ func (st *actionStore) create(id string, in Action) (*Action, error) {
 		a.SupportedTriggers = []ActionTriggerRef{}
 	}
 	st.actions[id] = a
-	return a, nil
+	return a.clone(), nil
 }
 
 func nonNilDeps(d []ActionDependency) []ActionDependency {
@@ -215,7 +250,7 @@ func (st *actionStore) get(id string) (*Action, bool) {
 	st.mu.RLock()
 	defer st.mu.RUnlock()
 	a, ok := st.actions[id]
-	return a, ok
+	return a.clone(), ok
 }
 
 // list returns actions, optionally filtered, in creation order.
@@ -233,7 +268,7 @@ func (st *actionStore) list(name, trigger string, deployed *bool) []*Action {
 		if deployed != nil && (a.DeployedVersion != nil) != *deployed {
 			continue
 		}
-		out = append(out, a)
+		out = append(out, a.clone())
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out
@@ -310,8 +345,9 @@ func (st *actionStore) update(id string, p actionPatch) (*Action, error) {
 	a.UpdatedAt = now
 	a.BuiltAt = now
 	a.Status = "built"
-	a.AllChangesDeployed = a.DeployedVersion != nil && a.DeployedVersion.Code == a.Code && a.DeployedVersion.Runtime == a.Runtime
-	return a, nil
+	a.dirty = true
+	a.AllChangesDeployed = false
+	return a.clone(), nil
 }
 
 func (st *actionStore) deploy(id, versionID string) (*ActionVersion, error) {
@@ -335,9 +371,10 @@ func (st *actionStore) deploy(id, versionID string) (*ActionVersion, error) {
 	}
 	a.versions = append(a.versions, v)
 	a.DeployedVersion = v
+	a.dirty = false
 	a.AllChangesDeployed = true
 	a.UpdatedAt = now
-	return v, nil
+	return v.clone(), nil
 }
 
 func (st *actionStore) versions(id string) ([]*ActionVersion, error) {
@@ -347,7 +384,11 @@ func (st *actionStore) versions(id string) ([]*ActionVersion, error) {
 	if !ok {
 		return nil, errActionNotFound
 	}
-	return append([]*ActionVersion{}, a.versions...), nil
+	out := make([]*ActionVersion, 0, len(a.versions))
+	for _, v := range a.versions {
+		out = append(out, v.clone())
+	}
+	return out, nil
 }
 
 func (st *actionStore) remove(id string, force bool) error {
@@ -384,7 +425,11 @@ func removeBinding(list []*ActionBinding, actionID string) []*ActionBinding {
 func (st *actionStore) listBindings(trigger string) []*ActionBinding {
 	st.mu.RLock()
 	defer st.mu.RUnlock()
-	return append([]*ActionBinding{}, st.bindings[trigger]...)
+	out := make([]*ActionBinding, 0, len(st.bindings[trigger]))
+	for _, b := range st.bindings[trigger] {
+		out = append(out, b.clone())
+	}
+	return out
 }
 
 // bindingRef is one entry of PATCH /api/v2/actions/triggers/{id}/bindings.
@@ -448,5 +493,9 @@ func (st *actionStore) setBindings(trigger string, refs []bindingRef, newID func
 		out = append(out, b)
 	}
 	st.bindings[trigger] = out
-	return append([]*ActionBinding{}, out...), nil
+	snap := make([]*ActionBinding, 0, len(out))
+	for _, b := range out {
+		snap = append(snap, b.clone())
+	}
+	return snap, nil
 }

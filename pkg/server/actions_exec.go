@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -86,6 +87,8 @@ func (s *Server) runPostLoginAction(b *ActionBinding, user *config.User, client 
 		denied *errAccessDenied
 		vm     *goja.Runtime
 	)
+	ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
+	defer cancel()
 	timer := time.AfterFunc(actionTimeout, func() {
 		if vm != nil {
 			vm.Interrupt("action timed out")
@@ -101,7 +104,7 @@ func (s *Server) runPostLoginAction(b *ActionBinding, user *config.User, client 
 		jsurl.Enable(vm)
 		buffer.Enable(vm)
 		s.installRequire(vm)
-		installFetch(vm, loop)
+		installFetch(ctx, vm, loop)
 		_ = vm.Set("event", vm.ToValue(s.buildEvent(a, b, user, client, req)))
 		api := s.newActionAPI(vm, user, idClaims, accessClaims, func(reason string) {
 			if denied == nil {
@@ -207,7 +210,7 @@ var fetchClient = &http.Client{Timeout: 10 * time.Second}
 // installFetch is a small WHATWG fetch: method, headers, string body in;
 // ok, status, statusText, headers.get, text(), json() out. It runs the
 // request off the loop and settles the promise back on it.
-func installFetch(vm *goja.Runtime, loop *eventloop.EventLoop) {
+func installFetch(ctx context.Context, vm *goja.Runtime, loop *eventloop.EventLoop) {
 	_ = vm.Set("fetch", func(call goja.FunctionCall) goja.Value {
 		target := call.Argument(0).String()
 		method := http.MethodGet
@@ -232,7 +235,7 @@ func installFetch(vm *goja.Runtime, loop *eventloop.EventLoop) {
 		// A timer for the run's full budget holds it open until we settle.
 		hold := loop.SetTimeout(func(*goja.Runtime) {}, actionTimeout)
 		go func() {
-			resp, data, err := doFetch(method, target, headers, body)
+			resp, data, err := doFetch(ctx, method, target, headers, body)
 			loop.RunOnLoop(func(vm *goja.Runtime) {
 				loop.ClearTimeout(hold)
 				if err != nil {
@@ -246,11 +249,11 @@ func installFetch(vm *goja.Runtime, loop *eventloop.EventLoop) {
 	})
 }
 
-func doFetch(method, target string, headers http.Header, body io.Reader) (*http.Response, []byte, error) {
+func doFetch(ctx context.Context, method, target string, headers http.Header, body io.Reader) (*http.Response, []byte, error) {
 	if _, err := url.ParseRequestURI(target); err != nil {
 		return nil, nil, fmt.Errorf("fetch: %w", err)
 	}
-	req, err := http.NewRequest(method, target, body)
+	req, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -297,82 +300,68 @@ func fetchResponse(vm *goja.Runtime, resp *http.Response, data []byte) *goja.Obj
 	return o
 }
 
-// buildEvent is the post-login event, shaped like Auth0's.
+// buildEvent is the post-login event, shaped like Auth0's: the same user,
+// authorization, and client context the declarative block sees, plus what
+// only code can use (request, transaction, secrets, organization).
 func (s *Server) buildEvent(a *Action, b *ActionBinding, user *config.User, client *config.Client, req postLoginRequest) map[string]any {
-	appMeta := map[string]any{}
-	if user.AppMetadata.TenantID != "" {
-		appMeta["tenant_id"] = user.AppMetadata.TenantID
-	}
-	if user.AppMetadata.Role != "" {
-		appMeta["role"] = user.AppMetadata.Role
-	}
-	s.mu.RLock()
-	for k, v := range s.appMetaExtra[user.ID] {
-		appMeta[k] = v
-	}
-	var org *config.Organization
-	if user.AppMetadata.TenantID != "" {
-		org = s.organizations[user.AppMetadata.TenantID]
-	}
-	s.mu.RUnlock()
-
+	ev := s.buildPostLoginContext(user, client)
+	u := ev["user"].(map[string]any)
+	u["email_verified"] = user.EmailVerified
+	u["picture"] = user.Picture
 	identities := make([]any, 0, len(user.Identities))
 	for _, id := range user.Identities {
 		identities = append(identities, map[string]any{"connection": id.Connection, "provider": id.Provider, "user_id": id.UserID, "isSocial": id.IsSocial})
 	}
-	ev := map[string]any{
-		"user": map[string]any{
-			"user_id": user.ID, "email": user.Email, "email_verified": user.EmailVerified, "phone_number": user.Phone,
-			"name": user.Name, "picture": user.Picture, "app_metadata": appMeta, "user_metadata": user.UserMetadata, "identities": identities,
-		},
-		"client":     map[string]any{"client_id": req.Query["client_id"], "name": "", "metadata": map[string]any{}},
-		"connection": map[string]any{"id": "", "name": "", "strategy": ""},
-		"request": map[string]any{
-			"method": req.Method, "ip": req.IP, "hostname": req.Host, "user_agent": req.UA,
-			"query": req.Query, "body": req.Body, "geoip": map[string]any{},
-		},
-		"transaction": map[string]any{
-			"protocol": req.Protocol, "requested_scopes": req.Scopes, "redirect_uri": req.RedirectURI,
-			"login_hint": req.LoginHint, "ui_locales": []any{}, "locale": "en",
-		},
-		"authorization":  map[string]any{"roles": []any{}},
-		"tenant":         map[string]any{"id": "mock"},
-		"secrets":        secretValues(a, b),
-		"stats":          map[string]any{"logins_count": 1},
-		"authentication": map[string]any{"methods": []any{map[string]any{"name": "passwordless", "timestamp": time.Now().UTC().Format(time.RFC3339)}}},
+	u["identities"] = identities
+	// An unregistered client id still names itself in the request.
+	if c, ok := ev["client"].(map[string]any); ok {
+		if _, has := c["client_id"]; !has {
+			id := req.Query["client_id"]
+			if id == "" {
+				id = req.Body["client_id"]
+			}
+			c["client_id"], c["name"] = id, ""
+		}
+		c["metadata"] = map[string]any{}
 	}
-	if client != nil {
-		ev["client"] = map[string]any{"client_id": client.ClientID, "name": client.Name, "metadata": map[string]any{}}
+	if auth, ok := ev["authorization"].(map[string]any); ok {
+		if _, has := auth["roles"]; !has {
+			auth["roles"] = []any{}
+		}
 	}
+	ev["connection"] = map[string]any{"id": "", "name": "", "strategy": ""}
 	if len(user.Identities) > 0 {
 		ev["connection"] = map[string]any{"id": "con_" + user.Identities[0].Connection, "name": user.Identities[0].Connection, "strategy": user.Identities[0].Provider}
 	}
-	if org != nil {
-		ev["organization"] = map[string]any{"id": org.ID, "name": org.Name, "display_name": org.DisplayName, "metadata": map[string]any{}}
+	ev["request"] = map[string]any{
+		"method": req.Method, "ip": req.IP, "hostname": req.Host, "user_agent": req.UA,
+		"query": req.Query, "body": req.Body, "geoip": map[string]any{},
+	}
+	ev["transaction"] = map[string]any{
+		"protocol": req.Protocol, "requested_scopes": req.Scopes, "redirect_uri": req.RedirectURI,
+		"login_hint": req.LoginHint, "ui_locales": []any{}, "locale": "en",
+	}
+	ev["tenant"] = map[string]any{"id": "mock"}
+	ev["secrets"] = secretValues(a, b)
+	ev["stats"] = map[string]any{"logins_count": 1}
+	ev["authentication"] = map[string]any{"methods": []any{map[string]any{"name": "passwordless", "timestamp": time.Now().UTC().Format(time.RFC3339)}}}
+	if user.AppMetadata.TenantID != "" {
+		s.mu.RLock()
+		org := s.organizations[user.AppMetadata.TenantID]
+		s.mu.RUnlock()
+		if org != nil {
+			ev["organization"] = map[string]any{"id": org.ID, "name": org.Name, "display_name": org.DisplayName, "metadata": map[string]any{}}
+		}
 	}
 	return ev
 }
 
-// setAppMetadata persists api.user.setAppMetadata. tenant_id and role are
-// real fields; anything else lives beside the user for the event's sake.
+// setAppMetadata and setUserMetadata persist the api.user.* calls on the
+// server's user record, which is what the Management API reads back.
 func (s *Server) setAppMetadata(user *config.User, key string, value any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	switch key {
-	case "tenant_id":
-		user.AppMetadata.TenantID = fmt.Sprint(value)
-	case "role":
-		user.AppMetadata.Role = fmt.Sprint(value)
-	default:
-		if s.appMetaExtra[user.ID] == nil {
-			s.appMetaExtra[user.ID] = map[string]any{}
-		}
-		if value == nil {
-			delete(s.appMetaExtra[user.ID], key)
-		} else {
-			s.appMetaExtra[user.ID][key] = value
-		}
-	}
+	user.AppMetadata.Set(key, value)
 	if u := s.users[user.ID]; u != nil && u != user {
 		u.AppMetadata = user.AppMetadata
 	}

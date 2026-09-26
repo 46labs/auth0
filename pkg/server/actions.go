@@ -72,14 +72,11 @@ func (s *Server) buildPostLoginContext(user *config.User, client *config.Client)
 
 	ctx := map[string]any{
 		"user": map[string]any{
-			"user_id":      user.ID,
-			"email":        user.Email,
-			"phone_number": user.Phone,
-			"name":         user.Name,
-			"app_metadata": map[string]any{
-				"tenant_id": user.AppMetadata.TenantID,
-				"role":      user.AppMetadata.Role,
-			},
+			"user_id":       user.ID,
+			"email":         user.Email,
+			"phone_number":  user.Phone,
+			"name":          user.Name,
+			"app_metadata":  user.AppMetadata.Map(),
 			"user_metadata": userMeta,
 		},
 	}

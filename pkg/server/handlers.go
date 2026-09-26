@@ -518,6 +518,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	delete(s.verifiers, code)
 	delete(s.nonces, code)
 	delete(s.scopes, code)
+	delete(s.authQuery, code)
 
 	w.Header().Set("Content-Type", "application/json")
 	response := map[string]interface{}{

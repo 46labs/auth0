@@ -1,8 +1,63 @@
 package config
 
+import "encoding/json"
+
 type AppMetadata struct {
 	TenantID string `json:"tenant_id,omitempty" yaml:"tenant_id,omitempty" mapstructure:"tenant_id"`
 	Role     string `json:"role,omitempty" yaml:"role,omitempty" mapstructure:"role"`
+	// Extra holds every other key, as Auth0's app_metadata is a free map:
+	// set by Actions or the Management API, returned by both.
+	Extra map[string]any `json:"-" yaml:"-" mapstructure:"-"`
+}
+
+// Map is app_metadata as a plain map, the way an Action sees it.
+func (m AppMetadata) Map() map[string]any {
+	out := make(map[string]any, len(m.Extra)+2)
+	for k, v := range m.Extra {
+		out[k] = v
+	}
+	if m.TenantID != "" {
+		out["tenant_id"] = m.TenantID
+	}
+	if m.Role != "" {
+		out["role"] = m.Role
+	}
+	return out
+}
+
+// Set writes one key, routing the two typed fields and keeping the rest.
+func (m *AppMetadata) Set(key string, value any) {
+	switch key {
+	case "tenant_id":
+		m.TenantID, _ = value.(string)
+	case "role":
+		m.Role, _ = value.(string)
+	default:
+		if value == nil {
+			delete(m.Extra, key)
+			return
+		}
+		if m.Extra == nil {
+			m.Extra = map[string]any{}
+		}
+		m.Extra[key] = value
+	}
+}
+
+func (m AppMetadata) MarshalJSON() ([]byte, error) {
+	return json.Marshal(m.Map())
+}
+
+func (m *AppMetadata) UnmarshalJSON(b []byte) error {
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	*m = AppMetadata{}
+	for k, v := range raw {
+		m.Set(k, v)
+	}
+	return nil
 }
 
 type UserIdentity struct {
@@ -18,7 +73,7 @@ type User struct {
 	Email         string                 `json:"email" yaml:"email" mapstructure:"email"`
 	Name          string                 `json:"name" yaml:"name" mapstructure:"name"`
 	EmailVerified bool                   `json:"email_verified" yaml:"email_verified" mapstructure:"email_verified"`
-	Blocked       *bool                  `json:"blocked,omitempty" yaml:"blocked,omitempty" mapstructure:"blocked"`           // True if user is blocked from the application
+	Blocked       *bool                  `json:"blocked,omitempty" yaml:"blocked,omitempty" mapstructure:"blocked"`          // True if user is blocked from the application
 	Identities    []UserIdentity         `json:"identities,omitempty" yaml:"identities,omitempty" mapstructure:"identities"` // Auth0 identities array
 	AppMetadata   AppMetadata            `json:"app_metadata,omitempty" yaml:"app_metadata,omitempty" mapstructure:"app_metadata"`
 	UserMetadata  map[string]interface{} `json:"user_metadata,omitempty" yaml:"user_metadata,omitempty" mapstructure:"user_metadata"`
