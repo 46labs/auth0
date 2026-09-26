@@ -375,9 +375,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			idClaims[ns+"role"] = user.AppMetadata.Role
 		}
 
-		s.applyPostLogin(user, s.lookupClient(clientID), idClaims, accessClaims)
-		if denied := s.runPostLoginActions(user, s.lookupClient(clientID), s.requestFromToken(r, "", "oauth2-refresh-token"), idClaims, accessClaims); denied != nil {
-			writeAccessDenied(w, denied)
+		if !s.postLogin(w, r, user, clientID, "", "oauth2-refresh-token", idClaims, accessClaims) {
 			return
 		}
 
@@ -487,9 +485,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		accessClaims[ns+"role"] = user.AppMetadata.Role
 	}
 
-	s.applyPostLogin(&user, s.lookupClient(clientID), idClaims, accessClaims)
-	if denied := s.runPostLoginActions(&user, s.lookupClient(clientID), s.requestFromToken(r, code, "oidc-basic-profile"), idClaims, accessClaims); denied != nil {
-		writeAccessDenied(w, denied)
+	if !s.postLogin(w, r, &user, clientID, code, "oidc-basic-profile", idClaims, accessClaims) {
 		return
 	}
 

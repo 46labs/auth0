@@ -5,85 +5,68 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
-	"strings"
-	"time"
 )
 
-// handleActionsAPI routes everything under /api/v2/actions/.
-func (s *Server) handleActionsAPI(w http.ResponseWriter, r *http.Request) {
-	s.setCORS(w, r)
-	w.Header().Set("Content-Type", "application/json")
-	if r.Method == http.MethodOptions {
-		return
-	}
-	rest := strings.TrimPrefix(r.URL.Path, "/api/v2/actions/")
-	parts := strings.Split(strings.Trim(rest, "/"), "/")
-	switch {
-	case parts[0] == "triggers" && len(parts) == 1:
-		if r.Method != http.MethodGet {
-			methodNotAllowed(w)
+// registerActionsAPI mounts the Actions Management API. Method-and-pattern
+// routes (Go 1.22 ServeMux) do the dispatch; the handlers only do the work.
+func (s *Server) registerActionsAPI(mux *http.ServeMux) {
+	mux.HandleFunc("OPTIONS /api/v2/actions/", func(w http.ResponseWriter, r *http.Request) { s.setCORS(w, r) })
+	mux.HandleFunc("GET /api/v2/actions/triggers", s.json(func(_ *http.Request) (int, any, error) {
+		return http.StatusOK, map[string]any{"triggers": supportedTriggers()}, nil
+	}))
+	mux.HandleFunc("GET /api/v2/actions/triggers/{trigger}/bindings", s.json(s.listBindings))
+	mux.HandleFunc("PATCH /api/v2/actions/triggers/{trigger}/bindings", s.json(s.updateBindings))
+	mux.HandleFunc("GET /api/v2/actions/actions", s.json(s.listActions))
+	mux.HandleFunc("POST /api/v2/actions/actions", s.json(s.createAction))
+	mux.HandleFunc("GET /api/v2/actions/actions/{id}", s.json(s.getAction))
+	mux.HandleFunc("PATCH /api/v2/actions/actions/{id}", s.json(s.updateAction))
+	mux.HandleFunc("DELETE /api/v2/actions/actions/{id}", s.json(s.deleteAction))
+	mux.HandleFunc("POST /api/v2/actions/actions/{id}/deploy", s.json(func(r *http.Request) (int, any, error) {
+		v, err := s.actions.deploy(r.PathValue("id"), s.generateID())
+		return http.StatusOK, v, err
+	}))
+	mux.HandleFunc("GET /api/v2/actions/actions/{id}/versions", s.json(func(r *http.Request) (int, any, error) {
+		vs, err := s.actions.versions(r.PathValue("id"))
+		return http.StatusOK, page("versions", vs), err
+	}))
+}
+
+// json adapts a handler that returns (status, body, error) to the Management
+// API's JSON conventions, including Auth0's error envelope.
+func (s *Server) json(fn func(*http.Request) (int, any, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.setCORS(w, r)
+		w.Header().Set("Content-Type", "application/json")
+		status, body, err := fn(r)
+		if err != nil {
+			status, text := actionErrStatus(err)
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(map[string]any{"statusCode": status, "error": text, "message": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"triggers": supportedTriggers()})
-	case parts[0] == "triggers" && len(parts) == 3 && parts[2] == "bindings":
-		s.handleTriggerBindings(w, r, parts[1])
-	case parts[0] == "actions" && len(parts) == 1:
-		switch r.Method {
-		case http.MethodGet:
-			s.listActions(w, r)
-		case http.MethodPost:
-			s.createAction(w, r)
-		default:
-			methodNotAllowed(w)
+		w.WriteHeader(status)
+		if body != nil {
+			_ = json.NewEncoder(w).Encode(body)
 		}
-	case parts[0] == "actions" && len(parts) == 2:
-		s.handleAction(w, r, parts[1])
-	case parts[0] == "actions" && len(parts) == 3 && parts[2] == "deploy":
-		if r.Method != http.MethodPost {
-			methodNotAllowed(w)
-			return
-		}
-		v, err := s.actions.deploy(parts[1], s.generateID())
-		if writeActionErr(w, err) {
-			return
-		}
-		writeJSON(w, http.StatusOK, v)
-	case parts[0] == "actions" && len(parts) == 3 && parts[2] == "versions":
-		if r.Method != http.MethodGet {
-			methodNotAllowed(w)
-			return
-		}
-		vs, err := s.actions.versions(parts[1])
-		if writeActionErr(w, err) {
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"versions": vs, "total": len(vs), "page": 0, "per_page": len(vs)})
-	default:
-		http.Error(w, `{"statusCode":404,"error":"Not Found"}`, http.StatusNotFound)
 	}
 }
 
-func methodNotAllowed(w http.ResponseWriter) {
-	http.Error(w, `{"statusCode":405,"error":"Method Not Allowed"}`, http.StatusMethodNotAllowed)
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func writeActionErr(w http.ResponseWriter, err error) bool {
+func actionErrStatus(err error) (int, string) {
 	switch {
-	case err == nil:
-		return false
 	case errors.Is(err, errActionNotFound):
-		http.Error(w, `{"statusCode":404,"error":"Not Found","message":"`+err.Error()+`"}`, http.StatusNotFound)
+		return http.StatusNotFound, "Not Found"
 	case errors.Is(err, errActionNameTaken), errors.Is(err, errActionBound):
-		http.Error(w, `{"statusCode":409,"error":"Conflict","message":"`+err.Error()+`"}`, http.StatusConflict)
+		return http.StatusConflict, "Conflict"
 	default:
-		http.Error(w, `{"statusCode":400,"error":"Bad Request","message":"`+err.Error()+`"}`, http.StatusBadRequest)
+		return http.StatusBadRequest, "Bad Request"
 	}
-	return true
+}
+
+var errInvalidBody = errors.New("invalid body")
+
+// page wraps a list the way Auth0 does; the mock never pages.
+func page[T any](key string, items []T) map[string]any {
+	return map[string]any{key: items, "total": len(items), "page": 0, "per_page": len(items)}
 }
 
 // actionBody is the wire shape of POST and PATCH /api/v2/actions/actions.
@@ -93,143 +76,122 @@ type actionBody struct {
 	Code              *string             `json:"code"`
 	Dependencies      *[]ActionDependency `json:"dependencies"`
 	Runtime           *string             `json:"runtime"`
-	Secrets           *[]struct {
-		Name  string `json:"name"`
-		Value string `json:"value"`
-	} `json:"secrets"`
+	Secrets           *[]secretBody       `json:"secrets"`
 }
 
-func (b actionBody) secrets() []ActionSecret {
-	if b.Secrets == nil {
-		return nil
-	}
-	out := make([]ActionSecret, 0, len(*b.Secrets))
-	for _, s := range *b.Secrets {
+type secretBody struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+func toSecrets(in []secretBody) []ActionSecret {
+	out := make([]ActionSecret, 0, len(in))
+	for _, s := range in {
 		out = append(out, ActionSecret{Name: s.Name, value: s.Value})
 	}
 	return out
 }
 
-func (s *Server) listActions(w http.ResponseWriter, r *http.Request) {
+func (b actionBody) patch() actionPatch {
+	p := actionPatch{Name: b.Name, Code: b.Code, Runtime: b.Runtime, Dependencies: b.Dependencies, SupportedTriggers: b.SupportedTriggers}
+	if b.Secrets != nil {
+		sec := toSecrets(*b.Secrets)
+		p.Secrets = &sec
+	}
+	return p
+}
+
+func decode[T any](r *http.Request) (T, error) {
+	var v T
+	if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
+		return v, errInvalidBody
+	}
+	return v, nil
+}
+
+func deref[T any](p *T) T {
+	if p == nil {
+		var zero T
+		return zero
+	}
+	return *p
+}
+
+func (s *Server) listActions(r *http.Request) (int, any, error) {
 	q := r.URL.Query()
 	var deployed *bool
 	if v := q.Get("deployed"); v != "" {
 		b, _ := strconv.ParseBool(v)
 		deployed = &b
 	}
-	list := s.actions.list(q.Get("actionName"), q.Get("triggerId"), deployed)
-	writeJSON(w, http.StatusOK, map[string]any{"actions": list, "total": len(list), "page": 0, "per_page": len(list)})
+	return http.StatusOK, page("actions", s.actions.list(q.Get("actionName"), q.Get("triggerId"), deployed)), nil
 }
 
-func (s *Server) createAction(w http.ResponseWriter, r *http.Request) {
-	var b actionBody
-	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
-		http.Error(w, `{"statusCode":400,"error":"Bad Request","message":"invalid body"}`, http.StatusBadRequest)
-		return
+func (s *Server) createAction(r *http.Request) (int, any, error) {
+	b, err := decode[actionBody](r)
+	if err != nil {
+		return 0, nil, err
 	}
-	in := Action{Secrets: b.secrets()}
-	if b.Name != nil {
-		in.Name = *b.Name
-	}
-	if b.Code != nil {
-		in.Code = *b.Code
-	}
-	if b.Runtime != nil {
-		in.Runtime = *b.Runtime
-	}
-	if b.Dependencies != nil {
-		in.Dependencies = *b.Dependencies
-	}
-	if b.SupportedTriggers != nil {
-		in.SupportedTriggers = *b.SupportedTriggers
+	in := Action{Name: deref(b.Name), Code: deref(b.Code), Runtime: deref(b.Runtime), Dependencies: deref(b.Dependencies), SupportedTriggers: deref(b.SupportedTriggers)}
+	if b.Secrets != nil {
+		in.Secrets = toSecrets(*b.Secrets)
 	}
 	a, err := s.actions.create(s.generateID(), in)
-	if writeActionErr(w, err) {
-		return
-	}
-	writeJSON(w, http.StatusCreated, a)
+	return http.StatusCreated, a, err
 }
 
-func (s *Server) handleAction(w http.ResponseWriter, r *http.Request, id string) {
-	switch r.Method {
-	case http.MethodGet:
-		a, ok := s.actions.get(id)
-		if !ok {
-			writeActionErr(w, errActionNotFound)
-			return
-		}
-		writeJSON(w, http.StatusOK, a)
-	case http.MethodPatch:
-		var b actionBody
-		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
-			http.Error(w, `{"statusCode":400,"error":"Bad Request","message":"invalid body"}`, http.StatusBadRequest)
-			return
-		}
-		p := actionPatch{Name: b.Name, Code: b.Code, Runtime: b.Runtime, Dependencies: b.Dependencies, SupportedTriggers: b.SupportedTriggers}
-		if b.Secrets != nil {
-			sec := b.secrets()
-			p.Secrets = &sec
-		}
-		a, err := s.actions.update(id, p)
-		if writeActionErr(w, err) {
-			return
-		}
-		writeJSON(w, http.StatusOK, a)
-	case http.MethodDelete:
-		force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
-		if writeActionErr(w, s.actions.remove(id, force)) {
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	default:
-		methodNotAllowed(w)
+func (s *Server) getAction(r *http.Request) (int, any, error) {
+	a, ok := s.actions.get(r.PathValue("id"))
+	if !ok {
+		return 0, nil, errActionNotFound
 	}
+	return http.StatusOK, a, nil
 }
 
-func (s *Server) handleTriggerBindings(w http.ResponseWriter, r *http.Request, trigger string) {
+func (s *Server) updateAction(r *http.Request) (int, any, error) {
+	b, err := decode[actionBody](r)
+	if err != nil {
+		return 0, nil, err
+	}
+	a, err := s.actions.update(r.PathValue("id"), b.patch())
+	return http.StatusOK, a, err
+}
+
+func (s *Server) deleteAction(r *http.Request) (int, any, error) {
+	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
+	return http.StatusNoContent, nil, s.actions.remove(r.PathValue("id"), force)
+}
+
+func (s *Server) listBindings(r *http.Request) (int, any, error) {
+	trigger := r.PathValue("trigger")
 	if !triggerKnown(trigger) {
-		writeActionErr(w, errBadTrigger)
-		return
+		return 0, nil, errBadTrigger
 	}
-	switch r.Method {
-	case http.MethodGet:
-		list := s.actions.listBindings(trigger)
-		writeJSON(w, http.StatusOK, map[string]any{"bindings": list, "total": len(list), "page": 0, "per_page": len(list)})
-	case http.MethodPatch:
-		var body struct {
-			Bindings []struct {
-				Ref struct {
-					Type  string `json:"type"`
-					Value string `json:"value"`
-				} `json:"ref"`
-				DisplayName string `json:"display_name"`
-				Secrets     []struct {
-					Name  string `json:"name"`
-					Value string `json:"value"`
-				} `json:"secrets"`
-			} `json:"bindings"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, `{"statusCode":400,"error":"Bad Request","message":"invalid body"}`, http.StatusBadRequest)
-			return
-		}
-		refs := make([]bindingRef, 0, len(body.Bindings))
-		for _, b := range body.Bindings {
-			ref := bindingRef{Type: b.Ref.Type, Value: b.Ref.Value, DisplayName: b.DisplayName}
-			if b.Secrets != nil {
-				ref.Secrets = []ActionSecret{}
-				for _, sec := range b.Secrets {
-					ref.Secrets = append(ref.Secrets, ActionSecret{Name: sec.Name, value: sec.Value, UpdatedAt: time.Now().UTC()})
-				}
-			}
-			refs = append(refs, ref)
-		}
-		list, err := s.actions.setBindings(trigger, refs, s.generateID)
-		if writeActionErr(w, err) {
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"bindings": list})
-	default:
-		methodNotAllowed(w)
+	return http.StatusOK, page("bindings", s.actions.listBindings(trigger)), nil
+}
+
+func (s *Server) updateBindings(r *http.Request) (int, any, error) {
+	body, err := decode[struct {
+		Bindings []struct {
+			Ref struct {
+				Type  string `json:"type"`
+				Value string `json:"value"`
+			} `json:"ref"`
+			DisplayName string       `json:"display_name"`
+			Secrets     []secretBody `json:"secrets"`
+		} `json:"bindings"`
+	}](r)
+	if err != nil {
+		return 0, nil, err
 	}
+	refs := make([]bindingRef, 0, len(body.Bindings))
+	for _, b := range body.Bindings {
+		ref := bindingRef{Type: b.Ref.Type, Value: b.Ref.Value, DisplayName: b.DisplayName}
+		if b.Secrets != nil {
+			ref.Secrets = toSecrets(b.Secrets)
+		}
+		refs = append(refs, ref)
+	}
+	list, err := s.actions.setBindings(r.PathValue("trigger"), refs, s.generateID)
+	return http.StatusOK, map[string]any{"bindings": list}, err
 }

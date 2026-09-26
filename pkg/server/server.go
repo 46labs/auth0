@@ -121,7 +121,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v2/users/", s.handleUser)
 	mux.HandleFunc("/api/v2/clients", s.handleClients)
 	mux.HandleFunc("/api/v2/clients/", s.handleClient)
-	mux.HandleFunc("/api/v2/actions/", s.handleActionsAPI)
+	s.registerActionsAPI(mux)
 
 	return mux
 }
