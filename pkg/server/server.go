@@ -38,6 +38,9 @@ type refreshTokenState struct {
 	UserID   string
 	OrgID    string
 	ClientID string
+	// Scope is the scope granted at login; a refresh re-issues it, as
+	// Auth0 does when the refresh request omits scope.
+	Scope string
 }
 
 type Server struct {
