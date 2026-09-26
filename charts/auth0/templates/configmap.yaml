@@ -13,8 +13,13 @@ data:
     {{- range .Values.config.corsOrigins }}
     - {{ . | quote }}
     {{- end }}
+    {{- /* An empty list must render inline: "users:" over a bare "[]" is not YAML. */}}
+    {{- if .Values.config.users }}
     users:
     {{- toYaml .Values.config.users | nindent 4 }}
+    {{- else }}
+    users: []
+    {{- end }}
     branding:
       {{- toYaml .Values.config.branding | nindent 6 }}
     {{- with .Values.config.organizations }}
