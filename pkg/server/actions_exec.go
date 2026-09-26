@@ -49,15 +49,15 @@ type postLoginRequest struct {
 // postLogin runs the declarative claims block and then every deployed
 // post-login Action. It answers the token request itself when an Action
 // denies or fails, and reports whether the caller may go on to issue tokens.
-func (s *Server) postLogin(w http.ResponseWriter, r *http.Request, user *config.User, clientID, code, protocol string, idClaims, accessClaims jwt.MapClaims) bool {
+func (s *Server) postLogin(w http.ResponseWriter, r *http.Request, user *config.User, clientID, orgID, authorizeQuery, protocol string, idClaims, accessClaims jwt.MapClaims) bool {
 	client := s.lookupClient(clientID)
-	s.applyPostLogin(user, client, idClaims, accessClaims)
-	req := s.requestFromToken(r, code, protocol)
+	s.applyPostLogin(user, client, orgID, idClaims, accessClaims)
+	req := requestFromToken(r, authorizeQuery, protocol)
 	for _, b := range s.actions.listBindings(TriggerPostLogin) {
 		if b.Action.DeployedVersion == nil {
 			continue // bound but not deployed: Auth0 skips it too
 		}
-		if err := s.runPostLoginAction(b, user, client, req, idClaims, accessClaims); err != nil {
+		if err := s.runPostLoginAction(b, user, client, orgID, req, idClaims, accessClaims); err != nil {
 			var denied *errAccessDenied
 			if !errors.As(err, &denied) {
 				// A throwing Action fails the login, as in Auth0.
@@ -76,7 +76,7 @@ func (s *Server) postLogin(w http.ResponseWriter, r *http.Request, user *config.
 // runPostLoginAction runs one Action's deployed code to completion, awaiting
 // an async handler, within actionTimeout. It returns *errAccessDenied when the
 // code called api.access.deny.
-func (s *Server) runPostLoginAction(b *ActionBinding, user *config.User, client *config.Client, req postLoginRequest, idClaims, accessClaims jwt.MapClaims) error {
+func (s *Server) runPostLoginAction(b *ActionBinding, user *config.User, client *config.Client, orgID string, req postLoginRequest, idClaims, accessClaims jwt.MapClaims) error {
 	a := b.Action
 	registry := require.NewRegistry()
 	registry.RegisterNativeModule(console.ModuleName, console.RequireWithPrinter(actionPrinter{a.Name}))
@@ -105,7 +105,7 @@ func (s *Server) runPostLoginAction(b *ActionBinding, user *config.User, client 
 		buffer.Enable(vm)
 		s.installRequire(vm)
 		installFetch(ctx, vm, loop)
-		_ = vm.Set("event", vm.ToValue(s.buildEvent(a, b, user, client, req)))
+		_ = vm.Set("event", vm.ToValue(s.buildEvent(a, b, user, client, orgID, req)))
 		api := s.newActionAPI(vm, user, idClaims, accessClaims, func(reason string) {
 			if denied == nil {
 				denied = &errAccessDenied{reason: reason}
@@ -303,8 +303,8 @@ func fetchResponse(vm *goja.Runtime, resp *http.Response, data []byte) *goja.Obj
 // buildEvent is the post-login event, shaped like Auth0's: the same user,
 // authorization, and client context the declarative block sees, plus what
 // only code can use (request, transaction, secrets, organization).
-func (s *Server) buildEvent(a *Action, b *ActionBinding, user *config.User, client *config.Client, req postLoginRequest) map[string]any {
-	ev := s.buildPostLoginContext(user, client)
+func (s *Server) buildEvent(a *Action, b *ActionBinding, user *config.User, client *config.Client, orgID string, req postLoginRequest) map[string]any {
+	ev := s.buildPostLoginContext(user, client, orgID)
 	u := ev["user"].(map[string]any)
 	u["email_verified"] = user.EmailVerified
 	u["picture"] = user.Picture
@@ -345,9 +345,12 @@ func (s *Server) buildEvent(a *Action, b *ActionBinding, user *config.User, clie
 	ev["secrets"] = secretValues(a, b)
 	ev["stats"] = map[string]any{"logins_count": 1}
 	ev["authentication"] = map[string]any{"methods": []any{map[string]any{"name": "passwordless", "timestamp": time.Now().UTC().Format(time.RFC3339)}}}
-	if user.AppMetadata.TenantID != "" {
+	if orgID == "" {
+		orgID = user.AppMetadata.TenantID()
+	}
+	if orgID != "" {
 		s.mu.RLock()
-		org := s.organizations[user.AppMetadata.TenantID]
+		org := s.organizations[orgID]
 		s.mu.RUnlock()
 		if org != nil {
 			ev["organization"] = map[string]any{"id": org.ID, "name": org.Name, "display_name": org.DisplayName, "metadata": map[string]any{}}
@@ -361,7 +364,14 @@ func (s *Server) buildEvent(a *Action, b *ActionBinding, user *config.User, clie
 func (s *Server) setAppMetadata(user *config.User, key string, value any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	user.AppMetadata.Set(key, value)
+	if user.AppMetadata == nil {
+		user.AppMetadata = config.AppMetadata{}
+	}
+	if value == nil {
+		delete(user.AppMetadata, key)
+	} else {
+		user.AppMetadata[key] = value
+	}
 	if u := s.users[user.ID]; u != nil && u != user {
 		u.AppMetadata = user.AppMetadata
 	}
@@ -387,21 +397,15 @@ func (s *Server) setUserMetadata(user *config.User, key string, value any) {
 var secretBodyFields = map[string]bool{"code": true, "code_verifier": true, "client_secret": true, "refresh_token": true}
 
 // requestFromToken is the post-login request for a token exchange: the
-// original /authorize query when there was one, else the token form.
-func (s *Server) requestFromToken(r *http.Request, code, protocol string) postLoginRequest {
+// original /authorize query when there was one, else only the token form.
+func requestFromToken(r *http.Request, authorizeQuery, protocol string) postLoginRequest {
 	req := postLoginRequest{Protocol: protocol, Method: r.Method, Host: r.Host, UA: r.UserAgent(), IP: clientIP(r), Query: map[string]string{}, Body: map[string]string{}}
 	for k, v := range r.Form {
 		if len(v) > 0 && !secretBodyFields[k] {
 			req.Body[k] = v[0]
 		}
 	}
-	if code == "" {
-		return req
-	}
-	s.mu.RLock()
-	raw := s.authQuery[code]
-	s.mu.RUnlock()
-	if q, err := url.ParseQuery(raw); err == nil {
+	if q, err := url.ParseQuery(authorizeQuery); err == nil && authorizeQuery != "" {
 		for k, v := range q {
 			if len(v) > 0 {
 				req.Query[k] = v[0]

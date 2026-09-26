@@ -107,8 +107,8 @@ func minimalServer(t *testing.T, pl *config.PostLoginAction) *Server {
 			Phone: "+15555550100",
 			Name:  "User One",
 			AppMetadata: config.AppMetadata{
-				TenantID: "org_1",
-				Role:     "admin",
+				config.AppMetaTenantID: "org_1",
+				config.AppMetaRole:     "admin",
 			},
 		}},
 		Organizations: []config.Organization{{ID: "org_1", Name: "org-one"}},
@@ -131,7 +131,7 @@ func TestApplyPostLogin_NilIsNoop(t *testing.T) {
 
 	idClaims := jwt.MapClaims{"sub": user.ID}
 	accessClaims := jwt.MapClaims{"sub": user.ID}
-	srv.applyPostLogin(user, srv.clients["spa_app"], idClaims, accessClaims)
+	srv.applyPostLogin(user, srv.clients["spa_app"], "", idClaims, accessClaims)
 
 	if len(idClaims) != 1 || len(accessClaims) != 1 {
 		t.Fatalf("nil PostLogin must not mutate claims: id=%v access=%v", idClaims, accessClaims)
@@ -157,7 +157,7 @@ func TestApplyPostLogin_NamespacedAndRawClaims(t *testing.T) {
 	idClaims := jwt.MapClaims{}
 	accessClaims := jwt.MapClaims{}
 
-	srv.applyPostLogin(user, srv.clients["spa_app"], idClaims, accessClaims)
+	srv.applyPostLogin(user, srv.clients["spa_app"], "", idClaims, accessClaims)
 
 	ns := "https://auth.example.test/"
 	if idClaims[ns+"role"] != "admin" {
@@ -174,6 +174,31 @@ func TestApplyPostLogin_NamespacedAndRawClaims(t *testing.T) {
 	}
 }
 
+// TestApplyPostLogin_RoleFromOrgRoles: the org-scoped authorization.role is
+// derived from app_metadata.org_roles[activeOrg] (the per-org role model),
+// taking precedence over the legacy members config. Claim naming is left to
+// config, so the mock stays generic.
+func TestApplyPostLogin_RoleFromOrgRoles(t *testing.T) {
+	srv := minimalServer(t, &config.PostLoginAction{
+		AccessTokenClaims: map[string]string{
+			"role": "${authorization.role}",
+		},
+	})
+	// Per-org role model. members still says "owner" for org_1 — org_roles wins.
+	srv.users["auth0|u1"].AppMetadata = config.AppMetadata{
+		config.AppMetaTenantID: "org_1",
+		config.AppMetaOrgRoles: map[string]any{"org_1": "superadmin"},
+	}
+
+	access := jwt.MapClaims{}
+	srv.applyPostLogin(srv.users["auth0|u1"], srv.clients["spa_app"], "", jwt.MapClaims{}, access)
+
+	ns := "https://auth.example.test/"
+	if access[ns+"role"] != "superadmin" {
+		t.Errorf("role should come from org_roles[org], not members: got %v", access[ns+"role"])
+	}
+}
+
 func TestApplyPostLogin_SkipsClaimsWithEmptySource(t *testing.T) {
 	srv := minimalServer(t, &config.PostLoginAction{
 		IDTokenClaims: map[string]string{
@@ -186,7 +211,7 @@ func TestApplyPostLogin_SkipsClaimsWithEmptySource(t *testing.T) {
 	srv.users["auth0|u1"].Phone = ""
 
 	idClaims := jwt.MapClaims{}
-	srv.applyPostLogin(srv.users["auth0|u1"], srv.clients["spa_app"], idClaims, jwt.MapClaims{})
+	srv.applyPostLogin(srv.users["auth0|u1"], srv.clients["spa_app"], "", idClaims, jwt.MapClaims{})
 
 	ns := "https://auth.example.test/"
 	if _, ok := idClaims[ns+"phone_number"]; ok {
@@ -210,7 +235,7 @@ func TestApplyPostLogin_AuthorizationContextFromMembers(t *testing.T) {
 
 	user := srv.users["auth0|u1"]
 	accessClaims := jwt.MapClaims{}
-	srv.applyPostLogin(user, srv.clients["spa_app"], jwt.MapClaims{}, accessClaims)
+	srv.applyPostLogin(user, srv.clients["spa_app"], "", jwt.MapClaims{}, accessClaims)
 
 	ns := "https://auth.example.test/"
 	if accessClaims[ns+"role"] != "owner" {
@@ -227,10 +252,10 @@ func TestApplyPostLogin_AuthorizationEmptyWhenNoMembership(t *testing.T) {
 			"role": "${authorization.role}",
 		},
 	})
-	srv.users["auth0|u1"].AppMetadata.TenantID = "" // user belongs to no org
+	delete(srv.users["auth0|u1"].AppMetadata, config.AppMetaTenantID) // user belongs to no org
 
 	accessClaims := jwt.MapClaims{}
-	srv.applyPostLogin(srv.users["auth0|u1"], srv.clients["spa_app"], jwt.MapClaims{}, accessClaims)
+	srv.applyPostLogin(srv.users["auth0|u1"], srv.clients["spa_app"], "", jwt.MapClaims{}, accessClaims)
 
 	ns := "https://auth.example.test/"
 	if _, ok := accessClaims[ns+"role"]; ok {
@@ -246,7 +271,7 @@ func TestApplyPostLogin_LiteralClaims(t *testing.T) {
 	})
 
 	idClaims := jwt.MapClaims{}
-	srv.applyPostLogin(srv.users["auth0|u1"], srv.clients["spa_app"], idClaims, jwt.MapClaims{})
+	srv.applyPostLogin(srv.users["auth0|u1"], srv.clients["spa_app"], "", idClaims, jwt.MapClaims{})
 
 	if idClaims["environment"] != "development" {
 		t.Errorf("literal raw claim: got %v", idClaims["environment"])
@@ -261,7 +286,7 @@ func TestApplyPostLogin_ClientContext(t *testing.T) {
 	})
 
 	accessClaims := jwt.MapClaims{}
-	srv.applyPostLogin(srv.users["auth0|u1"], srv.clients["spa_app"], jwt.MapClaims{}, accessClaims)
+	srv.applyPostLogin(srv.users["auth0|u1"], srv.clients["spa_app"], "", jwt.MapClaims{}, accessClaims)
 
 	ns := "https://auth.example.test/"
 	if accessClaims[ns+"client_name"] != "SPA App" {

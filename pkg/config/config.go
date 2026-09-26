@@ -1,63 +1,46 @@
 package config
 
-import "encoding/json"
+import "time"
 
-type AppMetadata struct {
-	TenantID string `json:"tenant_id,omitempty" yaml:"tenant_id,omitempty" mapstructure:"tenant_id"`
-	Role     string `json:"role,omitempty" yaml:"role,omitempty" mapstructure:"role"`
-	// Extra holds every other key, as Auth0's app_metadata is a free map:
-	// set by Actions or the Management API, returned by both.
-	Extra map[string]any `json:"-" yaml:"-" mapstructure:"-"`
+// AppMetadata mirrors Auth0's user.app_metadata — an open map, not a typed
+// struct. Two keys have first-class meaning to the mock's JWT wiring
+// (tenant_id, role) and are exposed via helper methods, but every other key
+// (e.g. pee's org_roles) is preserved intact through PATCH/GET so SDK writes
+// round-trip faithfully.
+type AppMetadata map[string]any
+
+// Well-known app_metadata keys read by the mock's JWT claim assembly.
+const (
+	AppMetaTenantID = "tenant_id"
+	AppMetaRole     = "role"
+	AppMetaOrgRoles = "org_roles"
+)
+
+// TenantID returns app_metadata.tenant_id or "" when unset or the value isn't
+// a string. Nil-safe.
+func (m AppMetadata) TenantID() string {
+	s, _ := m[AppMetaTenantID].(string)
+	return s
 }
 
-// Map is app_metadata as a plain map, the way an Action sees it.
-func (m AppMetadata) Map() map[string]any {
-	out := make(map[string]any, len(m.Extra)+2)
-	for k, v := range m.Extra {
-		out[k] = v
-	}
-	if m.TenantID != "" {
-		out["tenant_id"] = m.TenantID
-	}
-	if m.Role != "" {
-		out["role"] = m.Role
-	}
-	return out
+// Role returns app_metadata.role or "" when unset or the value isn't a string.
+// Nil-safe.
+func (m AppMetadata) Role() string {
+	s, _ := m[AppMetaRole].(string)
+	return s
 }
 
-// Set writes one key, routing the two typed fields and keeping the rest.
-func (m *AppMetadata) Set(key string, value any) {
-	switch key {
-	case "tenant_id":
-		m.TenantID, _ = value.(string)
-	case "role":
-		m.Role, _ = value.(string)
-	default:
-		if value == nil {
-			delete(m.Extra, key)
-			return
-		}
-		if m.Extra == nil {
-			m.Extra = map[string]any{}
-		}
-		m.Extra[key] = value
+// OrgRole returns app_metadata.org_roles[orgID], the per-org role model (a
+// map of org id to role). Returns "" when absent or not a string. Nil-safe.
+// This is a generic per-org lookup; consumers name the claim in config, not
+// here.
+func (m AppMetadata) OrgRole(orgID string) string {
+	orgRoles, ok := m[AppMetaOrgRoles].(map[string]any)
+	if !ok {
+		return ""
 	}
-}
-
-func (m AppMetadata) MarshalJSON() ([]byte, error) {
-	return json.Marshal(m.Map())
-}
-
-func (m *AppMetadata) UnmarshalJSON(b []byte) error {
-	var raw map[string]any
-	if err := json.Unmarshal(b, &raw); err != nil {
-		return err
-	}
-	*m = AppMetadata{}
-	for k, v := range raw {
-		m.Set(k, v)
-	}
-	return nil
+	s, _ := orgRoles[orgID].(string)
+	return s
 }
 
 type UserIdentity struct {
@@ -107,10 +90,115 @@ type Connection struct {
 	Organizations  []string               `json:"organizations,omitempty" yaml:"organizations,omitempty" mapstructure:"organizations"` // Linked org IDs
 }
 
+// Role is a tenant-level role. PEE resolves its admin carrier role by name at
+// runtime, so ids are generated rather than configured.
+type Role struct {
+	ID          string `json:"id" yaml:"id" mapstructure:"id"`
+	Name        string `json:"name" yaml:"name" mapstructure:"name"`
+	Description string `json:"description,omitempty" yaml:"description,omitempty" mapstructure:"description"`
+}
+
 type OrganizationMember struct {
 	UserID string `json:"user_id" yaml:"user_id" mapstructure:"user_id"`
 	OrgID  string `json:"org_id" yaml:"org_id" mapstructure:"org_id"`
 	Role   string `json:"role,omitempty" yaml:"role,omitempty" mapstructure:"role"`
+}
+
+// OrganizationConnection is a connection enabled on an organization, the
+// enabled_connections sub-resource. Distinct from Connection: it holds the
+// per-organization login settings, not the connection definition. Name and
+// strategy are projected from the connection registry at response time.
+type OrganizationConnection struct {
+	OrgID                   string `json:"org_id"`
+	ConnectionID            string `json:"connection_id"`
+	AssignMembershipOnLogin bool   `json:"assign_membership_on_login"`
+	IsSignupEnabled         bool   `json:"is_signup_enabled"`
+	ShowAsButton            bool   `json:"show_as_button"`
+}
+
+// DeclaredOrganizationConnection is the config-file form of a pairing.
+// Separate from the resolved form because an omitted show_as_button must pick
+// up Auth0's true default, not Go's false zero value.
+type DeclaredOrganizationConnection struct {
+	OrgID                   string `yaml:"org_id" mapstructure:"org_id"`
+	ConnectionID            string `yaml:"connection_id" mapstructure:"connection_id"`
+	AssignMembershipOnLogin bool   `yaml:"assign_membership_on_login" mapstructure:"assign_membership_on_login"`
+	IsSignupEnabled         bool   `yaml:"is_signup_enabled" mapstructure:"is_signup_enabled"`
+	ShowAsButton            *bool  `yaml:"show_as_button" mapstructure:"show_as_button"`
+}
+
+// Resolve applies Auth0's defaults, yielding the pairing as stored.
+func (d DeclaredOrganizationConnection) Resolve() OrganizationConnection {
+	showAsButton := true
+	if d.ShowAsButton != nil {
+		showAsButton = *d.ShowAsButton
+	}
+	return OrganizationConnection{
+		OrgID:                   d.OrgID,
+		ConnectionID:            d.ConnectionID,
+		AssignMembershipOnLogin: d.AssignMembershipOnLogin,
+		IsSignupEnabled:         d.IsSignupEnabled,
+		ShowAsButton:            showAsButton,
+	}
+}
+
+// Invitation TTL bounds, per the Management API's ttl_sec schema.
+const (
+	InvitationDefaultTTLSec = 604800  // 7 days
+	InvitationMaxTTLSec     = 2592000 // 30 days
+)
+
+// OrganizationInvitation is a pending invitation: created on POST, removed on
+// acceptance or expiry.
+type OrganizationInvitation struct {
+	ID             string `json:"id" yaml:"id" mapstructure:"id"`
+	OrganizationID string `json:"organization_id" yaml:"organization_id" mapstructure:"organization_id"`
+	InviterName    string `json:"inviter_name" yaml:"inviter_name" mapstructure:"inviter_name"`
+	InviteeEmail   string `json:"invitee_email" yaml:"invitee_email" mapstructure:"invitee_email"`
+	ClientID       string `json:"client_id" yaml:"client_id" mapstructure:"client_id"`
+	ConnectionID   string `json:"connection_id,omitempty" yaml:"connection_id,omitempty" mapstructure:"connection_id"`
+	// carried in the invitation URL's `invitation` parameter, redeemed at login
+	TicketID      string      `json:"ticket_id" yaml:"ticket_id" mapstructure:"ticket_id"`
+	InvitationURL string      `json:"invitation_url" yaml:"invitation_url" mapstructure:"invitation_url"`
+	AppMetadata   AppMetadata `json:"app_metadata,omitempty" yaml:"app_metadata,omitempty" mapstructure:"app_metadata"`
+	UserMetadata  map[string]any
+	// role ids granted on acceptance; the carrier for the admin grant
+	Roles               []string  `json:"roles,omitempty" yaml:"roles,omitempty" mapstructure:"roles"`
+	SendInvitationEmail bool      `json:"send_invitation_email" yaml:"send_invitation_email" mapstructure:"send_invitation_email"`
+	CreatedAt           time.Time `json:"created_at" yaml:"created_at" mapstructure:"created_at"`
+	ExpiresAt           time.Time `json:"expires_at" yaml:"expires_at" mapstructure:"expires_at"`
+}
+
+// IsExpired reports whether the invitation has passed its expiry.
+func (i *OrganizationInvitation) IsExpired(now time.Time) bool {
+	return !i.ExpiresAt.IsZero() && now.After(i.ExpiresAt)
+}
+
+// Clone returns a deep copy of the invitation. Nil-safe.
+func (i *OrganizationInvitation) Clone() *OrganizationInvitation {
+	if i == nil {
+		return nil
+	}
+	out := *i
+	out.AppMetadata = i.AppMetadata.Clone()
+	out.UserMetadata = cloneAnyMap(i.UserMetadata)
+	if i.Roles != nil {
+		out.Roles = make([]string, len(i.Roles))
+		copy(out.Roles, i.Roles)
+	}
+	return &out
+}
+
+// Auth0 refuses to create an invitation for a passwordless connection.
+const (
+	StrategyEmail = "email"
+	StrategySMS   = "sms"
+)
+
+// IsPasswordless reports whether the connection's strategy is one of Auth0's
+// passwordless strategies.
+func (c *Connection) IsPasswordless() bool {
+	return c.Strategy == StrategyEmail || c.Strategy == StrategySMS
 }
 
 type Client struct {
@@ -122,6 +210,14 @@ type Client struct {
 	Callbacks    []string               `json:"callbacks,omitempty" yaml:"callbacks,omitempty" mapstructure:"callbacks"`
 	GrantTypes   []string               `json:"grant_types,omitempty" yaml:"grant_types,omitempty" mapstructure:"grant_types"`
 	JWTConfig    map[string]interface{} `json:"jwt_configuration,omitempty" yaml:"jwt_configuration,omitempty" mapstructure:"jwt_configuration"`
+	// login initiation endpoint; invitation_url is resolved against it
+	InitiateLoginURI string `json:"initiate_login_uri,omitempty" yaml:"initiate_login_uri,omitempty" mapstructure:"initiate_login_uri"`
+	// ClientMetadata is arbitrary key/value data on the application. A
+	// credentials-exchange action reads it to stamp claims on M2M tokens, which
+	// is how a machine credential carries an organization: Auth0 reserves the
+	// native org_id claim for the organization login context, and
+	// client-credentials cannot enter one.
+	ClientMetadata map[string]string `json:"client_metadata,omitempty" yaml:"client_metadata,omitempty" mapstructure:"client_metadata"`
 }
 
 type Branding struct {
@@ -133,22 +229,62 @@ type Branding struct {
 }
 
 type Config struct {
-	Issuer        string
-	Audience      string
-	Port          int
-	CORSOrigins   []string
-	Users         []User
-	Organizations []Organization
-	Connections   []Connection
-	Members       []OrganizationMember
-	Clients       []Client
-	Branding      Branding
-	Actions       Actions
+	Issuer      string
+	Audience    string
+	Port        int
+	CORSOrigins []string
+	Users       []User
+	// explicit pairings, for per-organization login settings; also derived
+	// from each Connection's Organizations list, and an entry here wins
+	OrganizationConnections []DeclaredOrganizationConnection
+	Organizations           []Organization
+	Connections             []Connection
+	Roles                   []Role
+	Members                 []OrganizationMember
+	Clients                 []Client
+	Branding                Branding
+	Actions                 Actions
 }
 
 type Actions struct {
-	PostLogin        *PostLoginAction        `json:"post_login,omitempty" yaml:"post_login,omitempty" mapstructure:"post_login"`
-	PostRegistration *PostRegistrationAction `json:"post_registration,omitempty" yaml:"post_registration,omitempty" mapstructure:"post_registration"`
+	PostLogin           *PostLoginAction           `json:"post_login,omitempty" yaml:"post_login,omitempty" mapstructure:"post_login"`
+	CredentialsExchange *CredentialsExchangeAction `json:"credentials_exchange,omitempty" yaml:"credentials_exchange,omitempty" mapstructure:"credentials_exchange"`
+	PostRegistration    *PostRegistrationAction    `json:"post_registration,omitempty" yaml:"post_registration,omitempty" mapstructure:"post_registration"`
+	TokenExchange       *TokenExchangeAction       `json:"token_exchange,omitempty" yaml:"token_exchange,omitempty" mapstructure:"token_exchange"`
+}
+
+// TokenExchangeAction declares how the mock services RFC 8693 token exchange
+// (grant_type urn:ietf:params:oauth:grant-type:token-exchange), mirroring an
+// Auth0 Custom Token Exchange profile + Action. It is intentionally generic:
+// all consumer-specific claim names live in config, not in the mock's Go.
+//
+// The grant mints a new access token whose sub is the subject token's sub
+// (the real operator, preserved for audit), org_id is the requested target
+// organization, plus the claims declared below. When RequireClaim is set, the
+// exchange is authorized only if the subject token carries that claim
+// non-empty (the mock's stand-in for the Action's authorization check).
+type TokenExchangeAction struct {
+	// SubjectTokenType is the profile's subject_token_type: the request's
+	// subject_token_type must match it exactly (mirrors Auth0 profile matching).
+	// Auth0 rejects reserved namespaces (urn:ietf, urn:auth0, urn:okta,
+	// *.auth0.com, *.okta.com), so configure a custom URN. Empty = accept any.
+	SubjectTokenType string `json:"subject_token_type,omitempty" yaml:"subject_token_type,omitempty" mapstructure:"subject_token_type"`
+	// RequireClaim, if set, gates the exchange: the subject token must carry
+	// this (fully-qualified) claim with a non-empty value, else 403.
+	RequireClaim string `json:"require_claim,omitempty" yaml:"require_claim,omitempty" mapstructure:"require_claim"`
+	// CarryClaims are copied verbatim (same key) from the subject token onto
+	// the minted token when present.
+	CarryClaims []string `json:"carry_claims,omitempty" yaml:"carry_claims,omitempty" mapstructure:"carry_claims"`
+	// SetClaims are literal key/value claims stamped on the minted token. Keys
+	// are used verbatim (already namespaced in config), so org_id and
+	// namespaced role/platform coexist without the mock namespacing anything.
+	SetClaims map[string]string `json:"set_claims,omitempty" yaml:"set_claims,omitempty" mapstructure:"set_claims"`
+	// Actor, when true, stamps the RFC 8693 `act` claim {"sub": subject.sub}
+	// so the delegated token carries a native actor/audit trail.
+	Actor bool `json:"actor,omitempty" yaml:"actor,omitempty" mapstructure:"actor"`
+	// OrgClaim is the claim the target organization is minted under. Empty keeps
+	// the native org_id, which real Auth0 issues only for a member of the target.
+	OrgClaim string `json:"org_claim,omitempty" yaml:"org_claim,omitempty" mapstructure:"org_claim"`
 }
 
 // PostLoginAction declares custom claims to add to tokens issued by the
@@ -161,6 +297,15 @@ type PostLoginAction struct {
 	IDTokenRawClaims     map[string]string `json:"id_token_raw_claims,omitempty" yaml:"id_token_raw_claims,omitempty" mapstructure:"id_token_raw_claims"`
 	AccessTokenClaims    map[string]string `json:"access_token_claims,omitempty" yaml:"access_token_claims,omitempty" mapstructure:"access_token_claims"`
 	AccessTokenRawClaims map[string]string `json:"access_token_raw_claims,omitempty" yaml:"access_token_raw_claims,omitempty" mapstructure:"access_token_raw_claims"`
+}
+
+// CredentialsExchangeAction declares custom claims added to tokens issued by
+// the client_credentials flow. Templates resolve against the exchange context
+// (client), so a metadata key reaches a token as
+// "${client.metadata.org_id}". A claim whose template resolves empty is
+// omitted, mirroring `if (md.org_id) api.accessToken.setCustomClaim(...)`.
+type CredentialsExchangeAction struct {
+	AccessTokenClaims map[string]string `json:"access_token_claims,omitempty" yaml:"access_token_claims,omitempty" mapstructure:"access_token_claims"`
 }
 
 // PostRegistrationAction declares defaults applied when a user is auto-created

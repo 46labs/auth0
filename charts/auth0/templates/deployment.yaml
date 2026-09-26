@@ -11,6 +11,10 @@ spec:
       {{- include "auth0.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        # subPath mounts do not refresh in a running container, and the server
+        # reads config only at startup, so a config change has to roll the pod.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
       labels:
         {{- include "auth0.selectorLabels" . | nindent 8 }}
     spec:
@@ -33,13 +37,23 @@ spec:
         - name: CORSORIGINS
           value: {{ join "," .Values.config.corsOrigins | quote }}
         {{- end }}
-        {{- if .Values.customLogin.enabled }}
         volumeMounts:
+        # The server reads /config/config.yaml. Without this mount the whole
+        # config ConfigMap is rendered and then ignored, leaving the image's
+        # baked-in fixtures in charge.
+        - name: config
+          mountPath: /config/config.yaml
+          subPath: config.yaml
+        {{- if .Values.customLogin.enabled }}
         - name: custom-login
-          mountPath: /config
+          mountPath: /config/login.html
+          subPath: login.html
         {{- end }}
-      {{- if .Values.customLogin.enabled }}
       volumes:
+      - name: config
+        configMap:
+          name: {{ include "auth0.fullname" . }}
+      {{- if .Values.customLogin.enabled }}
       - name: custom-login
         configMap:
           name: {{ include "auth0.fullname" . }}-login

@@ -64,10 +64,19 @@ func lookupPath(ctx map[string]any, path string) string {
 // buildPostLoginContext assembles the data context exposed to post_login
 // templates. Mirrors Auth0's `event` object shape at a high level: user,
 // authorization (org-scoped role), and client.
-func (s *Server) buildPostLoginContext(user *config.User, client *config.Client) map[string]any {
+// buildPostLoginContext takes the organization the login was scoped to rather
+// than reading app_metadata.tenant_id, so that for a user who belongs to
+// several organizations an action's ${authorization.role} resolves against the
+// one they actually logged in to.
+func (s *Server) buildPostLoginContext(user *config.User, client *config.Client, orgID string) map[string]any {
 	userMeta := map[string]any{}
 	for k, v := range user.UserMetadata {
 		userMeta[k] = v
+	}
+
+	appMeta := map[string]any{}
+	for k, v := range user.AppMetadata {
+		appMeta[k] = v
 	}
 
 	ctx := map[string]any{
@@ -76,21 +85,36 @@ func (s *Server) buildPostLoginContext(user *config.User, client *config.Client)
 			"email":         user.Email,
 			"phone_number":  user.Phone,
 			"name":          user.Name,
-			"app_metadata":  user.AppMetadata.Map(),
+			"app_metadata":  appMeta,
 			"user_metadata": userMeta,
 		},
 	}
 
 	auth := map[string]any{}
-	if user.AppMetadata.TenantID != "" {
-		s.mu.RLock()
-		members := s.members[user.AppMetadata.TenantID]
-		s.mu.RUnlock()
-		for _, m := range members {
-			if m.UserID == user.ID {
-				auth["role"] = m.Role
-				auth["org_id"] = m.OrgID
-				break
+	if orgID == "" {
+		orgID = user.AppMetadata.TenantID()
+	}
+	if orgID != "" {
+		auth["org_id"] = orgID
+		// Prod parity: derive the org-scoped role from app_metadata.org_roles[org]
+		// (the model consumers like pee use), so SDK writes to org_roles
+		// round-trip into the next token. Fall back to the org-membership config
+		// for legacy single-role setups.
+		//
+		// The flat app_metadata.role is deliberately not consulted here:
+		// authorization.role is the organization-scoped role, mirroring
+		// production where it comes from membership rather than a flat key.
+		if role := user.AppMetadata.OrgRole(orgID); role != "" {
+			auth["role"] = role
+		} else {
+			s.mu.RLock()
+			members := s.members[orgID]
+			s.mu.RUnlock()
+			for _, m := range members {
+				if m.UserID == user.ID {
+					auth["role"] = m.Role
+					break
+				}
 			}
 		}
 	}
@@ -111,13 +135,15 @@ func (s *Server) buildPostLoginContext(user *config.User, client *config.Client)
 // applyPostLogin merges configured post_login claims into idClaims and
 // accessClaims. Namespaced claims are prefixed with the issuer; raw claims
 // land at the top level. Templates resolving to an empty value are dropped.
-func (s *Server) applyPostLogin(user *config.User, client *config.Client, idClaims, accessClaims jwt.MapClaims) {
+func (s *Server) applyPostLogin(
+	user *config.User, client *config.Client, orgID string, idClaims, accessClaims jwt.MapClaims,
+) {
 	pl := s.cfg.Actions.PostLogin
 	if pl == nil {
 		return
 	}
 
-	ctx := s.buildPostLoginContext(user, client)
+	ctx := s.buildPostLoginContext(user, client, orgID)
 	ns := strings.TrimSuffix(s.cfg.Issuer, "/") + "/"
 
 	merge := func(claims jwt.MapClaims, src map[string]string, namespaced bool) {
@@ -150,7 +176,45 @@ func (s *Server) lookupClient(clientID string) *config.Client {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if c, ok := s.clients[clientID]; ok {
-		return c
+		return c.Clone()
 	}
 	return nil
+}
+
+// applyCredentialsExchange merges configured credentials_exchange claims into a
+// client_credentials token. Namespaced like post_login, so a consumer reads the
+// same key shape whether the caller is a user or a machine.
+//
+// This is how a machine credential carries its organization. Auth0 reserves the
+// native org_id claim for the organization login context, which
+// client-credentials cannot enter without org-scoped M2M, so the value lives in
+// the application's metadata and an action copies it onto the token.
+func (s *Server) applyCredentialsExchange(client *config.Client, accessClaims jwt.MapClaims) {
+	ce := s.cfg.Actions.CredentialsExchange
+	if ce == nil || client == nil {
+		return
+	}
+
+	metadata := map[string]any{}
+	for k, v := range client.ClientMetadata {
+		metadata[k] = v
+	}
+	ctx := map[string]any{
+		"client": map[string]any{
+			"client_id": client.ClientID,
+			"name":      client.Name,
+			"metadata":  metadata,
+		},
+	}
+
+	ns := strings.TrimSuffix(s.cfg.Issuer, "/") + "/"
+	for name, tmpl := range ce.AccessTokenClaims {
+		value, ok := resolveTemplate(tmpl, ctx)
+		if !ok {
+			// An unset metadata key omits the claim rather than stamping an
+			// empty one, mirroring the `if (md.x)` guard a real action uses.
+			continue
+		}
+		accessClaims[ns+name] = value
+	}
 }
