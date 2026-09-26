@@ -25,9 +25,9 @@ type Server struct {
 	verified      map[string]config.User
 	verifiers     map[string]string
 	nonces        map[string]string
-	scopes        map[string]string         // maps auth_code -> requested scopes
-	refreshTokens map[string]string         // maps refresh_token -> user_id
-	authQuery     map[string]string         // maps auth_code -> the original /authorize query, for Actions
+	scopes        map[string]string // maps auth_code -> requested scopes
+	refreshTokens map[string]string // maps refresh_token -> user_id
+	authQuery     map[string]string // maps auth_code -> the original /authorize query, for Actions
 
 	actions *actionStore
 
