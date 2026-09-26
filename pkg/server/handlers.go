@@ -443,7 +443,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			"aud":   s.cfg.Audience,
 			"exp":   now.Add(time.Hour).Unix(),
 			"iat":   now.Unix(),
-			"scope": "openid profile email",
+			"scope": grantedScope(issued.Scope),
 		}
 
 		if orgID != "" {
@@ -627,7 +627,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		"aud":   s.cfg.Audience,
 		"exp":   now.Add(time.Hour).Unix(),
 		"iat":   now.Unix(),
-		"scope": "openid profile email",
+		"scope": grantedScope(requestedScope),
 	}
 
 	// org_id is a top-level claim (matches production Auth0 Organizations)
@@ -667,6 +667,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			UserID:   user.ID,
 			OrgID:    orgID,
 			ClientID: claimed.ClientID,
+			Scope:    requestedScope,
 		}
 		s.mu.Unlock()
 	}
@@ -717,4 +718,28 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		returnTo = strings.TrimSuffix(s.cfg.Issuer, "/")
 	}
 	http.Redirect(w, r, returnTo, http.StatusFound)
+}
+
+// defaultScope is the access-token scope when the authorize request named none.
+const defaultScope = "openid profile email"
+
+// grantedScope is the access token's scope claim: the scopes the authorize
+// request asked for, deduplicated in request order. Auth0 grants the
+// requested scopes an API defines; the mock defines no per-API scopes, so it
+// grants what was requested rather than a fixed string that drops the API's
+// own scopes (for example prayers:write).
+func grantedScope(requested string) string {
+	fields := strings.Fields(requested)
+	if len(fields) == 0 {
+		return defaultScope
+	}
+	seen := make(map[string]bool, len(fields))
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if !seen[f] {
+			seen[f] = true
+			out = append(out, f)
+		}
+	}
+	return strings.Join(out, " ")
 }
