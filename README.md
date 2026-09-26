@@ -8,6 +8,7 @@ Full-featured OIDC provider mock with Auth0-compatible API for local development
 - Complete OIDC/OAuth2 implementation (discovery, JWKS, authorize, token, userinfo)
 - PKCE support
 - SMS and email passwordless authentication
+- Actions: declarative claims and scripted post-login code deployed through the Management API
 - Login hint support for pre-filling user identifiers
 - Configurable custom claims with namespace support
 - Multi-tenancy with organizations
@@ -259,6 +260,46 @@ exports.onExecutePostLogin = async (event, api) => {
 };
 ```
 
+### Scripted Actions (Management API)
+
+Alongside the declarative block above, the mock runs real Action code. A
+controller built on `go-auth0` (or plain HTTP) creates, deploys, and binds
+Actions exactly as against a tenant, and the deployed JavaScript runs at the
+`post-login` trigger on the `authorization_code` and `refresh_token` flows.
+
+```sh
+# create (built synchronously), deploy, bind
+curl -X POST http://localhost:3000/api/v2/actions/actions \
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer x' \
+  -d '{"name":"guardian-approval","runtime":"node22",
+       "supported_triggers":[{"id":"post-login","version":"v3"}],
+       "secrets":[{"name":"HOOK","value":"http://api:8080/v1/auth/hooks/post-login"}],
+       "code":"exports.onExecutePostLogin = async (event, api) => { const r = await fetch(event.secrets.HOOK, {method:\"POST\", body: JSON.stringify({user_id: event.user.user_id, device_id: event.request.query.device_id})}); const d = await r.json(); if (d.decision === \"deny\") api.access.deny(d.reason); };"}'
+curl -X POST http://localhost:3000/api/v2/actions/actions/<id>/deploy -H 'Authorization: Bearer x'
+curl -X PATCH http://localhost:3000/api/v2/actions/triggers/post-login/bindings \
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer x' \
+  -d '{"bindings":[{"ref":{"type":"action_name","value":"guardian-approval"}}]}'
+```
+
+Endpoints: `GET /api/v2/actions/triggers`; `GET|POST /api/v2/actions/actions`
+(filters `actionName`, `triggerId`, `deployed`); `GET|PATCH|DELETE
+/api/v2/actions/actions/{id}` (`?force=true` unbinds first); `POST
+/api/v2/actions/actions/{id}/deploy`; `GET /api/v2/actions/actions/{id}/versions`;
+`GET|PATCH /api/v2/actions/triggers/{trigger}/bindings` (refs by `action_id`,
+`action_name`, or `binding_id`; the list replaces the order). Secret values are
+write-only, as in Auth0. Nothing persists across restarts: reconcile on startup.
+
+What the code gets: `event` (`user` with `app_metadata`/`user_metadata`,
+`client`, `connection`, `request` with the `/authorize` `query` and the token
+`body`, `transaction`, `organization`, `secrets`), `api.idToken.setCustomClaim`,
+`api.accessToken.setCustomClaim`, `api.access.deny(reason)`,
+`api.user.setAppMetadata`/`setUserMetadata`, `console`, and a global `fetch`
+(Promise API; `ok`, `status`, `headers.get`, `json()`, `text()`). `require` is
+not available: npm dependencies are not installed here. A denied login answers
+the token request with `403 {"error":"access_denied","error_description":...}`;
+a throwing Action does the same with the error. Runs are bounded at 20 seconds.
+Bound but undeployed Actions do not run. Engine: [goja](https://github.com/dop251/goja).
+
 ## Management API
 
 ### Organizations
@@ -450,7 +491,8 @@ For issues, feature requests, or questions:
 
 - [ ] SAML connection support
 - [x] Actions: declarative `post_login` trigger (custom claim shaping)
-- [ ] Actions: `post_registration`, `credentials_exchange` triggers
+- [x] Actions: scripted `post-login` Actions through the Management API (create, deploy, bind; `fetch`, `deny`, metadata)
+- [ ] Actions: run code at `credentials-exchange`, `post-user-registration`, `custom-token-exchange`
 - [ ] Persistent storage option
 - [ ] WebAuthn/Passkey support
 - [ ] Social connection mocks

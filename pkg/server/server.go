@@ -28,6 +28,8 @@ type authCode struct {
 	ClientID      string
 	OrgID         string
 	ConnectionID  string
+	// Query is the /authorize request as sent, for Actions' event.request.query.
+	Query string
 }
 
 // refreshTokenState carries the bindings of the login that issued the token,
@@ -46,6 +48,8 @@ type Server struct {
 	pending       map[string]string
 	authCodes     map[string]*authCode
 	refreshTokens map[string]*refreshTokenState
+
+	actions *actionStore
 
 	users         map[string]*config.User
 	organizations map[string]*config.Organization
@@ -111,6 +115,7 @@ func New(cfg *config.Config) (*Server, error) {
 		templates:      tmpl,
 		pending:        make(map[string]string),
 		authCodes:      make(map[string]*authCode),
+		actions:        newActionStore(),
 		refreshTokens:  make(map[string]*refreshTokenState),
 		users:          users,
 		organizations:  organizations,
@@ -189,6 +194,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v2/clients/", s.handleClient)
 	mux.HandleFunc("/api/v2/roles", s.handleRoles)
 	mux.HandleFunc("/api/v2/roles/", s.handleRole)
+	s.registerActionsAPI(mux)
 
 	return mux
 }

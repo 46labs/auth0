@@ -282,6 +282,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 				ClientID:      params.Get("client_id"),
 				OrgID:         orgID,
 				ConnectionID:  connectionID,
+				Query:         originalQuery,
 			}
 
 			s.mu.Lock()
@@ -489,7 +490,9 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			idClaims[ns+"role"] = role
 		}
 
-		s.applyPostLogin(user, s.lookupClient(clientID), orgID, idClaims, accessClaims)
+		if !s.postLogin(w, r, user, clientID, orgID, "", "oauth2-refresh-token", idClaims, accessClaims) {
+			return
+		}
 
 		accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
 		accessToken.Header["kid"] = "key-1"
@@ -636,7 +639,9 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		accessClaims[ns+"role"] = role
 	}
 
-	s.applyPostLogin(&user, s.lookupClient(clientID), orgID, idClaims, accessClaims)
+	if !s.postLogin(w, r, &user, clientID, orgID, claimed.Query, "oidc-basic-profile", idClaims, accessClaims) {
+		return
+	}
 
 	accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
 	accessToken.Header["kid"] = "key-1"
