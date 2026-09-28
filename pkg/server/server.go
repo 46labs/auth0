@@ -44,14 +44,45 @@ type authCode struct {
 // refreshTokenState carries the bindings of the login that issued the token,
 // so a refresh cannot re-scope it to another client or organization.
 type refreshTokenState struct {
-	UserID   string
-	OrgID    string
-	ClientID string
+	UserID         string
+	OrgID          string
+	ClientID       string
+	IncludeIDToken bool
 	// SessionID is the login session the token was issued in.
 	SessionID string
 	// Scope is the scope granted at login; a refresh re-issues it, as
 	// Auth0 does when the refresh request omits scope.
 	Scope string
+}
+
+const (
+	deviceCodeLifetime = 15 * time.Minute
+	devicePollInterval = 5 * time.Second
+
+	deviceTransactionPending  = "pending"
+	deviceTransactionApproved = "approved"
+	deviceTransactionDenied   = "denied"
+	deviceTransactionExpired  = "expired"
+	deviceTransactionConsumed = "consumed"
+)
+
+// deviceTransaction carries one RFC 8628 authorization request from issuance
+// through browser approval and its one-time token exchange.
+type deviceTransaction struct {
+	DeviceCode     string
+	UserCode       string
+	ClientID       string
+	Audience       string
+	Scope          string
+	OrgID          string
+	CreatedAt      time.Time
+	ExpiresAt      time.Time
+	Interval       time.Duration
+	NextPollAt     time.Time
+	Status         string
+	ApprovedBy     string
+	FailedAttempts int
+	BlockedUntil   time.Time
 }
 
 type Server struct {
@@ -62,6 +93,7 @@ type Server struct {
 	pending       map[string]string
 	authCodes     map[string]*authCode
 	refreshTokens map[string]*refreshTokenState
+	deviceCodes   map[string]*deviceTransaction
 
 	actions *actionStore
 
@@ -138,6 +170,7 @@ func New(cfg *config.Config) (*Server, error) {
 		authCodes:      make(map[string]*authCode),
 		actions:        newActionStore(),
 		refreshTokens:  make(map[string]*refreshTokenState),
+		deviceCodes:    make(map[string]*deviceTransaction),
 		users:          users,
 		organizations:  organizations,
 		connections:    connections,
@@ -199,7 +232,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/.well-known/openid-configuration", s.handleDiscovery)
 	mux.HandleFunc("/.well-known/jwks.json", s.handleJWKS)
 	mux.HandleFunc("/authorize", s.handleAuthorize)
+	mux.HandleFunc("/oauth/device/code", s.handleDeviceAuthorization)
 	mux.HandleFunc("/oauth/token", s.handleToken)
+	mux.HandleFunc("/device", s.handleDeviceVerification)
 	mux.HandleFunc("/userinfo", s.handleUserInfo)
 	mux.HandleFunc("/v2/logout", s.handleLogout)
 

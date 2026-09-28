@@ -8,6 +8,7 @@ Full-featured OIDC provider mock with Auth0-compatible API for local development
 - Complete OIDC/OAuth2 implementation (discovery, JWKS, authorize, token, userinfo)
 - PKCE support
 - SMS and email passwordless authentication
+- RFC 8628 device authorization for native/public clients
 - Actions: declarative claims and scripted post-login code deployed through the Management API
 - Login hint support for pre-filling user identifiers
 - Configurable custom claims with namespace support
@@ -197,6 +198,41 @@ GET /authorize?login_hint=user@domain.com&...
 GET /authorize?login_hint=%2B14695551212&...
 ```
 
+### Device Authorization
+
+Native clients declare the `urn:ietf:params:oauth:grant-type:device_code` grant
+in `grant_types`. They do not need a client secret for this flow.
+
+```bash
+curl -sS -X POST http://localhost:4646/oauth/device/code \
+  -d client_id=dev_device_client \
+  -d audience=https://localhost:3000 \
+  -d 'scope=openid profile email offline_access'
+```
+
+The response contains a `device_code`, an eight-character `user_code`, and a
+`verification_uri_complete`. Open the complete URI in a browser, or open
+`verification_uri` and enter the user code, then approve the request with a
+configured local user. The mock uses verification code
+`123456` and keeps device transactions in memory for 900 seconds. Clients
+should poll `/oauth/token` no faster than the returned five-second `interval`.
+For a user-info-only token, omit `audience`; custom API requests must name the
+configured audience.
+
+```bash
+curl -sS -X POST http://localhost:4646/oauth/token \
+  -d grant_type=urn:ietf:params:oauth:grant-type:device_code \
+  -d client_id=dev_device_client \
+  -d device_code=...
+```
+
+Pending and denied/expired authorization responses use HTTP 403; overly fast
+polling uses HTTP 429 with `slow_down`, which increases the required interval
+by five seconds. A successful response includes an ID token only when
+`openid` was requested and a refresh token only when `offline_access` was
+requested. The configured `audience` is authoritative, and API scopes must be
+authorized by the matching client grant.
+
 ## Custom Claims
 
 Tokens automatically include custom claims from `app_metadata` using the issuer as namespace:
@@ -214,7 +250,7 @@ The namespace is derived from the `issuer` configuration, ensuring uniqueness an
 
 ## Actions
 
-Declarative replacement for Auth0 Actions / Rules. Configured under `actions:` in `config.yaml`. The `post_login` trigger fires on the `authorization_code` and `refresh_token` flows and lets you shape custom claims without writing JavaScript.
+Declarative replacement for Auth0 Actions / Rules. Configured under `actions:` in `config.yaml`. The `post_login` trigger fires on the `authorization_code`, device-code, and `refresh_token` flows and lets you shape custom claims without writing JavaScript.
 
 ```yaml
 actions:
