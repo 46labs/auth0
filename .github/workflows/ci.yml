@@ -77,3 +77,25 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
+
+  chart:
+    name: Publish chart
+    runs-on: ubuntu-latest
+    needs: test
+    # Consumers (kind, CI of the apps that use this mock) pull the chart by the
+    # same version as the image, so it is published from the same tag.
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup Helm
+      uses: azure/setup-helm@v4
+    - name: Login to Container Registry
+      run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+    - name: Package and push chart
+      run: |
+        version="${GITHUB_REF_NAME#v}"
+        helm package charts/auth0 --version "$version" --app-version "$version"
+        helm push "auth0-$version.tgz" oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
