@@ -11,6 +11,7 @@ func init() {
 	viper.SetDefault("issuer", "https://auth.46labs.test/")
 	viper.SetDefault("audience", "https://api.46labs.test")
 	viper.SetDefault("port", 3000)
+	viper.SetDefault("deviceCodeLifetime", "15m")
 	viper.SetDefault("branding.serviceName", "Auth Service")
 	viper.SetDefault("branding.primaryColor", "#3b82f6")
 	viper.SetDefault("branding.title", "Sign In")
@@ -56,6 +57,8 @@ func Load(opts ...Option) (*Config, error) {
 		Port:            viper.GetInt("port"),
 		CORSOrigins:     viper.GetStringSlice("corsOrigins"),
 		LogStreamCAFile: viper.GetString("logStreamCAFile"),
+		// A unitless value would read as nanoseconds, so a duration needs a unit.
+		DeviceCodeLifetime: viper.GetDuration("deviceCodeLifetime"),
 		Branding: Branding{
 			ServiceName:  viper.GetString("branding.serviceName"),
 			LogoURL:      viper.GetString("branding.logoUrl"),

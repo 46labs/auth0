@@ -84,6 +84,7 @@ ISSUER=https://auth.example.com/
 AUDIENCE=https://api.example.com
 PORT=3000
 CORSORIGINS=https://app.example.com,https://admin.example.com
+DEVICECODELIFETIME=15m
 ```
 
 ### YAML Configuration
@@ -214,7 +215,9 @@ The response contains a `device_code`, an eight-character `user_code`, and a
 `verification_uri_complete`. Open the complete URI in a browser, or open
 `verification_uri` and enter the user code, then approve the request with a
 configured local user. The mock uses verification code
-`123456` and keeps device transactions in memory for 900 seconds. Clients
+`123456` and keeps device transactions in memory for 15 minutes; set
+`deviceCodeLifetime` (a duration such as `5s`) to shorten that when testing
+`expired_token`. Clients
 should poll `/oauth/token` no faster than the returned five-second `interval`.
 For a user-info-only token, omit `audience`; custom API requests must name the
 configured audience.

@@ -668,6 +668,24 @@ func TestDevicePollingStatusesAndConditionalTokens(t *testing.T) {
 	}
 }
 
+func TestConfiguredDeviceCodeLifetime(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+	addDeviceClient(srv, "device_client")
+	srv.cfg.DeviceCodeLifetime = 2 * time.Second
+
+	issued := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "openid")
+	if issued.ExpiresIn != 2 {
+		t.Fatalf("expires_in = %d, want 2", issued.ExpiresIn)
+	}
+	srv.mu.RLock()
+	window := srv.deviceCodes[issued.DeviceCode].ExpiresAt.Sub(srv.deviceCodes[issued.DeviceCode].CreatedAt)
+	srv.mu.RUnlock()
+	if window != 2*time.Second {
+		t.Fatalf("transaction window = %s, want 2s", window)
+	}
+}
+
 func TestConcurrentDeviceExchangeYieldsExactlyOneToken(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()

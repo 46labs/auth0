@@ -91,7 +91,7 @@ func (s *Server) handleDeviceAuthorization(w http.ResponseWriter, r *http.Reques
 		Scope:      scope,
 		OrgID:      orgID,
 		CreatedAt:  now,
-		ExpiresAt:  now.Add(deviceCodeLifetime),
+		ExpiresAt:  now.Add(s.deviceCodeLifetime()),
 		Interval:   devicePollInterval,
 		Status:     deviceTransactionPending,
 	}
@@ -106,7 +106,7 @@ func (s *Server) handleDeviceAuthorization(w http.ResponseWriter, r *http.Reques
 		"user_code":                 formatDeviceUserCode(userCode),
 		"verification_uri":          verificationURI,
 		"verification_uri_complete": verificationURI + "?user_code=" + url.QueryEscape(formatDeviceUserCode(userCode)),
-		"expires_in":                int(deviceCodeLifetime / time.Second),
+		"expires_in":                int(s.deviceCodeLifetime() / time.Second),
 		"interval":                  int(devicePollInterval / time.Second),
 	})
 }
@@ -524,9 +524,16 @@ func (s *Server) deviceTransactionByUserCodeLocked(userCode string) *deviceTrans
 	return nil
 }
 
+func (s *Server) deviceCodeLifetime() time.Duration {
+	if s.cfg.DeviceCodeLifetime > 0 {
+		return s.cfg.DeviceCodeLifetime
+	}
+	return defaultDeviceCodeLifetime
+}
+
 func (s *Server) pruneDeviceCodesLocked(now time.Time) {
 	for deviceCode, transaction := range s.deviceCodes {
-		if now.After(transaction.ExpiresAt.Add(deviceCodeLifetime)) {
+		if now.After(transaction.ExpiresAt.Add(s.deviceCodeLifetime())) {
 			delete(s.deviceCodes, deviceCode)
 		}
 	}

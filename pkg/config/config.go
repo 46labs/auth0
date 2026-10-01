@@ -233,7 +233,9 @@ type Config struct {
 	Audience    string
 	Port        int
 	CORSOrigins []string
-	Users       []User
+	// DeviceCodeLifetime bounds device authorization requests; zero means 15m.
+	DeviceCodeLifetime time.Duration
+	Users              []User
 	// explicit pairings, for per-organization login settings; also derived
 	// from each Connection's Organizations list, and an entry here wins
 	OrganizationConnections []DeclaredOrganizationConnection

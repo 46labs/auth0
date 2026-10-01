@@ -12,6 +12,9 @@ data:
     {{- if .Values.logStreamCA.secretName }}
     logStreamCAFile: /config/log-stream-ca/{{ .Values.logStreamCA.key }}
     {{- end }}
+    {{- with .Values.config.deviceCodeLifetime }}
+    deviceCodeLifetime: {{ . | quote }}
+    {{- end }}
     corsOrigins:
     {{- range .Values.config.corsOrigins }}
     - {{ . | quote }}

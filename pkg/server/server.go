@@ -56,8 +56,8 @@ type refreshTokenState struct {
 }
 
 const (
-	deviceCodeLifetime = 15 * time.Minute
-	devicePollInterval = 5 * time.Second
+	defaultDeviceCodeLifetime = 15 * time.Minute
+	devicePollInterval        = 5 * time.Second
 
 	deviceTransactionPending  = "pending"
 	deviceTransactionApproved = "approved"

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/46labs/auth0/pkg/config"
 	"github.com/spf13/viper"
@@ -158,6 +159,13 @@ config:
 	}
 	if !cfg.OrganizationConnections[0].AssignMembershipOnLogin {
 		t.Error("assign_membership_on_login did not load; the OIN self-serve path needs it")
+	}
+}
+
+func TestDeviceCodeLifetimeLoadsAsDuration(t *testing.T) {
+	cfg := loadFrom(t, "deviceCodeLifetime: 2s\n")
+	if cfg.DeviceCodeLifetime != 2*time.Second {
+		t.Fatalf("DeviceCodeLifetime = %s, want 2s", cfg.DeviceCodeLifetime)
 	}
 }
 
