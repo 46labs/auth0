@@ -51,3 +51,8 @@ config:
 customLogin:
   enabled: false
   html: ""
+
+# Mounted at /config/device.html for the /device verification page.
+customDevice:
+  enabled: false
+  html: ""

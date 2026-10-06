@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -159,6 +160,55 @@ config:
 	}
 	if !cfg.OrganizationConnections[0].AssignMembershipOnLogin {
 		t.Error("assign_membership_on_login did not load; the OIN self-serve path needs it")
+	}
+}
+
+// TestChartMountsCustomTemplates checks each custom page gets its own
+// ConfigMap and mount, and that enabling one never drags in the other.
+func TestChartMountsCustomTemplates(t *testing.T) {
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm not installed")
+	}
+	chart := filepath.Join("..", "..", "charts", "auth0")
+
+	login := []string{"mountPath: /config/login.html", "name: t-auth0-login", "LOGIN_MARKER"}
+	device := []string{"mountPath: /config/device.html", "name: t-auth0-device", "DEVICE_MARKER"}
+
+	tests := []struct {
+		name              string
+		loginOn, deviceOn bool
+	}{
+		{"neither", false, false},
+		{"login only", true, false},
+		{"device only", false, true},
+		{"both", true, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"template", "t", chart,
+				"--set", fmt.Sprintf("customLogin.enabled=%t", tc.loginOn),
+				"--set-string", "customLogin.html=<p>LOGIN_MARKER {{.SessionID}}</p>",
+				"--set", fmt.Sprintf("customDevice.enabled=%t", tc.deviceOn),
+				"--set-string", "customDevice.html=<p>DEVICE_MARKER {{.UserCode}}</p>",
+			}
+			out, err := exec.Command(helm, args...).CombinedOutput()
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
+			}
+			rendered := string(out)
+			for _, want := range login {
+				if strings.Contains(rendered, want) != tc.loginOn {
+					t.Errorf("login enabled=%t, but %q present=%t", tc.loginOn, want, !tc.loginOn)
+				}
+			}
+			for _, want := range device {
+				if strings.Contains(rendered, want) != tc.deviceOn {
+					t.Errorf("device enabled=%t, but %q present=%t", tc.deviceOn, want, !tc.deviceOn)
+				}
+			}
+		})
 	}
 }
 

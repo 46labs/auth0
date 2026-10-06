@@ -114,7 +114,7 @@ func (s *Server) handleDeviceAuthorization(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleDeviceVerification(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w, r)
 	if r.Method == http.MethodGet {
-		s.renderDeviceVerification(w, r, "")
+		s.renderDeviceVerification(w, r)
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -392,7 +392,7 @@ func hasDeviceScope(scope, wanted string) bool {
 	return false
 }
 
-func (s *Server) renderDeviceVerification(w http.ResponseWriter, r *http.Request, message string) {
+func (s *Server) renderDeviceVerification(w http.ResponseWriter, r *http.Request) {
 	userCode := normalizeDeviceUserCode(r.URL.Query().Get("user_code"))
 	if userCode == "" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -432,7 +432,6 @@ func (s *Server) renderDeviceVerification(w http.ResponseWriter, r *http.Request
 		"ClientName": clientName,
 		"Audience":   transaction.Audience,
 		"Scope":      transaction.Scope,
-		"Message":    message,
 	}
 	s.mu.Unlock()
 

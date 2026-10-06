@@ -154,6 +154,38 @@ customLogin:
 
 Template must include `{{.SessionID}}` in form and support both `phone`, `email`, or `identifier` fields.
 
+### Custom Device Template
+
+The `/device` verification page is customized the same way. The mock loads the first of
+`/config/device.html`, `templates/device.html` (shipped in the image), or a minimal built-in page.
+Each page resolves on its own, so a custom login page does not change the device page.
+
+```yaml
+customDevice:
+    enabled: true
+    html: |
+        <!DOCTYPE html>
+        <html>
+        <!-- Your custom template -->
+        </html>
+```
+
+The template renders three states from this data:
+
+| Field | When | Value |
+|---|---|---|
+| `.Branding` | always | `ServiceName`, `LogoURL`, `PrimaryColor`, `Title`, `Subtitle` |
+| `.UserCode` | confirm | user code, formatted `XXXX-XXXX` |
+| `.ClientName` | confirm | client `name`, else `client_id` |
+| `.Audience` | confirm | requested audience |
+| `.Scope` | confirm | space-separated scopes |
+| `.Message` | result | approved or denied text |
+
+With neither `.UserCode` nor `.Message`, render the entry form: `GET /device` with `user_code`.
+The confirm form posts to `/device` with `user_code` (hidden), `confirm_user_code`, `identifier`,
+`code`, and a submit named `decision` with value `approve` or `deny`. Errors are returned as plain
+text, as on the login page.
+
 ## Authentication Flows
 
 ### SMS Passwordless
