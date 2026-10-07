@@ -44,15 +44,18 @@ type postLoginRequest struct {
 	Scopes      []string
 	RedirectURI string
 	LoginHint   string
+	// SessionID is the login session, the same across refreshes of it.
+	SessionID string
 }
 
 // postLogin runs the declarative claims block and then every deployed
 // post-login Action. It answers the token request itself when an Action
 // denies or fails, and reports whether the caller may go on to issue tokens.
-func (s *Server) postLogin(w http.ResponseWriter, r *http.Request, user *config.User, clientID, orgID, authorizeQuery, protocol string, idClaims, accessClaims jwt.MapClaims) bool {
+func (s *Server) postLogin(w http.ResponseWriter, r *http.Request, user *config.User, clientID, orgID, authorizeQuery, protocol, sessionID string, idClaims, accessClaims jwt.MapClaims) bool {
 	client := s.lookupClient(clientID)
 	s.applyPostLogin(user, client, orgID, idClaims, accessClaims)
 	req := requestFromToken(r, authorizeQuery, protocol)
+	req.SessionID = sessionID
 	for _, b := range s.actions.listBindings(TriggerPostLogin) {
 		if b.Action.DeployedVersion == nil {
 			continue // bound but not deployed: Auth0 skips it too
@@ -340,6 +343,9 @@ func (s *Server) buildEvent(a *Action, b *ActionBinding, user *config.User, clie
 	ev["transaction"] = map[string]any{
 		"protocol": req.Protocol, "requested_scopes": req.Scopes, "redirect_uri": req.RedirectURI,
 		"login_hint": req.LoginHint, "ui_locales": []any{}, "locale": "en",
+	}
+	if req.SessionID != "" {
+		ev["session"] = map[string]any{"id": req.SessionID}
 	}
 	ev["tenant"] = map[string]any{"id": "mock"}
 	ev["secrets"] = secretValues(a, b)

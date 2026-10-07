@@ -283,6 +283,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 				OrgID:         orgID,
 				ConnectionID:  connectionID,
 				Query:         originalQuery,
+				SessionID:     "sess_" + s.generateID(),
 			}
 
 			s.mu.Lock()
@@ -490,7 +491,10 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			idClaims[ns+"role"] = role
 		}
 
-		if !s.postLogin(w, r, user, clientID, orgID, "", "oauth2-refresh-token", idClaims, accessClaims) {
+		if issued.SessionID != "" {
+			idClaims["sid"] = issued.SessionID
+		}
+		if !s.postLogin(w, r, user, clientID, orgID, "", "oauth2-refresh-token", issued.SessionID, idClaims, accessClaims) {
 			return
 		}
 
@@ -639,7 +643,10 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		accessClaims[ns+"role"] = role
 	}
 
-	if !s.postLogin(w, r, &user, clientID, orgID, claimed.Query, "oidc-basic-profile", idClaims, accessClaims) {
+	if claimed.SessionID != "" {
+		idClaims["sid"] = claimed.SessionID
+	}
+	if !s.postLogin(w, r, &user, clientID, orgID, claimed.Query, "oidc-basic-profile", claimed.SessionID, idClaims, accessClaims) {
 		return
 	}
 
@@ -664,10 +671,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		refreshToken = "rt_" + base64.RawURLEncoding.EncodeToString([]byte(s.generateID()))
 		s.mu.Lock()
 		s.refreshTokens[refreshToken] = &refreshTokenState{
-			UserID:   user.ID,
-			OrgID:    orgID,
-			ClientID: claimed.ClientID,
-			Scope:    requestedScope,
+			UserID:    user.ID,
+			OrgID:     orgID,
+			ClientID:  claimed.ClientID,
+			Scope:     requestedScope,
+			SessionID: claimed.SessionID,
 		}
 		s.mu.Unlock()
 	}
