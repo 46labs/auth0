@@ -334,7 +334,7 @@ func (s *Server) IssueAuthCode(userID, scope, orgID, clientID string) string {
 
 	code := s.generateID()
 	s.mu.Lock()
-	s.authCodes[code] = &authCode{User: *user, Scope: scope, OrgID: orgID, ClientID: clientID}
+	s.authCodes[code] = &authCode{User: *user, Scope: scope, OrgID: orgID, ClientID: clientID, SessionID: "sess_" + s.generateID()}
 	s.mu.Unlock()
 	return code
 }
