@@ -465,7 +465,7 @@ func TestDeviceRefreshTokenRotation(t *testing.T) {
 	}
 
 	reused, reusedBody := refreshTokenRequest(t, ts.URL, "device_client", first)
-	if reused.StatusCode != http.StatusBadRequest || reusedBody["error"] != "invalid_grant" {
+	if reused.StatusCode != http.StatusForbidden || reusedBody["error"] != "invalid_grant" {
 		t.Fatalf("reusing a rotated refresh token = %d %#v", reused.StatusCode, reusedBody)
 	}
 

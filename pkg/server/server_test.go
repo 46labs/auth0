@@ -1168,8 +1168,9 @@ func TestInvalidRefreshToken(t *testing.T) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode == 200 {
-		t.Fatal("Expected error for invalid refresh token")
+	// Auth0 answers an unknown refresh token with 403, not 400.
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("Expected 403 for invalid refresh token, got %d", resp.StatusCode)
 	}
 
 	var errorResp map[string]interface{}

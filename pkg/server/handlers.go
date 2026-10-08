@@ -16,6 +16,10 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// unknownRefreshTokenError is Auth0's answer, with HTTP 403, to a refresh token it
+// does not know, including one a rotation retired.
+const unknownRefreshTokenError = `{"error":"invalid_grant","error_description":"Unknown or invalid refresh token."}`
+
 // parseTokenBody normalizes form vs JSON bodies into r.Form so the existing
 // FormValue() call sites in handleToken work for both encodings. Auth0.swift
 // posts application/json; web SPA and go-auth0 post x-www-form-urlencoded.
@@ -423,7 +427,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		s.mu.RUnlock()
 
 		if !exists {
-			http.Error(w, `{"error":"invalid_grant","error_description":"Invalid refresh token"}`, 400)
+			http.Error(w, unknownRefreshTokenError, http.StatusForbidden)
 			return
 		}
 		// The token belongs to the client the login was authorized for;
@@ -545,7 +549,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 			// A concurrent refresh already redeemed it.
 			if !stillValid {
-				http.Error(w, `{"error":"invalid_grant","error_description":"Invalid refresh token"}`, 400)
+				http.Error(w, unknownRefreshTokenError, http.StatusForbidden)
 				return
 			}
 			response["refresh_token"] = rotated
