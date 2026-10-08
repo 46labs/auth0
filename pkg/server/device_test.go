@@ -406,10 +406,15 @@ func TestDeviceRefreshTokenRoundTrip(t *testing.T) {
 	if refreshResponse.StatusCode != http.StatusOK {
 		t.Fatalf("device refresh exchange = %d %#v", refreshResponse.StatusCode, refreshedTokens)
 	}
-	for _, tokenName := range []string{"access_token", "id_token", "refresh_token"} {
+	for _, tokenName := range []string{"access_token", "id_token"} {
 		if refreshedTokens[tokenName] == nil {
 			t.Errorf("device refresh response omitted %s: %#v", tokenName, refreshedTokens)
 		}
+	}
+	// A non-rotating client, as an Auth0 application is by default, gets no
+	// refresh token back and keeps using the one it has.
+	if _, ok := refreshedTokens["refresh_token"]; ok {
+		t.Errorf("non-rotating refresh response included a refresh token: %#v", refreshedTokens)
 	}
 	if refreshedTokens["scope"] != "openid offline_access" {
 		t.Fatalf("device refresh scope = %v", refreshedTokens["scope"])
@@ -428,6 +433,45 @@ func TestDeviceRefreshTokenRoundTrip(t *testing.T) {
 	wrongClient, wrongClientBody := refreshTokenRequest(t, ts.URL, "other_device_client", refreshToken)
 	if wrongClient.StatusCode != http.StatusBadRequest || wrongClientBody["error"] != "invalid_grant" {
 		t.Fatalf("refresh with a different client = %d %#v", wrongClient.StatusCode, wrongClientBody)
+	}
+
+	again, againTokens := refreshTokenRequest(t, ts.URL, "device_client", refreshToken)
+	if again.StatusCode != http.StatusOK {
+		t.Fatalf("second non-rotating refresh = %d %#v", again.StatusCode, againTokens)
+	}
+}
+
+func TestDeviceRefreshTokenRotation(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+	addDeviceClient(srv, "device_client")
+	srv.mu.Lock()
+	srv.clients["device_client"].RefreshToken = &config.RefreshTokenConfig{RotationType: config.RefreshTokenRotating}
+	srv.mu.Unlock()
+
+	issued := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "openid offline_access")
+	approveDevice(t, ts.URL, issued, "approve")
+	allowDevicePoll(srv, issued.DeviceCode)
+	_, initialTokens := deviceTokenRequest(t, ts.URL, "device_client", issued.DeviceCode)
+	first, _ := initialTokens["refresh_token"].(string)
+	if first == "" {
+		t.Fatalf("initial device exchange omitted refresh token: %#v", initialTokens)
+	}
+
+	refreshed, refreshedTokens := refreshTokenRequest(t, ts.URL, "device_client", first)
+	second, _ := refreshedTokens["refresh_token"].(string)
+	if refreshed.StatusCode != http.StatusOK || second == "" || second == first {
+		t.Fatalf("rotating refresh = %d, refresh token %q after %q", refreshed.StatusCode, second, first)
+	}
+
+	reused, reusedBody := refreshTokenRequest(t, ts.URL, "device_client", first)
+	if reused.StatusCode != http.StatusBadRequest || reusedBody["error"] != "invalid_grant" {
+		t.Fatalf("reusing a rotated refresh token = %d %#v", reused.StatusCode, reusedBody)
+	}
+
+	next, nextTokens := refreshTokenRequest(t, ts.URL, "device_client", second)
+	if next.StatusCode != http.StatusOK || nextTokens["refresh_token"] == nil {
+		t.Fatalf("refresh with the rotated token = %d %#v", next.StatusCode, nextTokens)
 	}
 }
 

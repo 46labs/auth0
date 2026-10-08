@@ -1051,8 +1051,10 @@ func TestRefreshTokenFlow(t *testing.T) {
 	if refreshResp["id_token"] == nil {
 		t.Fatal("Missing id_token in refresh response")
 	}
-	if refreshResp["refresh_token"] == nil {
-		t.Fatal("Missing refresh_token in refresh response")
+	// The client is non-rotating, Auth0's default: the refresh response has no
+	// refresh token, and the one it redeemed stays valid.
+	if refreshResp["refresh_token"] != nil {
+		t.Fatal("Non-rotating refresh response included a refresh_token")
 	}
 
 	t.Log("Step 5: Validate new ID token")

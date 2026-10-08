@@ -268,6 +268,20 @@ by five seconds. A successful response includes an ID token only when
 requested. The configured `audience` is authoritative, and API scopes must be
 authorized by the matching client grant.
 
+Refreshing follows the client's refresh token rotation, as in Auth0. By default a
+client is non-rotating: the refresh response has no `refresh_token`, and the
+redeemed refresh token stays valid. A rotating client gets a new refresh token on
+every refresh, and the redeemed one is then refused with `invalid_grant`:
+
+```yaml
+clients:
+  - client_id: dev_device_client
+    app_type: native
+    grant_types: [urn:ietf:params:oauth:grant-type:device_code, refresh_token]
+    refresh_token:
+      rotation_type: rotating   # or non-rotating (the default)
+```
+
 ## Custom Claims
 
 Tokens automatically include custom claims from `app_metadata` using the issuer as namespace:

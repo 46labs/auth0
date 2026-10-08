@@ -525,14 +525,32 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
 		response := map[string]interface{}{
-			"access_token":  accessTokenString,
-			"token_type":    "Bearer",
-			"expires_in":    3600,
-			"refresh_token": refreshToken,
-			"scope":         grantedScope(issued.Scope),
+			"access_token": accessTokenString,
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+			"scope":        grantedScope(issued.Scope),
 		}
+		// Auth0 returns a refresh token on a refresh only with rotation: a new
+		// one, and the redeemed one stops working. Without rotation the
+		// response has none and the redeemed token stays valid.
+		if s.lookupClient(clientID).RotatesRefreshTokens() {
+			rotated := "rt_" + s.generateID()
+			s.mu.Lock()
+			_, stillValid := s.refreshTokens[refreshToken]
+			if stillValid {
+				delete(s.refreshTokens, refreshToken)
+				s.refreshTokens[rotated] = issued
+			}
+			s.mu.Unlock()
+			// A concurrent refresh already redeemed it.
+			if !stillValid {
+				http.Error(w, `{"error":"invalid_grant","error_description":"Invalid refresh token"}`, 400)
+				return
+			}
+			response["refresh_token"] = rotated
+		}
+		w.Header().Set("Content-Type", "application/json")
 		if issued.IncludeIDToken {
 			idToken := jwt.NewWithClaims(jwt.SigningMethodRS256, idClaims)
 			idToken.Header["kid"] = "key-1"

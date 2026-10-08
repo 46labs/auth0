@@ -218,6 +218,29 @@ type Client struct {
 	// native org_id claim for the organization login context, and
 	// client-credentials cannot enter one.
 	ClientMetadata map[string]string `json:"client_metadata,omitempty" yaml:"client_metadata,omitempty" mapstructure:"client_metadata"`
+	// RefreshToken is the application's refresh token configuration. Only
+	// rotation_type is modelled; without it the client is non-rotating, as an
+	// Auth0 application is by default.
+	RefreshToken *RefreshTokenConfig `json:"refresh_token,omitempty" yaml:"refresh_token,omitempty" mapstructure:"refresh_token"`
+}
+
+// Refresh token rotation types, as Auth0 names them.
+const (
+	RefreshTokenRotating    = "rotating"
+	RefreshTokenNonRotating = "non-rotating"
+)
+
+// RefreshTokenConfig mirrors an Auth0 application's refresh_token settings.
+type RefreshTokenConfig struct {
+	// RotationType "rotating" issues a new refresh token on every refresh and
+	// retires the redeemed one. "non-rotating" keeps the refresh token valid
+	// and leaves it out of the refresh response.
+	RotationType string `json:"rotation_type,omitempty" yaml:"rotation_type,omitempty" mapstructure:"rotation_type"`
+}
+
+// RotatesRefreshTokens reports whether a refresh issues a new refresh token.
+func (c *Client) RotatesRefreshTokens() bool {
+	return c != nil && c.RefreshToken != nil && c.RefreshToken.RotationType == RefreshTokenRotating
 }
 
 type Branding struct {
