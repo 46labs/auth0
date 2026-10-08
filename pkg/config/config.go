@@ -236,6 +236,18 @@ type RefreshTokenConfig struct {
 	// retires the redeemed one. "non-rotating" keeps the refresh token valid
 	// and leaves it out of the refresh response.
 	RotationType string `json:"rotation_type,omitempty" yaml:"rotation_type,omitempty" mapstructure:"rotation_type"`
+	// Leeway is Auth0's reuse interval in seconds: for that long after a
+	// rotation the retired token can still be exchanged without being taken
+	// for reuse, which would revoke the whole family.
+	Leeway int `json:"leeway,omitempty" yaml:"leeway,omitempty" mapstructure:"leeway"`
+}
+
+// RefreshTokenLeeway is the client's reuse interval.
+func (c *Client) RefreshTokenLeeway() time.Duration {
+	if c == nil || c.RefreshToken == nil {
+		return 0
+	}
+	return time.Duration(c.RefreshToken.Leeway) * time.Second
 }
 
 // RotatesRefreshTokens reports whether a refresh issues a new refresh token.

@@ -271,7 +271,10 @@ authorized by the matching client grant.
 Refreshing follows the client's refresh token rotation, as in Auth0. By default a
 client is non-rotating: the refresh response has no `refresh_token`, and the
 redeemed refresh token stays valid. A rotating client gets a new refresh token on
-every refresh, and the redeemed one is then refused with `invalid_grant`:
+every refresh. Reusing a retired one is a breach: it gets HTTP 403 `invalid_grant`,
+and every token rotated from the same login is revoked. Within `leeway` seconds
+(Auth0's reuse interval) the most recently retired token is still exchanged, so
+concurrent refreshes do not trip it:
 
 ```yaml
 clients:
@@ -280,6 +283,7 @@ clients:
     grant_types: [urn:ietf:params:oauth:grant-type:device_code, refresh_token]
     refresh_token:
       rotation_type: rotating   # or non-rotating (the default)
+      leeway: 120               # reuse interval in seconds (default 0)
 ```
 
 ## Custom Claims

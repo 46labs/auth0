@@ -372,6 +372,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 			IncludeIDToken: hasDeviceScope(scope, "openid"),
 			Scope:          scope,
 			SessionID:      sessionID,
+			Family:         refreshToken,
 		}
 		s.mu.Unlock()
 		response["refresh_token"] = refreshToken

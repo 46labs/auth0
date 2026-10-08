@@ -53,6 +53,15 @@ type refreshTokenState struct {
 	// Scope is the scope granted at login; a refresh re-issues it, as
 	// Auth0 does when the refresh request omits scope.
 	Scope string
+	// Family is shared by a refresh token and every token rotated from it.
+	// Auth0 revokes the whole family when a retired token is used again.
+	Family string
+}
+
+// retiredRefreshToken is a refresh token that a rotation replaced.
+type retiredRefreshToken struct {
+	State     *refreshTokenState
+	RetiredAt time.Time
 }
 
 const (
@@ -93,7 +102,9 @@ type Server struct {
 	pending       map[string]string
 	authCodes     map[string]*authCode
 	refreshTokens map[string]*refreshTokenState
-	deviceCodes   map[string]*deviceTransaction
+	// retiredRefreshTokens are the tokens rotations replaced, for reuse detection.
+	retiredRefreshTokens map[string]*retiredRefreshToken
+	deviceCodes          map[string]*deviceTransaction
 
 	actions *actionStore
 
@@ -163,23 +174,24 @@ func New(cfg *config.Config) (*Server, error) {
 	orgConnections := buildOrgConnections(cfg)
 
 	return &Server{
-		cfg:            cfg,
-		privateKey:     key,
-		templates:      tmpl,
-		pending:        make(map[string]string),
-		authCodes:      make(map[string]*authCode),
-		actions:        newActionStore(),
-		refreshTokens:  make(map[string]*refreshTokenState),
-		deviceCodes:    make(map[string]*deviceTransaction),
-		users:          users,
-		organizations:  organizations,
-		connections:    connections,
-		members:        members,
-		clients:        clients,
-		clientGrants:   map[string]*clientGrant{},
-		roles:          roles,
-		orgConnections: orgConnections,
-		invitations:    make(map[string][]config.OrganizationInvitation),
+		cfg:                  cfg,
+		privateKey:           key,
+		templates:            tmpl,
+		pending:              make(map[string]string),
+		authCodes:            make(map[string]*authCode),
+		actions:              newActionStore(),
+		refreshTokens:        make(map[string]*refreshTokenState),
+		retiredRefreshTokens: make(map[string]*retiredRefreshToken),
+		deviceCodes:          make(map[string]*deviceTransaction),
+		users:                users,
+		organizations:        organizations,
+		connections:          connections,
+		members:              members,
+		clients:              clients,
+		clientGrants:         map[string]*clientGrant{},
+		roles:                roles,
+		orgConnections:       orgConnections,
+		invitations:          make(map[string][]config.OrganizationInvitation),
 
 		logStreams:        make(map[string]*logStream),
 		logDeliveryClient: logDeliveryClient(),

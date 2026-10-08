@@ -464,14 +464,80 @@ func TestDeviceRefreshTokenRotation(t *testing.T) {
 		t.Fatalf("rotating refresh = %d, refresh token %q after %q", refreshed.StatusCode, second, first)
 	}
 
+	next, nextTokens := refreshTokenRequest(t, ts.URL, "device_client", second)
+	third, _ := nextTokens["refresh_token"].(string)
+	if next.StatusCode != http.StatusOK || third == "" {
+		t.Fatalf("refresh with the rotated token = %d %#v", next.StatusCode, nextTokens)
+	}
+
+	// Without a leeway, reuse is a breach: the token and its whole family are revoked.
 	reused, reusedBody := refreshTokenRequest(t, ts.URL, "device_client", first)
 	if reused.StatusCode != http.StatusForbidden || reusedBody["error"] != "invalid_grant" {
 		t.Fatalf("reusing a rotated refresh token = %d %#v", reused.StatusCode, reusedBody)
 	}
+	revoked, revokedBody := refreshTokenRequest(t, ts.URL, "device_client", third)
+	if revoked.StatusCode != http.StatusForbidden || revokedBody["error"] != "invalid_grant" {
+		t.Fatalf("newest refresh token after a reuse = %d %#v", revoked.StatusCode, revokedBody)
+	}
+}
 
+func TestDeviceRefreshTokenLeeway(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+	addDeviceClient(srv, "device_client")
+	srv.mu.Lock()
+	srv.clients["device_client"].RefreshToken = &config.RefreshTokenConfig{RotationType: config.RefreshTokenRotating, Leeway: 120}
+	srv.mu.Unlock()
+
+	issued := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "openid offline_access")
+	approveDevice(t, ts.URL, issued, "approve")
+	allowDevicePoll(srv, issued.DeviceCode)
+	_, initialTokens := deviceTokenRequest(t, ts.URL, "device_client", issued.DeviceCode)
+	first, _ := initialTokens["refresh_token"].(string)
+	_, refreshedTokens := refreshTokenRequest(t, ts.URL, "device_client", first)
+	second, _ := refreshedTokens["refresh_token"].(string)
+
+	// Within the leeway the token just retired is exchanged, as a concurrent refresh would present it.
+	reused, reusedTokens := refreshTokenRequest(t, ts.URL, "device_client", first)
+	if reused.StatusCode != http.StatusOK || reusedTokens["refresh_token"] == nil {
+		t.Fatalf("reuse within the leeway = %d %#v", reused.StatusCode, reusedTokens)
+	}
 	next, nextTokens := refreshTokenRequest(t, ts.URL, "device_client", second)
-	if next.StatusCode != http.StatusOK || nextTokens["refresh_token"] == nil {
-		t.Fatalf("refresh with the rotated token = %d %#v", next.StatusCode, nextTokens)
+	third, _ := nextTokens["refresh_token"].(string)
+	if next.StatusCode != http.StatusOK || third == "" {
+		t.Fatalf("refresh after a reuse within the leeway = %d %#v", next.StatusCode, nextTokens)
+	}
+
+	// The leeway covers only the latest retired token: first is older than second now.
+	stale, staleBody := refreshTokenRequest(t, ts.URL, "device_client", first)
+	if stale.StatusCode != http.StatusForbidden || staleBody["error"] != "invalid_grant" {
+		t.Fatalf("reuse of an older retired token = %d %#v", stale.StatusCode, staleBody)
+	}
+	revoked, _ := refreshTokenRequest(t, ts.URL, "device_client", third)
+	if revoked.StatusCode != http.StatusForbidden {
+		t.Fatalf("newest refresh token after a breach = %d", revoked.StatusCode)
+	}
+}
+
+func TestRefreshTokenLeewayExpires(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+	client := &config.Client{ClientID: "rotating", RefreshToken: &config.RefreshTokenConfig{RotationType: config.RefreshTokenRotating, Leeway: 120}}
+	srv.mu.Lock()
+	srv.refreshTokens["rt_first"] = &refreshTokenState{ClientID: "rotating", Family: "rt_first"}
+	srv.mu.Unlock()
+
+	start := time.Now()
+	if state, rotated, _, _ := srv.redeemRefreshToken("rt_first", "rotating", client, start); state == nil || rotated == "" {
+		t.Fatalf("rotating refresh = %v %q", state, rotated)
+	}
+	if state, _, _, status := srv.redeemRefreshToken("rt_first", "rotating", client, start.Add(121*time.Second)); state != nil || status != http.StatusForbidden {
+		t.Fatalf("reuse after the leeway = %v %d", state, status)
+	}
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+	if len(srv.refreshTokens) != 0 {
+		t.Fatalf("family survived a reuse after the leeway: %d live tokens", len(srv.refreshTokens))
 	}
 }
 
