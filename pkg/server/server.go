@@ -30,6 +30,10 @@ type authCode struct {
 	ConnectionID  string
 	// Query is the /authorize request as sent, for Actions' event.request.query.
 	Query string
+	// SessionID names the login session this code belongs to: Actions see it
+	// as event.session.id, the ID token carries it as sid, and every token
+	// refreshed from this login keeps it.
+	SessionID string
 }
 
 // refreshTokenState carries the bindings of the login that issued the token,
@@ -38,6 +42,8 @@ type refreshTokenState struct {
 	UserID   string
 	OrgID    string
 	ClientID string
+	// SessionID is the login session the token was issued in.
+	SessionID string
 	// Scope is the scope granted at login; a refresh re-issues it, as
 	// Auth0 does when the refresh request omits scope.
 	Scope string
@@ -328,7 +334,7 @@ func (s *Server) IssueAuthCode(userID, scope, orgID, clientID string) string {
 
 	code := s.generateID()
 	s.mu.Lock()
-	s.authCodes[code] = &authCode{User: *user, Scope: scope, OrgID: orgID, ClientID: clientID}
+	s.authCodes[code] = &authCode{User: *user, Scope: scope, OrgID: orgID, ClientID: clientID, SessionID: "sess_" + s.generateID()}
 	s.mu.Unlock()
 	return code
 }

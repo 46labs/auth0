@@ -79,12 +79,16 @@ func (m mgmt) deployBound(name, code string, secrets ...map[string]string) strin
 
 // login runs the auth code flow and returns the token response and status.
 func login(t *testing.T, ts *httptest.Server, extraQuery string) (int, map[string]any) {
+	return loginWithScope(t, ts, "openid profile email", extraQuery)
+}
+
+func loginWithScope(t *testing.T, ts *httptest.Server, scope, extraQuery string) (int, map[string]any) {
 	redirectURI := "http://localhost:3000/callback"
 	clientID := "test_client_actions"
 	codeVerifier, codeChallenge := generatePKCE()
 	hc := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	authURL := fmt.Sprintf("%s/authorize?response_type=code&client_id=%s&redirect_uri=%s&scope=openid+profile+email&code_challenge=%s&code_challenge_method=S256%s",
-		ts.URL, clientID, url.QueryEscape(redirectURI), codeChallenge, extraQuery)
+	authURL := fmt.Sprintf("%s/authorize?response_type=code&client_id=%s&redirect_uri=%s&scope=%s&code_challenge=%s&code_challenge_method=S256%s",
+		ts.URL, clientID, url.QueryEscape(redirectURI), url.QueryEscape(scope), codeChallenge, extraQuery)
 	resp, err := hc.Get(authURL)
 	if err != nil {
 		t.Fatal(err)
@@ -292,5 +296,58 @@ func TestActions_UndeployedAndThrowing(t *testing.T) {
 	st, body := login(t, ts, "")
 	if st != 403 || !strings.Contains(fmt.Sprint(body["error_description"]), "kaboom") {
 		t.Fatalf("throwing action: %d %v", st, body)
+	}
+}
+
+// A login is one session: the Action sees its id at sign-in and again on every
+// refresh of that login, and a new login is a new session. An API can then
+// revoke a session by the claim an Action stamps into the access token.
+func TestActions_SessionIDIsStableAcrossRefresh(t *testing.T) {
+	_, ts := setupTestServer(t)
+	defer ts.Close()
+	m := mgmt{t, ts.URL}
+	m.deployBound("sid", `
+		exports.onExecutePostLogin = async (event, api) => {
+		  api.accessToken.setCustomClaim("https://mock/sid", event.session && event.session.id);
+		  api.accessToken.setCustomClaim("https://mock/proto", event.transaction.protocol);
+		};`)
+
+	st, tok := loginWithScope(t, ts, "openid profile email offline_access", "")
+	if st != 200 {
+		t.Fatalf("token: %d %v", st, tok)
+	}
+	first := claims(t, tok["access_token"])
+	sid, _ := first["https://mock/sid"].(string)
+	if sid == "" {
+		t.Fatalf("no session id in the action: %v", first)
+	}
+	if ic := claims(t, tok["id_token"]); ic["sid"] != sid {
+		t.Fatalf("id token sid %v, want %s", ic["sid"], sid)
+	}
+	rt, _ := tok["refresh_token"].(string)
+	if rt == "" {
+		t.Fatalf("no refresh token: %v", tok)
+	}
+
+	resp, err := http.PostForm(ts.URL+"/oauth/token", url.Values{
+		"grant_type": {"refresh_token"}, "client_id": {"test_client_actions"}, "refresh_token": {rt},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var refreshed map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&refreshed)
+	if resp.StatusCode != 200 {
+		t.Fatalf("refresh: %d %v", resp.StatusCode, refreshed)
+	}
+	again := claims(t, refreshed["access_token"])
+	if again["https://mock/sid"] != sid || again["https://mock/proto"] != "oauth2-refresh-token" {
+		t.Fatalf("refresh kept the session? %v (want %s)", again, sid)
+	}
+
+	_, other := login(t, ts, "")
+	if claims(t, other["access_token"])["https://mock/sid"] == sid {
+		t.Fatal("a new login reused the session id")
 	}
 }
