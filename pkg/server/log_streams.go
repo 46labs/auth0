@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,30 +21,77 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/46labs/auth0/pkg/config"
 	"github.com/46labs/auth0/pkg/contact"
 )
 
-// The schemas below follow Auth0's Management API OpenAPI document
-// (https://auth0.com/docs/oas/management/v2/management-api-oas.json) and the
-// responses recorded in go-auth0's test/data/recordings/TestLogStreamManager_*.
+// logStreamOAS holds the log stream schemas of Auth0's Management API OpenAPI
+// document, verbatim. Behaviour the schemas do not state follows the responses
+// recorded in go-auth0's test/data/recordings/TestLogStreamManager_*.
+//
+//go:embed log_stream_schemas.json
+var logStreamOAS []byte
 
-// logStreamFilterNames is LogStreamFilterGroupNameEnum.
-var logStreamFilterNames = []string{
-	"auth.login.fail", "auth.login.notification", "auth.login.success",
-	"auth.logout.fail", "auth.logout.success",
-	"auth.signup.fail", "auth.signup.success",
-	"auth.silent_auth.fail", "auth.silent_auth.success",
-	"auth.token_exchange.fail", "auth.token_exchange.success",
-	"management.fail", "management.success",
-	"scim.event", "system.notification",
-	"user.fail", "user.notification", "user.success",
-	"actions", "other",
+var logStreamSchemaCompiler = func() *jsonschema.Compiler {
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(logStreamOAS))
+	if err != nil {
+		panic(err)
+	}
+	c := jsonschema.NewCompiler()
+	c.DefaultDraft(jsonschema.Draft2020)
+	if err := c.AddResource("oas.json", doc); err != nil {
+		panic(err)
+	}
+	return c
+}()
+
+func logStreamSchema(name string) *jsonschema.Schema {
+	return logStreamSchemaCompiler.MustCompile("oas.json#/components/schemas/" + name)
+}
+
+var (
+	createLogStreamSchema = logStreamSchema("CreateLogStreamRequestContent")
+	updateLogStreamSchema = logStreamSchema("UpdateLogStreamRequestContent")
+)
+
+// logStreamType is a stream type's behaviour beyond its schema.
+type logStreamType struct {
+	// sinkPatch validates a sink PATCH; nil for the types LogStreamSinkPatch
+	// leaves out, whose sink cannot be changed.
+	sinkPatch *jsonschema.Schema
+	// masked is the write-only sink field reads return as maskedSecret.
+	masked string
+	// generated is the sink field Auth0 fills in on create.
+	generated func(s *Server) (field, value string)
+	defaults  map[string]string
+}
+
+var logStreamTypes = map[string]logStreamType{
+	"http": {
+		sinkPatch: logStreamSchema("LogStreamHttpSink"),
+		// Delivery needs both; these are what the dashboard preselects.
+		defaults: map[string]string{"httpContentFormat": "JSONLINES", "httpContentType": "application/json"},
+	},
+	"eventbridge": {generated: func(s *Server) (string, string) {
+		return "awsPartnerEventSource", fmt.Sprintf("aws.partner/auth0.com/%s-%s/auth0.logs", s.tenantHost(), uuid.NewString())
+	}},
+	"eventgrid": {generated: func(s *Server) (string, string) {
+		return "azurePartnerTopic", fmt.Sprintf("auth0-logs-%s-%s", strings.ReplaceAll(s.tenantHost(), ".", "-"), uuid.NewString())
+	}},
+	"datadog": {sinkPatch: logStreamSchema("LogStreamDatadogSink")},
+	"splunk":  {sinkPatch: logStreamSchema("LogStreamSplunkSink")},
+	"sumo":    {sinkPatch: logStreamSchema("LogStreamSumoSink")},
+	"segment": {sinkPatch: logStreamSchema("LogStreamSegmentSink")},
+	"mixpanel": {
+		sinkPatch: logStreamSchema("LogStreamMixpanelSinkPatch"),
+		masked:    "mixpanelServiceAccountPassword",
+	},
 }
 
 // priorityFilters is what Auth0 stores on a priority stream, whatever filters
-// the request named (recorded create and update responses).
+// the request named.
 var priorityFilters = []map[string]string{{"type": "category", "name": "security"}}
 
 // logCategory maps the event types the mock emits to their filter category.
@@ -54,145 +103,12 @@ var logCategory = map[string]string{
 }
 
 var (
-	logStreamStatuses       = []string{"active", "paused", "suspended"}
-	logStreamNamePattern    = regexp.MustCompile(`^[A-Za-z0-9 -]+$`)
-	logStreamCreateFields   = []string{"name", "type", "sink", "filters", "isPriority", "pii_config", "startFrom"}
-	logStreamUpdateFields   = []string{"name", "status", "sink", "filters", "isPriority", "pii_config"}
-	piiLogFields            = []string{"first_name", "last_name", "username", "email", "phone", "address"}
+	// The rule go-auth0 documents on LogStream.Name.
+	logStreamNamePattern    = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9 -]*[A-Za-z0-9])?$`)
 	maskedSecret            = "********"
 	logStreamDeliveryTries  = 3
 	defaultLogStreamBackoff = time.Second
 )
-
-// sinkField is one sink property's schema.
-type sinkField struct {
-	kind    string // "string", "boolean" or "array"
-	pattern *regexp.Regexp
-	enum    []string
-}
-
-// sinkSchema is one stream type's sink. patchRequired is nil for the types the
-// update schema (LogStreamSinkPatch) leaves out, whose sink cannot be changed.
-type sinkSchema struct {
-	fields         map[string]sinkField
-	required       []string
-	patchRequired  []string
-	masked         []string
-	generate       func(s *Server) (string, string)
-	patchable      bool
-	defaultsOnSave map[string]string
-}
-
-var (
-	strField     = sinkField{kind: "string"}
-	digits       = regexp.MustCompile(`^[0-9]*$`)
-	noColon      = regexp.MustCompile(`^[^:]+$`)
-	awsAccountID = regexp.MustCompile(`^\d{12}$`)
-	azureSubID   = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-	httpsURL     = regexp.MustCompile(`^https://.*`)
-)
-
-var sinkSchemas = map[string]sinkSchema{
-	"http": {
-		fields: map[string]sinkField{
-			"httpAuthorization": strField,
-			"httpContentFormat": {kind: "string", enum: []string{"JSONARRAY", "JSONLINES", "JSONOBJECT"}},
-			"httpContentType":   strField,
-			"httpEndpoint":      {kind: "string", pattern: httpsURL},
-			"httpCustomHeaders": {kind: "array"},
-		},
-		required:      []string{"httpEndpoint"},
-		patchRequired: []string{"httpEndpoint"},
-		patchable:     true,
-		// Delivery needs a format and a type; JSONLINES and application/json are
-		// what the dashboard preselects.
-		defaultsOnSave: map[string]string{"httpContentFormat": "JSONLINES", "httpContentType": "application/json"},
-	},
-	"eventbridge": {
-		fields: map[string]sinkField{
-			"awsAccountId":          {kind: "string", pattern: awsAccountID},
-			"awsRegion":             {kind: "string", enum: awsRegions},
-			"awsPartnerEventSource": strField,
-		},
-		required: []string{"awsAccountId", "awsRegion"},
-		generate: func(s *Server) (string, string) {
-			return "awsPartnerEventSource", fmt.Sprintf("aws.partner/auth0.com/%s-%s/auth0.logs", s.tenantHost(), uuid.NewString())
-		},
-	},
-	"eventgrid": {
-		fields: map[string]sinkField{
-			"azureSubscriptionId": {kind: "string", pattern: azureSubID},
-			"azureRegion":         {kind: "string", enum: azureRegions},
-			"azureResourceGroup":  strField,
-			"azurePartnerTopic":   strField,
-		},
-		required: []string{"azureSubscriptionId", "azureRegion", "azureResourceGroup"},
-		generate: func(s *Server) (string, string) {
-			return "azurePartnerTopic", fmt.Sprintf("auth0-logs-%s-%s", strings.ReplaceAll(s.tenantHost(), ".", "-"), uuid.NewString())
-		},
-	},
-	"datadog": {
-		fields: map[string]sinkField{
-			"datadogApiKey": strField,
-			"datadogRegion": {kind: "string", enum: []string{"us", "eu", "us3", "us5"}},
-		},
-		required:      []string{"datadogApiKey", "datadogRegion"},
-		patchRequired: []string{"datadogApiKey", "datadogRegion"},
-		patchable:     true,
-	},
-	"splunk": {
-		fields: map[string]sinkField{
-			"splunkDomain": strField,
-			"splunkPort":   {kind: "string", pattern: digits},
-			"splunkToken":  strField,
-			"splunkSecure": {kind: "boolean"},
-		},
-		required:      []string{"splunkDomain", "splunkToken", "splunkPort", "splunkSecure"},
-		patchRequired: []string{"splunkDomain", "splunkToken", "splunkPort", "splunkSecure"},
-		patchable:     true,
-	},
-	"sumo": {
-		fields:        map[string]sinkField{"sumoSourceAddress": strField},
-		required:      []string{"sumoSourceAddress"},
-		patchRequired: []string{"sumoSourceAddress"},
-		patchable:     true,
-	},
-	"segment": {
-		fields:        map[string]sinkField{"segmentWriteKey": strField},
-		required:      []string{"segmentWriteKey"},
-		patchRequired: []string{},
-		patchable:     true,
-	},
-	"mixpanel": {
-		fields: map[string]sinkField{
-			"mixpanelRegion":                 {kind: "string", enum: []string{"us", "eu"}},
-			"mixpanelProjectId":              {kind: "string", pattern: regexp.MustCompile(`^\d+$`)},
-			"mixpanelServiceAccountUsername": {kind: "string", pattern: noColon},
-			"mixpanelServiceAccountPassword": {kind: "string", pattern: noColon},
-		},
-		required:      []string{"mixpanelRegion", "mixpanelProjectId", "mixpanelServiceAccountUsername", "mixpanelServiceAccountPassword"},
-		patchRequired: []string{"mixpanelRegion", "mixpanelProjectId", "mixpanelServiceAccountUsername"},
-		masked:        []string{"mixpanelServiceAccountPassword"},
-		patchable:     true,
-	},
-}
-
-var awsRegions = []string{
-	"af-south-1", "ap-east-1", "ap-east-2", "ap-northeast-1", "ap-northeast-2", "ap-northeast-3",
-	"ap-south-1", "ap-south-2", "ap-southeast-1", "ap-southeast-2", "ap-southeast-3", "ap-southeast-4",
-	"ap-southeast-5", "ap-southeast-6", "ap-southeast-7", "ca-central-1", "ca-west-1", "eu-central-1",
-	"eu-central-2", "eu-north-1", "eu-south-1", "eu-south-2", "eu-west-1", "eu-west-2", "eu-west-3",
-	"il-central-1", "me-central-1", "me-south-1", "mx-central-1", "sa-east-1", "us-gov-east-1",
-	"us-gov-west-1", "us-east-1", "us-east-2", "us-west-1", "us-west-2",
-}
-
-var azureRegions = []string{
-	"australiacentral", "australiaeast", "australiasoutheast", "brazilsouth", "canadacentral", "canadaeast",
-	"centralindia", "centralus", "eastasia", "eastus", "eastus2", "francecentral", "germanywestcentral",
-	"japaneast", "japanwest", "koreacentral", "koreasouth", "northcentralus", "northeurope", "norwayeast",
-	"southafricanorth", "southcentralus", "southeastasia", "southindia", "swedencentral", "switzerlandnorth",
-	"uaenorth", "uksouth", "ukwest", "westcentralus", "westeurope", "westindia", "westus", "westus2",
-}
 
 // logStreamPIIConfig is LogStreamPiiConfig.
 type logStreamPIIConfig struct {
@@ -234,10 +150,8 @@ func (l *logStream) Clone() *logStream {
 // response is the stream as Auth0 returns it: write-only secrets masked.
 func (l *logStream) response() *logStream {
 	out := l.Clone()
-	for _, k := range sinkSchemas[l.Type].masked {
-		if _, ok := out.Sink[k]; ok {
-			out.Sink[k] = maskedSecret
-		}
+	if k := logStreamTypes[l.Type].masked; out.Sink[k] != nil {
+		out.Sink[k] = maskedSecret
 	}
 	return out
 }
@@ -250,12 +164,6 @@ func (s *Server) tenantHost() string {
 	return "mock.auth0.local"
 }
 
-// payloadError is a request refusal worded as Auth0 words it, so the message
-// reaches the client verbatim rather than following Go's error-string style.
-type payloadError string
-
-func (e payloadError) Error() string { return "Payload validation error: " + string(e) }
-
 // auth0Message is an error whose text is Auth0's message verbatim.
 type auth0Message string
 
@@ -264,13 +172,84 @@ func (e auth0Message) Error() string { return string(e) }
 const errLogStreamNotFound = auth0Message("The log stream does not exist.")
 
 func payloadErr(format string, args ...any) error {
-	return payloadError(fmt.Sprintf(format, args...))
+	return auth0Message("Payload validation error: " + fmt.Sprintf(format, args...))
 }
 
-// logStreamBody is a create or update request. Fields are raw so presence can be
-// told apart from a zero value, and unknown fields are refused, as the schemas'
-// additionalProperties: false does.
-type logStreamBody map[string]json.RawMessage
+// logStreamRequest is a create or update body. Pointers tell an absent field
+// from a zero value.
+type logStreamRequest struct {
+	Name       *string              `json:"name"`
+	Type       string               `json:"type"`
+	Status     *string              `json:"status"`
+	Sink       json.RawMessage      `json:"sink"`
+	Filters    *[]map[string]string `json:"filters"`
+	IsPriority *bool                `json:"isPriority"`
+	PIIConfig  *logStreamPIIConfig  `json:"pii_config"`
+	StartFrom  *string              `json:"startFrom"`
+}
+
+func decodeLogStreamRequest(r *http.Request, schema *jsonschema.Schema) (*logStreamRequest, error) {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, payloadErr("'Invalid JSON'.")
+	}
+	var req logStreamRequest
+	if err := decodeValid(schema, raw, &req); err != nil {
+		return nil, err
+	}
+	if req.Name != nil && !logStreamNamePattern.MatchString(*req.Name) {
+		return nil, payloadErr("'String does not match pattern' on property name.")
+	}
+	// go-auth0 documents startFrom as an ISO 8601 datetime.
+	if req.StartFrom != nil {
+		if _, err := time.Parse(time.RFC3339Nano, *req.StartFrom); err != nil {
+			return nil, payloadErr("'Invalid date-time' on property startFrom.")
+		}
+	}
+	return &req, nil
+}
+
+// decodeValid validates raw against schema, then decodes it into dst.
+func decodeValid(schema *jsonschema.Schema, raw []byte, dst any) error {
+	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+	if err != nil {
+		return payloadErr("'Invalid JSON'.")
+	}
+	if err := schema.Validate(inst); err != nil {
+		// The innermost cause names the offending property.
+		var ve *jsonschema.ValidationError
+		for errors.As(err, &ve) && len(ve.Causes) > 0 {
+			err = ve.Causes[0]
+		}
+		return payloadErr("'%s'.", err)
+	}
+	if err := json.Unmarshal(raw, dst); err != nil {
+		return payloadErr("'%s'.", err)
+	}
+	return nil
+}
+
+// apply sets the fields present in req on l.
+func (l *logStream) apply(req *logStreamRequest) {
+	if req.Name != nil {
+		l.Name = *req.Name
+	}
+	if req.Status != nil {
+		l.Status = *req.Status
+	}
+	if req.Filters != nil {
+		l.Filters = *req.Filters
+	}
+	if req.IsPriority != nil {
+		l.IsPriority = *req.IsPriority
+	}
+	if l.IsPriority {
+		l.Filters = slices.Clone(priorityFilters)
+	}
+	if req.PIIConfig != nil {
+		l.PIIConfig = req.PIIConfig
+	}
+}
 
 func (s *Server) handleLogStreams(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w, r)
@@ -313,15 +292,14 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.RUnlock()
 		if !ok {
-			writeAuth0Error(w, http.StatusNotFound, "The log stream does not exist.")
+			writeAuth0Error(w, http.StatusNotFound, errLogStreamNotFound.Error())
 			return
 		}
 		_ = json.NewEncoder(w).Encode(l)
 	case http.MethodPatch:
 		s.updateLogStream(w, r, id)
 	case http.MethodDelete:
-		// 204 whether or not the stream exists, as Auth0's recorded traffic
-		// answers a repeated delete.
+		// 204 whether or not the stream exists, as Auth0 answers a repeated delete.
 		s.mu.Lock()
 		delete(s.logStreams, id)
 		s.mu.Unlock()
@@ -333,60 +311,26 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createLogStream(w http.ResponseWriter, r *http.Request) {
-	body, err := decodeLogStreamBody(r, logStreamCreateFields)
+	req, err := decodeLogStreamRequest(r, createLogStreamSchema)
 	if err != nil {
 		writeAuth0Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	l := &logStream{Status: "active"}
-	if err := body.str("type", &l.Type); err != nil || l.Type == "" {
-		writeAuth0Error(w, http.StatusBadRequest, "Payload validation error: 'Missing required property: type'.")
+	l := &logStream{Name: req.Type, Type: req.Type, Status: "active"}
+	if err := json.Unmarshal(req.Sink, &l.Sink); err != nil {
+		writeAuth0Error(w, http.StatusBadRequest, payloadErr("'%s'.", err).Error())
 		return
 	}
-	schema, ok := sinkSchemas[l.Type]
-	if !ok {
-		writeAuth0Error(w, http.StatusBadRequest, fmt.Sprintf("Payload validation error: 'No enum match for: %q' on property type.", l.Type))
-		return
-	}
-	rawSink, ok := body["sink"]
-	if !ok {
-		writeAuth0Error(w, http.StatusBadRequest, "Payload validation error: 'Missing required property: sink'.")
-		return
-	}
-	var startFrom string
-	if err := body.str("startFrom", &startFrom); err != nil {
-		writeAuth0Error(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	// go-auth0 documents startFrom as an ISO 8601 datetime.
-	if _, present := body["startFrom"]; present {
-		if _, err := time.Parse(time.RFC3339Nano, startFrom); err != nil {
-			writeAuth0Error(w, http.StatusBadRequest, "Payload validation error: 'Invalid date-time' on property startFrom.")
-			return
-		}
-	}
-	sink, err := schema.decode(rawSink, schema.required)
-	if err != nil {
-		writeAuth0Error(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	l.Sink = sink
-	if err := l.apply(body); err != nil {
-		writeAuth0Error(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	for k, v := range schema.defaultsOnSave {
+	l.apply(req)
+	t := logStreamTypes[l.Type]
+	for k, v := range t.defaults {
 		if _, ok := l.Sink[k]; !ok {
 			l.Sink[k] = v
 		}
 	}
-	if schema.generate != nil {
-		k, v := schema.generate(s)
+	if t.generated != nil {
+		k, v := t.generated(s)
 		l.Sink[k] = v
-	}
-	if l.Name == "" {
-		l.Name = l.Type
 	}
 
 	s.mu.Lock()
@@ -395,18 +339,17 @@ func (s *Server) createLogStream(w http.ResponseWriter, r *http.Request) {
 	out := l.response()
 	s.mu.Unlock()
 
-	// Auth0 answers 200 here, not 201 (go-auth0 recorded traffic).
+	// Auth0 answers 200 here, not 201.
 	_ = json.NewEncoder(w).Encode(out)
 }
 
 func (s *Server) updateLogStream(w http.ResponseWriter, r *http.Request, id string) {
-	body, err := decodeLogStreamBody(r, logStreamUpdateFields)
+	req, err := decodeLogStreamRequest(r, updateLogStreamSchema)
 	if err != nil {
 		writeAuth0Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	status, out, err := s.patchLogStream(id, body)
+	status, out, err := s.patchLogStream(id, req)
 	if err != nil {
 		writeAuth0Error(w, status, err.Error())
 		return
@@ -414,241 +357,39 @@ func (s *Server) updateLogStream(w http.ResponseWriter, r *http.Request, id stri
 	_ = json.NewEncoder(w).Encode(out)
 }
 
-// patchLogStream applies body to the stored stream under the lock and returns
-// the response, so nothing is written to the client while the lock is held.
-func (s *Server) patchLogStream(id string, body logStreamBody) (int, *logStream, error) {
+// patchLogStream applies req under the lock and returns the response, so
+// nothing is written to the client while the lock is held.
+func (s *Server) patchLogStream(id string, req *logStreamRequest) (int, *logStream, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	stored, ok := s.logStreams[id]
 	if !ok {
 		return http.StatusNotFound, nil, errLogStreamNotFound
 	}
-	// Validated on a copy, so a refused update leaves the stream as it was.
+	// Changed on a copy, so a refused update leaves the stream as it was.
 	next := stored.Clone()
-	if rawSink, ok := body["sink"]; ok {
-		schema := sinkSchemas[next.Type]
-		if !schema.patchable {
+	if req.Sink != nil {
+		schema := logStreamTypes[next.Type].sinkPatch
+		if schema == nil {
 			return http.StatusBadRequest, nil, payloadErr("'sink cannot be updated for log streams of type %s'.", next.Type)
 		}
-		sink, err := schema.decode(rawSink, schema.patchRequired)
-		if err != nil {
+		var sink map[string]any
+		if err := decodeValid(schema, req.Sink, &sink); err != nil {
 			return http.StatusBadRequest, nil, err
 		}
 		maps.Copy(next.Sink, sink)
 	}
-	if err := next.apply(body); err != nil {
-		return http.StatusBadRequest, nil, err
-	}
+	next.apply(req)
 	s.logStreams[id] = next
 	return http.StatusOK, next.response(), nil
-}
-
-func decodeLogStreamBody(r *http.Request, allowed []string) (logStreamBody, error) {
-	var body logStreamBody
-	dec := json.NewDecoder(r.Body)
-	// One JSON object and nothing after it: null decodes to a nil map, and a
-	// second value would otherwise be ignored.
-	if err := dec.Decode(&body); err != nil || body == nil {
-		return nil, payloadErr("'Invalid JSON'.")
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return nil, payloadErr("'Invalid JSON'.")
-	}
-	for k := range body {
-		if !slices.Contains(allowed, k) {
-			return nil, payloadErr("'Additional properties not allowed: %s'.", k)
-		}
-	}
-	return body, nil
-}
-
-func isNull(raw json.RawMessage) bool {
-	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
-}
-
-func (b logStreamBody) str(key string, dst *string) error {
-	raw, ok := b[key]
-	if !ok {
-		return nil
-	}
-	// json.Unmarshal accepts null into a string by leaving it unchanged.
-	if err := json.Unmarshal(raw, dst); err != nil || isNull(raw) {
-		return payloadErr("'Expected type string' on property %s.", key)
-	}
-	return nil
-}
-
-// decode validates a sink object against the type's schema.
-func (sc sinkSchema) decode(raw json.RawMessage, required []string) (map[string]any, error) {
-	var sink map[string]any
-	if err := json.Unmarshal(raw, &sink); err != nil || sink == nil {
-		return nil, payloadErr("'Expected type object' on property sink.")
-	}
-	for _, k := range required {
-		if _, ok := sink[k]; !ok {
-			return nil, payloadErr("'Missing required property: %s' on property sink.", k)
-		}
-	}
-	for k, v := range sink {
-		f, ok := sc.fields[k]
-		if !ok {
-			return nil, payloadErr("'Additional properties not allowed: %s' on property sink.", k)
-		}
-		if err := f.check("sink."+k, v); err != nil {
-			return nil, err
-		}
-	}
-	return sink, nil
-}
-
-func (f sinkField) check(prop string, v any) error {
-	switch f.kind {
-	case "boolean":
-		if _, ok := v.(bool); !ok {
-			return payloadErr("'Expected type boolean' on property %s.", prop)
-		}
-	case "array":
-		// httpCustomHeaders: HttpCustomHeader objects, header and value strings.
-		items, ok := v.([]any)
-		if !ok {
-			return payloadErr("'Expected type array' on property %s.", prop)
-		}
-		for _, it := range items {
-			m, ok := it.(map[string]any)
-			if !ok {
-				return payloadErr("'Expected type object' on property %s.", prop)
-			}
-			for _, k := range []string{"header", "value"} {
-				if hv, present := m[k]; present {
-					if _, ok := hv.(string); !ok {
-						return payloadErr("'Expected type string' on property %s.%s.", prop, k)
-					}
-				}
-			}
-		}
-	default:
-		s, ok := v.(string)
-		if !ok {
-			return payloadErr("'Expected type string' on property %s.", prop)
-		}
-		if f.enum != nil && !slices.Contains(f.enum, s) {
-			return payloadErr("'No enum match for: %q' on property %s.", s, prop)
-		}
-		if f.pattern != nil && !f.pattern.MatchString(s) {
-			return payloadErr("'String does not match pattern' on property %s.", prop)
-		}
-	}
-	return nil
-}
-
-// apply merges the top-level fields present in body into l.
-func (l *logStream) apply(b logStreamBody) error {
-	if _, ok := b["name"]; ok {
-		if err := b.str("name", &l.Name); err != nil {
-			return err
-		}
-		// The rule go-auth0 documents on LogStream.Name.
-		if !logStreamNamePattern.MatchString(l.Name) ||
-			strings.HasPrefix(l.Name, "-") || strings.HasSuffix(l.Name, "-") ||
-			strings.TrimSpace(l.Name) != l.Name {
-			return payloadErr("'String does not match pattern' on property name.")
-		}
-	}
-	if _, ok := b["status"]; ok {
-		if err := b.str("status", &l.Status); err != nil {
-			return err
-		}
-		if !slices.Contains(logStreamStatuses, l.Status) {
-			return payloadErr("'No enum match for: %q' on property status.", l.Status)
-		}
-	}
-	if raw, ok := b["filters"]; ok {
-		var filters []map[string]string
-		if err := json.Unmarshal(raw, &filters); err != nil || isNull(raw) {
-			return payloadErr("'Expected type array' on property filters.")
-		}
-		for _, f := range filters {
-			// LogStreamFilter items are objects; null decodes to a nil map.
-			if f == nil {
-				return payloadErr("'Expected type object' on property filters.")
-			}
-			if t, ok := f["type"]; ok && t != "category" {
-				return payloadErr("'No enum match for: %q' on property filters.type.", t)
-			}
-			if n, ok := f["name"]; ok && !slices.Contains(logStreamFilterNames, n) {
-				return payloadErr("'No enum match for: %q' on property filters.name.", n)
-			}
-		}
-		l.Filters = filters
-	}
-	if raw, ok := b["isPriority"]; ok {
-		if err := json.Unmarshal(raw, &l.IsPriority); err != nil || isNull(raw) {
-			return payloadErr("'Expected type boolean' on property isPriority.")
-		}
-	}
-	if l.IsPriority {
-		l.Filters = slices.Clone(priorityFilters)
-	}
-	if raw, ok := b["pii_config"]; ok {
-		p, err := decodePIIConfig(raw)
-		if err != nil {
-			return err
-		}
-		l.PIIConfig = p
-	}
-	return nil
-}
-
-func decodePIIConfig(raw json.RawMessage) (*logStreamPIIConfig, error) {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &m); err != nil || m == nil {
-		return nil, payloadErr("'Expected type object' on property pii_config.")
-	}
-	for k := range m {
-		if !slices.Contains([]string{"log_fields", "method", "algorithm"}, k) {
-			return nil, payloadErr("'Additional properties not allowed: %s' on property pii_config.", k)
-		}
-	}
-	if _, ok := m["log_fields"]; !ok {
-		return nil, payloadErr("'Missing required property: log_fields' on property pii_config.")
-	}
-	var p logStreamPIIConfig
-	if err := json.Unmarshal(raw, &p); err != nil || isNull(m["log_fields"]) {
-		return nil, payloadErr("'Expected type array' on property pii_config.log_fields.")
-	}
-	if len(p.LogFields) == 0 {
-		return nil, payloadErr("'Array is too short' on property pii_config.log_fields.")
-	}
-	for _, f := range p.LogFields {
-		if !slices.Contains(piiLogFields, f) {
-			return nil, payloadErr("'No enum match for: %q' on property pii_config.log_fields.", f)
-		}
-	}
-	if _, ok := m["method"]; ok && p.Method != "mask" && p.Method != "hash" {
-		return nil, payloadErr("'No enum match for: %q' on property pii_config.method.", p.Method)
-	}
-	if _, ok := m["algorithm"]; ok && p.Algorithm != "xxhash" {
-		return nil, payloadErr("'No enum match for: %q' on property pii_config.algorithm.", p.Algorithm)
-	}
-	return &p, nil
 }
 
 // matches reports whether the stream takes an event of this type: active, and
 // either unfiltered or filtered to its category.
 func (l *logStream) matches(eventType string) bool {
-	if l.Status != "active" {
-		return false
-	}
-	if len(l.Filters) == 0 {
-		return true
-	}
-	category := logCategory[eventType]
-	for _, f := range l.Filters {
-		if f["name"] == category {
-			return true
-		}
-	}
-	return false
+	return l.Status == "active" && (len(l.Filters) == 0 || slices.ContainsFunc(l.Filters, func(f map[string]string) bool {
+		return f["name"] == logCategory[eventType]
+	}))
 }
 
 // logRecord is one delivered event: Auth0 wraps the log in log_id and data.

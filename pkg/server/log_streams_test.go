@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -26,9 +27,8 @@ import (
 
 // receivedPost is one delivery a test receiver accepted.
 type receivedPost struct {
-	Authorization string
-	ContentType   string
-	Body          []byte
+	Header http.Header
+	Body   []byte
 }
 
 // logReceiver is a webhook endpoint that records deliveries. fail answers the
@@ -51,6 +51,16 @@ func newLogReceiver(t *testing.T, srv *Server, fail int) *logReceiver {
 	return rcv
 }
 
+// streamTo creates a stream delivering to a new receiver.
+func streamTo(t *testing.T, srv *Server, baseURL, format string, filters ...string) *logReceiver {
+	t.Helper()
+	rcv := newLogReceiver(t, srv, 0)
+	if err := newMgmt(t, baseURL).LogStream.Create(context.Background(), httpStream("s", rcv.ts.URL, format, filters...)); err != nil {
+		t.Fatalf("create stream: %v", err)
+	}
+	return rcv
+}
+
 // trustTestTLS makes srv's delivery client trust httptest's TLS certificate,
 // which every httptest TLS server shares.
 func trustTestTLS(srv *Server) {
@@ -63,11 +73,7 @@ func (rcv *logReceiver) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	rcv.mu.Lock()
 	defer rcv.mu.Unlock()
-	rcv.posts = append(rcv.posts, receivedPost{
-		Authorization: r.Header.Get("Authorization"),
-		ContentType:   r.Header.Get("Content-Type"),
-		Body:          body,
-	})
+	rcv.posts = append(rcv.posts, receivedPost{Header: r.Header, Body: body})
 	if rcv.fail > 0 {
 		rcv.fail--
 		w.WriteHeader(http.StatusInternalServerError)
@@ -544,7 +550,7 @@ func TestLoginEventsDeliveredToMatchingStreams(t *testing.T) {
 	srv.logDeliveries.Wait()
 
 	recs := all.records(t, "JSONARRAY")
-	if got := typesOf(recs); len(got) != 2 || !contains(got, "s") || !contains(got, "f") {
+	if got := typesOf(recs); len(got) != 2 || !slices.Contains(got, "s") || !slices.Contains(got, "f") {
 		t.Fatalf("unfiltered stream got %v, want s and f", got)
 	}
 	for _, r := range recs {
@@ -571,8 +577,8 @@ func TestLoginEventsDeliveredToMatchingStreams(t *testing.T) {
 		}
 	}
 	for _, p := range all.received() {
-		if p.Authorization != "Bearer stream-token" || p.ContentType != "application/json" {
-			t.Fatalf("delivery headers = %+v", p)
+		if p.Header.Get("Authorization") != "Bearer stream-token" || p.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("delivery headers = %v", p.Header)
 		}
 	}
 
@@ -590,10 +596,7 @@ func TestLoginRefusedByOrgIsFailedLogin(t *testing.T) {
 	m := newMgmt(t, ts.URL)
 	ctx := context.Background()
 
-	rcv := newLogReceiver(t, srv, 0)
-	if err := m.LogStream.Create(ctx, httpStream("s", rcv.ts.URL, "JSONOBJECT")); err != nil {
-		t.Fatalf("create stream: %v", err)
-	}
+	rcv := streamTo(t, srv, ts.URL, "JSONOBJECT")
 	other := &management.Organization{Name: auth0.String("other-org")}
 	if err := m.Organization.Create(ctx, other); err != nil {
 		t.Fatalf("create org: %v", err)
@@ -654,12 +657,7 @@ func TestExchangeEventsCarryActorAndNativeOrgOnly(t *testing.T) {
 			ts := httptest.NewServer(srv.Handler())
 			defer ts.Close()
 
-			rcv := newLogReceiver(t, srv, 0)
-			m := newMgmt(t, ts.URL)
-			if err := m.LogStream.Create(context.Background(),
-				httpStream("s", rcv.ts.URL, "JSONARRAY", "auth.token_exchange.success", "auth.token_exchange.fail")); err != nil {
-				t.Fatalf("create stream: %v", err)
-			}
+			rcv := streamTo(t, srv, ts.URL, "JSONARRAY", "auth.token_exchange.success", "auth.token_exchange.fail")
 
 			ok := doExchange(t, srv, srv.signSubject(t, jwt.MapClaims{"sub": "auth0|admin", exNS + "platform": "admin"}), "org_2")
 			if ok.Code != http.StatusOK {
@@ -807,15 +805,6 @@ func TestLogStreamsUnderConcurrentLoginsAndUpdates(t *testing.T) {
 	}
 }
 
-func contains(xs []string, x string) bool {
-	for _, v := range xs {
-		if v == x {
-			return true
-		}
-	}
-	return false
-}
-
 func TestLogDeliveryDoesNotFollowRedirects(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
@@ -855,10 +844,7 @@ func TestExchangeLogNamesBasicAuthClient(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	rcv := newLogReceiver(t, srv, 0)
-	if err := newMgmt(t, ts.URL).LogStream.Create(context.Background(), httpStream("s", rcv.ts.URL, "JSONARRAY")); err != nil {
-		t.Fatalf("create stream: %v", err)
-	}
+	rcv := streamTo(t, srv, ts.URL, "JSONARRAY")
 
 	form := url.Values{
 		"grant_type":         {tokenExchangeGrantType},
@@ -887,10 +873,7 @@ func TestInvitationLoginLogNamesTicketConnection(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	rcv := newLogReceiver(t, f.srv, 0)
-	if err := f.m.LogStream.Create(ctx, httpStream("s", rcv.ts.URL, "JSONARRAY")); err != nil {
-		t.Fatalf("create stream: %v", err)
-	}
+	rcv := streamTo(t, f.srv, f.ts.URL, "JSONARRAY")
 	inv := f.invitation("ticket-conn@example.test")
 	inv.ConnectionID = &f.connectionID
 	if err := f.m.Organization.CreateInvitation(ctx, f.orgID, inv); err != nil {
@@ -923,7 +906,7 @@ func TestInvitationLoginLogNamesTicketConnection(t *testing.T) {
 	f.srv.logDeliveries.Wait()
 
 	recs := rcv.records(t, "JSONARRAY")
-	if got := typesOf(recs); len(got) != 2 || !contains(got, "s") || !contains(got, "f") {
+	if got := typesOf(recs); len(got) != 2 || !slices.Contains(got, "s") || !slices.Contains(got, "f") {
 		t.Fatalf("types = %v, want s and f", got)
 	}
 	for _, r := range recs {
@@ -1006,11 +989,7 @@ func TestLoginLogNamesIdentityUsed(t *testing.T) {
 			{Connection: "email", Provider: "email", UserID: "two_ids"},
 		},
 	})
-	m := newMgmt(t, ts.URL)
-	rcv := newLogReceiver(t, srv, 0)
-	if err := m.LogStream.Create(context.Background(), httpStream("s", rcv.ts.URL, "JSONARRAY")); err != nil {
-		t.Fatalf("create stream: %v", err)
-	}
+	rcv := streamTo(t, srv, ts.URL, "JSONARRAY")
 
 	if _, status, msg := loginToOrg(t, ts.URL, "two@example.test", "", "openid"); status != http.StatusOK {
 		t.Fatalf("login: %d %s", status, msg)
@@ -1024,20 +1003,11 @@ func TestLoginLogNamesIdentityUsed(t *testing.T) {
 }
 
 func TestLogDeliverySendsCustomHeaders(t *testing.T) {
-	var got string
-	var mu sync.Mutex
-	rcv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		got = r.Header.Get("X-Stream")
-		mu.Unlock()
-	}))
-	defer rcv.Close()
-
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	trustTestTLS(srv)
+	rcv := newLogReceiver(t, srv, 0)
 	m := newMgmt(t, ts.URL)
-	ls := httpStream("s", rcv.URL, "JSONARRAY")
+	ls := httpStream("s", rcv.ts.URL, "JSONARRAY")
 	headers := []map[string]string{{"header": "X-Stream", "value": "pee"}}
 	ls.Sink.(*management.LogStreamSinkHTTP).CustomHeaders = &headers
 	if err := m.LogStream.Create(context.Background(), ls); err != nil {
@@ -1048,21 +1018,15 @@ func TestLogDeliverySendsCustomHeaders(t *testing.T) {
 	}
 	srv.logDeliveries.Wait()
 
-	mu.Lock()
-	defer mu.Unlock()
-	if got != "pee" {
-		t.Fatalf("X-Stream = %q", got)
+	if got := rcv.received(); len(got) != 1 || got[0].Header.Get("X-Stream") != "pee" {
+		t.Fatalf("deliveries = %+v", got)
 	}
 }
 
 func TestLoginLogUserNameIsIdentifierTyped(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	m := newMgmt(t, ts.URL)
-	rcv := newLogReceiver(t, srv, 0)
-	if err := m.LogStream.Create(context.Background(), httpStream("s", rcv.ts.URL, "JSONARRAY")); err != nil {
-		t.Fatalf("create stream: %v", err)
-	}
+	rcv := streamTo(t, srv, ts.URL, "JSONARRAY")
 	// test_user_1 has an email too; an SMS sign-in logs the phone.
 	if _, status, msg := loginToOrg(t, ts.URL, "+14155551234", "org_test", "openid"); status != http.StatusOK {
 		t.Fatalf("login: %d %s", status, msg)
@@ -1075,14 +1039,18 @@ func TestLoginLogUserNameIsIdentifierTyped(t *testing.T) {
 	}
 }
 
-func TestLogStreamCloneSharesNoSinkState(t *testing.T) {
-	l := &logStream{Sink: map[string]any{
-		"httpCustomHeaders": []any{map[string]any{"header": "X-A", "value": "a"}},
-	}}
+func TestLogStreamCloneSharesNoState(t *testing.T) {
+	l := &logStream{
+		Sink:      map[string]any{"httpCustomHeaders": []any{map[string]any{"header": "X-A", "value": "a"}}},
+		Filters:   []map[string]string{{"name": "auth.login.fail"}},
+		PIIConfig: &logStreamPIIConfig{LogFields: []string{"email"}},
+	}
 	c := l.Clone()
 	c.Sink["httpCustomHeaders"].([]any)[0].(map[string]any)["value"] = "changed"
-	if got := l.Sink["httpCustomHeaders"].([]any)[0].(map[string]any)["value"]; got != "a" {
-		t.Fatalf("clone mutation reached the original: %v", got)
+	c.Filters[0]["name"] = "changed"
+	c.PIIConfig.LogFields[0] = "changed"
+	if l.Sink["httpCustomHeaders"].([]any)[0].(map[string]any)["value"] != "a" || l.Filters[0]["name"] != "auth.login.fail" || l.PIIConfig.LogFields[0] != "email" {
+		t.Fatalf("clone mutation reached the original: %+v", l)
 	}
 }
 
@@ -1091,10 +1059,7 @@ func TestRevokedInvitationIsFailedLogin(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	rcv := newLogReceiver(t, f.srv, 0)
-	if err := f.m.LogStream.Create(ctx, httpStream("s", rcv.ts.URL, "JSONARRAY", "auth.login.fail")); err != nil {
-		t.Fatalf("create stream: %v", err)
-	}
+	rcv := streamTo(t, f.srv, f.ts.URL, "JSONARRAY", "auth.login.fail")
 	inv := f.createInvitation(t, "revoked@example.test")
 	if err := f.m.Organization.DeleteInvitation(ctx, f.orgID, inv.GetID()); err != nil {
 		t.Fatalf("revoke: %v", err)
@@ -1118,10 +1083,7 @@ func TestDeniedLoginIsFailedLogin(t *testing.T) {
 		exports.onExecutePostLogin = async (event, api) => {
 		  if (!event.request.query.approved) api.access.deny("not approved");
 		};`)
-	rcv := newLogReceiver(t, srv, 0)
-	if err := newMgmt(t, ts.URL).LogStream.Create(context.Background(), httpStream("s", rcv.ts.URL, "JSONARRAY")); err != nil {
-		t.Fatalf("create stream: %v", err)
-	}
+	rcv := streamTo(t, srv, ts.URL, "JSONARRAY")
 
 	if st, _ := login(t, ts, ""); st != http.StatusForbidden {
 		t.Fatalf("denied login answered %d", st)
@@ -1143,10 +1105,7 @@ func TestDeniedLoginIsFailedLogin(t *testing.T) {
 func TestUnknownOrganizationIsFailedLogin(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	rcv := newLogReceiver(t, srv, 0)
-	if err := newMgmt(t, ts.URL).LogStream.Create(context.Background(), httpStream("s", rcv.ts.URL, "JSONARRAY")); err != nil {
-		t.Fatalf("create stream: %v", err)
-	}
+	rcv := streamTo(t, srv, ts.URL, "JSONARRAY")
 	if _, status, _ := loginToOrg(t, ts.URL, "+14155551234", "org_missing", "openid"); status == http.StatusOK {
 		t.Fatal("login to an unknown organization succeeded")
 	}

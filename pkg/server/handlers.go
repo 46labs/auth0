@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -228,14 +229,10 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			params, _ := url.ParseQuery(originalQuery)
 			// The ticket's connection is authoritative for an invitation, so
 			// every log of this attempt names it rather than the user's identity.
-			// A copy, so the authorize parameters themselves are unchanged.
 			logParams := params
 			if ticket, ok := ticketFromQuery(params); ok {
 				if name := s.invitationConnectionName(ticket); name != "" {
-					logParams = url.Values{}
-					for k, v := range params {
-						logParams[k] = v
-					}
+					logParams = maps.Clone(params)
 					logParams.Set("connection", name)
 				}
 			}

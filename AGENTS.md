@@ -161,8 +161,10 @@ from conflict-marker checks in pre-commit, CI, and editor diagnostics.
   `secte` carries `organization_id` only when the exchange sets the organization natively, and
   `details.actor` only when it sets an actor (`token_exchange.actor`, the mock's `setActor`). Failures carry
   `details.error.message`, as Auth0's sample failed-login log does.
-- Log stream CRUD follows the Management API OpenAPI document (`/docs/oas/management/v2/management-api-oas.json`,
-  `*LogStream*` schemas) and go-auth0's `TestLogStreamManager_*` recordings: priority streams store the
+- Log stream requests are validated against `pkg/server/log_stream_schemas.json`, the `*LogStream*`
+  schemas copied verbatim from the Management API OpenAPI document
+  (`/docs/oas/management/v2/management-api-oas.json`). Behaviour beyond the schemas follows go-auth0's
+  `TestLogStreamManager_*` recordings: priority streams store the
   `security` filter whatever was sent, the Mixpanel password reads back as `********`, EventBridge and
   Event Grid generate their partner source and topic and refuse a sink update. Neither source shows a
   `JSONOBJECT` delivery body; the mock sends `{"logs": [...]}`. PEE uses `JSONARRAY`.

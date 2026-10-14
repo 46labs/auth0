@@ -400,7 +400,8 @@ applied to delivered records. The mock emits:
 
 Each active stream whose category filters match receives the record as `{log_id, data}` in its
 content format (`JSONLINES`, `JSONARRAY`, or `JSONOBJECT` as `{"logs": [...]}`), with its
-`httpAuthorization` and custom headers. The endpoint must be `https`. A non-2xx answer is retried up to three times. To deliver to a
+`httpAuthorization` and custom headers. The endpoint must be `https`. A non-2xx answer is retried up to
+three times. To deliver to a
 receiver behind a locally issued certificate, set `logStreamCAFile` in config, or
 `logStreamCA.secretName` in the chart.
 

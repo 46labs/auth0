@@ -1,0 +1,892 @@
+{
+  "$comment": "Log stream schemas from https://auth0.com/docs/oas/management/v2/management-api-oas.json, verbatim.",
+  "components": {
+    "schemas": {
+      "CreateLogStreamDatadogRequestBody": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "sink"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "log stream name"
+          },
+          "type": {
+            "$ref": "#/components/schemas/LogStreamDatadogEnum"
+          },
+          "isPriority": {
+            "type": "boolean",
+            "description": "True for priority log streams, false for non-priority"
+          },
+          "filters": {
+            "type": "array",
+            "description": "Only logs events matching these filters will be delivered by the stream. If omitted or empty, all events will be delivered.",
+            "items": {
+              "$ref": "#/components/schemas/LogStreamFilter"
+            }
+          },
+          "pii_config": {
+            "$ref": "#/components/schemas/LogStreamPiiConfig"
+          },
+          "sink": {
+            "$ref": "#/components/schemas/LogStreamDatadogSink"
+          },
+          "startFrom": {
+            "type": "string",
+            "description": "The optional datetime (ISO 8601) to start streaming logs from",
+            "default": "2021-03-01T19:57:29.532Z"
+          }
+        }
+      },
+      "CreateLogStreamEventBridgeRequestBody": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "sink"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "log stream name"
+          },
+          "type": {
+            "$ref": "#/components/schemas/LogStreamEventBridgeEnum"
+          },
+          "isPriority": {
+            "type": "boolean",
+            "description": "True for priority log streams, false for non-priority"
+          },
+          "filters": {
+            "type": "array",
+            "description": "Only logs events matching these filters will be delivered by the stream. If omitted or empty, all events will be delivered.",
+            "items": {
+              "$ref": "#/components/schemas/LogStreamFilter"
+            }
+          },
+          "pii_config": {
+            "$ref": "#/components/schemas/LogStreamPiiConfig"
+          },
+          "sink": {
+            "$ref": "#/components/schemas/LogStreamEventBridgeSink"
+          },
+          "startFrom": {
+            "type": "string",
+            "description": "The optional datetime (ISO 8601) to start streaming logs from",
+            "default": "2021-03-01T19:57:29.532Z"
+          }
+        }
+      },
+      "CreateLogStreamEventGridRequestBody": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "sink"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "log stream name"
+          },
+          "type": {
+            "$ref": "#/components/schemas/LogStreamEventGridEnum"
+          },
+          "isPriority": {
+            "type": "boolean",
+            "description": "True for priority log streams, false for non-priority"
+          },
+          "filters": {
+            "type": "array",
+            "description": "Only logs events matching these filters will be delivered by the stream. If omitted or empty, all events will be delivered.",
+            "items": {
+              "$ref": "#/components/schemas/LogStreamFilter"
+            }
+          },
+          "pii_config": {
+            "$ref": "#/components/schemas/LogStreamPiiConfig"
+          },
+          "sink": {
+            "$ref": "#/components/schemas/LogStreamEventGridSink"
+          },
+          "startFrom": {
+            "type": "string",
+            "description": "The optional datetime (ISO 8601) to start streaming logs from",
+            "default": "2021-03-01T19:57:29.532Z"
+          }
+        }
+      },
+      "CreateLogStreamHttpRequestBody": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "sink"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "log stream name"
+          },
+          "type": {
+            "$ref": "#/components/schemas/LogStreamHttpEnum"
+          },
+          "isPriority": {
+            "type": "boolean",
+            "description": "True for priority log streams, false for non-priority"
+          },
+          "filters": {
+            "type": "array",
+            "description": "Only logs events matching these filters will be delivered by the stream. If omitted or empty, all events will be delivered.",
+            "items": {
+              "$ref": "#/components/schemas/LogStreamFilter"
+            }
+          },
+          "pii_config": {
+            "$ref": "#/components/schemas/LogStreamPiiConfig"
+          },
+          "sink": {
+            "$ref": "#/components/schemas/LogStreamHttpSink"
+          },
+          "startFrom": {
+            "type": "string",
+            "description": "The optional datetime (ISO 8601) to start streaming logs from",
+            "default": "2021-03-01T19:57:29.532Z"
+          }
+        }
+      },
+      "CreateLogStreamMixpanelRequestBody": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "sink"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "log stream name"
+          },
+          "type": {
+            "$ref": "#/components/schemas/LogStreamMixpanelEnum"
+          },
+          "isPriority": {
+            "type": "boolean",
+            "description": "True for priority log streams, false for non-priority"
+          },
+          "filters": {
+            "type": "array",
+            "description": "Only logs events matching these filters will be delivered by the stream. If omitted or empty, all events will be delivered.",
+            "items": {
+              "$ref": "#/components/schemas/LogStreamFilter"
+            }
+          },
+          "pii_config": {
+            "$ref": "#/components/schemas/LogStreamPiiConfig"
+          },
+          "sink": {
+            "$ref": "#/components/schemas/LogStreamMixpanelSink"
+          },
+          "startFrom": {
+            "type": "string",
+            "description": "The optional datetime (ISO 8601) to start streaming logs from",
+            "default": "2021-03-01T19:57:29.532Z"
+          }
+        }
+      },
+      "CreateLogStreamRequestContent": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CreateLogStreamHttpRequestBody"
+          },
+          {
+            "$ref": "#/components/schemas/CreateLogStreamEventBridgeRequestBody"
+          },
+          {
+            "$ref": "#/components/schemas/CreateLogStreamEventGridRequestBody"
+          },
+          {
+            "$ref": "#/components/schemas/CreateLogStreamDatadogRequestBody"
+          },
+          {
+            "$ref": "#/components/schemas/CreateLogStreamSplunkRequestBody"
+          },
+          {
+            "$ref": "#/components/schemas/CreateLogStreamSumoRequestBody"
+          },
+          {
+            "$ref": "#/components/schemas/CreateLogStreamSegmentRequestBody"
+          },
+          {
+            "$ref": "#/components/schemas/CreateLogStreamMixpanelRequestBody"
+          }
+        ]
+      },
+      "CreateLogStreamSegmentRequestBody": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "sink"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "log stream name"
+          },
+          "type": {
+            "$ref": "#/components/schemas/LogStreamSegmentEnum"
+          },
+          "isPriority": {
+            "type": "boolean",
+            "description": "True for priority log streams, false for non-priority"
+          },
+          "filters": {
+            "type": "array",
+            "description": "Only logs events matching these filters will be delivered by the stream. If omitted or empty, all events will be delivered.",
+            "items": {
+              "$ref": "#/components/schemas/LogStreamFilter"
+            }
+          },
+          "pii_config": {
+            "$ref": "#/components/schemas/LogStreamPiiConfig"
+          },
+          "sink": {
+            "$ref": "#/components/schemas/LogStreamSegmentSinkWriteKey"
+          },
+          "startFrom": {
+            "type": "string",
+            "description": "The optional datetime (ISO 8601) to start streaming logs from",
+            "default": "2021-03-01T19:57:29.532Z"
+          }
+        }
+      },
+      "CreateLogStreamSplunkRequestBody": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "sink"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "log stream name"
+          },
+          "type": {
+            "$ref": "#/components/schemas/LogStreamSplunkEnum"
+          },
+          "isPriority": {
+            "type": "boolean",
+            "description": "True for priority log streams, false for non-priority"
+          },
+          "filters": {
+            "type": "array",
+            "description": "Only logs events matching these filters will be delivered by the stream. If omitted or empty, all events will be delivered.",
+            "items": {
+              "$ref": "#/components/schemas/LogStreamFilter"
+            }
+          },
+          "pii_config": {
+            "$ref": "#/components/schemas/LogStreamPiiConfig"
+          },
+          "sink": {
+            "$ref": "#/components/schemas/LogStreamSplunkSink"
+          },
+          "startFrom": {
+            "type": "string",
+            "description": "The optional datetime (ISO 8601) to start streaming logs from",
+            "default": "2021-03-01T19:57:29.532Z"
+          }
+        }
+      },
+      "CreateLogStreamSumoRequestBody": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "sink"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "log stream name"
+          },
+          "type": {
+            "$ref": "#/components/schemas/LogStreamSumoEnum"
+          },
+          "isPriority": {
+            "type": "boolean",
+            "description": "True for priority log streams, false for non-priority"
+          },
+          "filters": {
+            "type": "array",
+            "description": "Only logs events matching these filters will be delivered by the stream. If omitted or empty, all events will be delivered.",
+            "items": {
+              "$ref": "#/components/schemas/LogStreamFilter"
+            }
+          },
+          "pii_config": {
+            "$ref": "#/components/schemas/LogStreamPiiConfig"
+          },
+          "sink": {
+            "$ref": "#/components/schemas/LogStreamSumoSink"
+          },
+          "startFrom": {
+            "type": "string",
+            "description": "The optional datetime (ISO 8601) to start streaming logs from",
+            "default": "2021-03-01T19:57:29.532Z"
+          }
+        }
+      },
+      "HttpCustomHeader": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "header": {
+            "type": "string",
+            "description": "HTTP header name"
+          },
+          "value": {
+            "type": "string",
+            "description": "HTTP header value"
+          }
+        }
+      },
+      "LogStreamDatadogEnum": {
+        "type": "string",
+        "enum": [
+          "datadog"
+        ]
+      },
+      "LogStreamDatadogRegionEnum": {
+        "type": "string",
+        "description": "Datadog region",
+        "enum": [
+          "us",
+          "eu",
+          "us3",
+          "us5"
+        ]
+      },
+      "LogStreamDatadogSink": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "datadogApiKey",
+          "datadogRegion"
+        ],
+        "properties": {
+          "datadogApiKey": {
+            "type": "string",
+            "description": "Datadog API Key"
+          },
+          "datadogRegion": {
+            "$ref": "#/components/schemas/LogStreamDatadogRegionEnum"
+          }
+        }
+      },
+      "LogStreamEventBridgeEnum": {
+        "type": "string",
+        "enum": [
+          "eventbridge"
+        ]
+      },
+      "LogStreamEventBridgeSink": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "awsAccountId",
+          "awsRegion"
+        ],
+        "properties": {
+          "awsAccountId": {
+            "type": "string",
+            "description": "AWS account ID",
+            "pattern": "^\\d{12}$"
+          },
+          "awsRegion": {
+            "$ref": "#/components/schemas/LogStreamEventBridgeSinkRegionEnum"
+          },
+          "awsPartnerEventSource": {
+            "type": "string",
+            "description": "AWS EventBridge partner event source"
+          }
+        }
+      },
+      "LogStreamEventBridgeSinkRegionEnum": {
+        "type": "string",
+        "description": "The region in which the EventBridge event source will be created",
+        "enum": [
+          "af-south-1",
+          "ap-east-1",
+          "ap-east-2",
+          "ap-northeast-1",
+          "ap-northeast-2",
+          "ap-northeast-3",
+          "ap-south-1",
+          "ap-south-2",
+          "ap-southeast-1",
+          "ap-southeast-2",
+          "ap-southeast-3",
+          "ap-southeast-4",
+          "ap-southeast-5",
+          "ap-southeast-6",
+          "ap-southeast-7",
+          "ca-central-1",
+          "ca-west-1",
+          "eu-central-1",
+          "eu-central-2",
+          "eu-north-1",
+          "eu-south-1",
+          "eu-south-2",
+          "eu-west-1",
+          "eu-west-2",
+          "eu-west-3",
+          "il-central-1",
+          "me-central-1",
+          "me-south-1",
+          "mx-central-1",
+          "sa-east-1",
+          "us-gov-east-1",
+          "us-gov-west-1",
+          "us-east-1",
+          "us-east-2",
+          "us-west-1",
+          "us-west-2"
+        ]
+      },
+      "LogStreamEventGridEnum": {
+        "type": "string",
+        "enum": [
+          "eventgrid"
+        ]
+      },
+      "LogStreamEventGridRegionEnum": {
+        "type": "string",
+        "description": "Azure Region Name",
+        "enum": [
+          "australiacentral",
+          "australiaeast",
+          "australiasoutheast",
+          "brazilsouth",
+          "canadacentral",
+          "canadaeast",
+          "centralindia",
+          "centralus",
+          "eastasia",
+          "eastus",
+          "eastus2",
+          "francecentral",
+          "germanywestcentral",
+          "japaneast",
+          "japanwest",
+          "koreacentral",
+          "koreasouth",
+          "northcentralus",
+          "northeurope",
+          "norwayeast",
+          "southafricanorth",
+          "southcentralus",
+          "southeastasia",
+          "southindia",
+          "swedencentral",
+          "switzerlandnorth",
+          "uaenorth",
+          "uksouth",
+          "ukwest",
+          "westcentralus",
+          "westeurope",
+          "westindia",
+          "westus",
+          "westus2"
+        ]
+      },
+      "LogStreamEventGridSink": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "azureSubscriptionId",
+          "azureRegion",
+          "azureResourceGroup"
+        ],
+        "properties": {
+          "azureSubscriptionId": {
+            "type": "string",
+            "description": "Subscription ID",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "azureRegion": {
+            "$ref": "#/components/schemas/LogStreamEventGridRegionEnum"
+          },
+          "azureResourceGroup": {
+            "type": "string",
+            "description": "Resource Group"
+          },
+          "azurePartnerTopic": {
+            "type": "string",
+            "description": "Partner Topic"
+          }
+        }
+      },
+      "LogStreamFilter": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "type": {
+            "$ref": "#/components/schemas/LogStreamFilterTypeEnum"
+          },
+          "name": {
+            "$ref": "#/components/schemas/LogStreamFilterGroupNameEnum"
+          }
+        }
+      },
+      "LogStreamFilterGroupNameEnum": {
+        "type": "string",
+        "description": "Category group name",
+        "enum": [
+          "auth.login.fail",
+          "auth.login.notification",
+          "auth.login.success",
+          "auth.logout.fail",
+          "auth.logout.success",
+          "auth.signup.fail",
+          "auth.signup.success",
+          "auth.silent_auth.fail",
+          "auth.silent_auth.success",
+          "auth.token_exchange.fail",
+          "auth.token_exchange.success",
+          "management.fail",
+          "management.success",
+          "scim.event",
+          "system.notification",
+          "user.fail",
+          "user.notification",
+          "user.success",
+          "actions",
+          "other"
+        ]
+      },
+      "LogStreamFilterTypeEnum": {
+        "type": "string",
+        "description": "Filter type. Currently `category` is the only valid type.",
+        "enum": [
+          "category"
+        ]
+      },
+      "LogStreamHttpContentFormatEnum": {
+        "type": "string",
+        "description": "HTTP JSON format",
+        "enum": [
+          "JSONARRAY",
+          "JSONLINES",
+          "JSONOBJECT"
+        ]
+      },
+      "LogStreamHttpEnum": {
+        "type": "string",
+        "enum": [
+          "http"
+        ]
+      },
+      "LogStreamHttpSink": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "httpEndpoint"
+        ],
+        "properties": {
+          "httpAuthorization": {
+            "type": "string",
+            "description": "HTTP Authorization header"
+          },
+          "httpContentFormat": {
+            "$ref": "#/components/schemas/LogStreamHttpContentFormatEnum"
+          },
+          "httpContentType": {
+            "type": "string",
+            "description": "HTTP Content-Type header"
+          },
+          "httpEndpoint": {
+            "type": "string",
+            "description": "HTTP endpoint",
+            "pattern": "^https://.*"
+          },
+          "httpCustomHeaders": {
+            "type": "array",
+            "description": "custom HTTP headers",
+            "items": {
+              "$ref": "#/components/schemas/HttpCustomHeader"
+            }
+          }
+        }
+      },
+      "LogStreamMixpanelEnum": {
+        "type": "string",
+        "enum": [
+          "mixpanel"
+        ]
+      },
+      "LogStreamMixpanelRegionEnum": {
+        "type": "string",
+        "description": "Mixpanel Region",
+        "enum": [
+          "us",
+          "eu"
+        ]
+      },
+      "LogStreamMixpanelSink": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "mixpanelRegion",
+          "mixpanelProjectId",
+          "mixpanelServiceAccountUsername",
+          "mixpanelServiceAccountPassword"
+        ],
+        "properties": {
+          "mixpanelRegion": {
+            "$ref": "#/components/schemas/LogStreamMixpanelRegionEnum"
+          },
+          "mixpanelProjectId": {
+            "type": "string",
+            "description": "Mixpanel Project Id",
+            "pattern": "^\\d+$"
+          },
+          "mixpanelServiceAccountUsername": {
+            "type": "string",
+            "description": "Mixpanel Service Account Username",
+            "pattern": "^[^:]+$"
+          },
+          "mixpanelServiceAccountPassword": {
+            "type": "string",
+            "description": "Mixpanel Service Account Password",
+            "pattern": "^[^:]+$"
+          }
+        }
+      },
+      "LogStreamMixpanelSinkPatch": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "mixpanelRegion",
+          "mixpanelProjectId",
+          "mixpanelServiceAccountUsername"
+        ],
+        "properties": {
+          "mixpanelRegion": {
+            "$ref": "#/components/schemas/LogStreamMixpanelRegionEnum"
+          },
+          "mixpanelProjectId": {
+            "type": "string",
+            "description": "Mixpanel Project Id",
+            "pattern": "^\\d+$"
+          },
+          "mixpanelServiceAccountUsername": {
+            "type": "string",
+            "description": "Mixpanel Service Account Username",
+            "pattern": "^[^:]+$"
+          },
+          "mixpanelServiceAccountPassword": {
+            "type": "string",
+            "description": "Mixpanel Service Account Password",
+            "pattern": "^[^:]+$"
+          }
+        }
+      },
+      "LogStreamPiiAlgorithmEnum": {
+        "type": "string",
+        "enum": [
+          "xxhash"
+        ]
+      },
+      "LogStreamPiiConfig": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "log_fields"
+        ],
+        "properties": {
+          "log_fields": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/LogStreamPiiLogFieldsEnum"
+            }
+          },
+          "method": {
+            "$ref": "#/components/schemas/LogStreamPiiMethodEnum"
+          },
+          "algorithm": {
+            "$ref": "#/components/schemas/LogStreamPiiAlgorithmEnum"
+          }
+        }
+      },
+      "LogStreamPiiLogFieldsEnum": {
+        "type": "string",
+        "enum": [
+          "first_name",
+          "last_name",
+          "username",
+          "email",
+          "phone",
+          "address"
+        ]
+      },
+      "LogStreamPiiMethodEnum": {
+        "type": "string",
+        "enum": [
+          "mask",
+          "hash"
+        ]
+      },
+      "LogStreamSegmentEnum": {
+        "type": "string",
+        "enum": [
+          "segment"
+        ]
+      },
+      "LogStreamSegmentSink": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "segmentWriteKey": {
+            "type": "string",
+            "description": "Segment write key"
+          }
+        }
+      },
+      "LogStreamSegmentSinkWriteKey": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "segmentWriteKey"
+        ],
+        "properties": {
+          "segmentWriteKey": {
+            "type": "string",
+            "description": "Segment write key"
+          }
+        }
+      },
+      "LogStreamSinkPatch": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/LogStreamHttpSink"
+          },
+          {
+            "$ref": "#/components/schemas/LogStreamDatadogSink"
+          },
+          {
+            "$ref": "#/components/schemas/LogStreamSplunkSink"
+          },
+          {
+            "$ref": "#/components/schemas/LogStreamSumoSink"
+          },
+          {
+            "$ref": "#/components/schemas/LogStreamSegmentSink"
+          },
+          {
+            "$ref": "#/components/schemas/LogStreamMixpanelSinkPatch"
+          }
+        ]
+      },
+      "LogStreamSplunkEnum": {
+        "type": "string",
+        "enum": [
+          "splunk"
+        ]
+      },
+      "LogStreamSplunkSink": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "splunkDomain",
+          "splunkToken",
+          "splunkPort",
+          "splunkSecure"
+        ],
+        "properties": {
+          "splunkDomain": {
+            "type": "string",
+            "description": "Splunk URL Endpoint"
+          },
+          "splunkPort": {
+            "type": "string",
+            "description": "Port",
+            "pattern": "^[0-9]*$"
+          },
+          "splunkToken": {
+            "type": "string",
+            "description": "Splunk token"
+          },
+          "splunkSecure": {
+            "type": "boolean",
+            "description": "Verify TLS certificate"
+          }
+        }
+      },
+      "LogStreamStatusEnum": {
+        "type": "string",
+        "description": "The status of the log stream. Possible values: `active`, `paused`, `suspended`",
+        "enum": [
+          "active",
+          "paused",
+          "suspended"
+        ]
+      },
+      "LogStreamSumoEnum": {
+        "type": "string",
+        "enum": [
+          "sumo"
+        ]
+      },
+      "LogStreamSumoSink": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sumoSourceAddress"
+        ],
+        "properties": {
+          "sumoSourceAddress": {
+            "type": "string",
+            "description": "HTTP Source Address"
+          }
+        }
+      },
+      "UpdateLogStreamRequestContent": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "log stream name"
+          },
+          "status": {
+            "$ref": "#/components/schemas/LogStreamStatusEnum"
+          },
+          "isPriority": {
+            "type": "boolean",
+            "description": "True for priority log streams, false for non-priority"
+          },
+          "filters": {
+            "type": "array",
+            "description": "Only logs events matching these filters will be delivered by the stream. If omitted or empty, all events will be delivered.",
+            "items": {
+              "$ref": "#/components/schemas/LogStreamFilter"
+            }
+          },
+          "pii_config": {
+            "$ref": "#/components/schemas/LogStreamPiiConfig"
+          },
+          "sink": {
+            "$ref": "#/components/schemas/LogStreamSinkPatch"
+          }
+        }
+      }
+    }
+  }
+}
