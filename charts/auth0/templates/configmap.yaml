@@ -9,6 +9,9 @@ data:
     issuer: {{ .Values.config.issuer }}
     audience: {{ .Values.config.audience }}
     port: {{ .Values.config.port }}
+    {{- if .Values.logStreamCA.secretName }}
+    logStreamCAFile: /config/log-stream-ca/{{ .Values.logStreamCA.key }}
+    {{- end }}
     corsOrigins:
     {{- range .Values.config.corsOrigins }}
     - {{ . | quote }}

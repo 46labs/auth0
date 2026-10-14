@@ -8,6 +8,7 @@ require (
 	github.com/dop251/goja v0.0.0-20250309171923-bcd7cc6bf64c
 	github.com/dop251/goja_nodejs v0.0.0-20260918173711-b481721df8a2
 	github.com/golang-jwt/jwt/v5 v5.2.1
+	github.com/google/uuid v1.6.0
 	github.com/spf13/viper v1.19.0
 	golang.org/x/oauth2 v0.34.0
 )
@@ -22,7 +23,6 @@ require (
 	github.com/go-sourcemap/sourcemap v2.1.4+incompatible // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/google/pprof v0.0.0-20240727154555-813a5fbdbec8 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/lestrrat-go/blackmagic v1.0.3 // indirect
 	github.com/lestrrat-go/httpcc v1.0.1 // indirect

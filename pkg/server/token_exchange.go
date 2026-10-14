@@ -28,10 +28,18 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Every outcome past this point is a Custom Token Exchange transaction,
+	// which Auth0 logs as secte or fecte.
+	var sub string
+	fail := func(status int, body, description string) {
+		s.emitExchangeLog(r, "fecte", description, sub, "")
+		http.Error(w, body, status)
+	}
+
 	// Match the profile's subject_token_type, as Auth0 routes exchanges to a
 	// profile by this value (and rejects reserved namespaces at config time).
 	if ex.SubjectTokenType != "" && r.FormValue("subject_token_type") != ex.SubjectTokenType {
-		http.Error(w, `{"error":"invalid_request","error_description":"no token exchange profile for subject_token_type"}`, http.StatusBadRequest)
+		fail(http.StatusBadRequest, `{"error":"invalid_request","error_description":"no token exchange profile for subject_token_type"}`, "no token exchange profile for subject_token_type")
 		return
 	}
 
@@ -40,11 +48,11 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 	// event.request.body.target_org (then calls api.authentication.setOrganization).
 	organization := r.FormValue("target_org")
 	if subjectToken == "" {
-		http.Error(w, `{"error":"invalid_request","error_description":"subject_token is required"}`, http.StatusBadRequest)
+		fail(http.StatusBadRequest, `{"error":"invalid_request","error_description":"subject_token is required"}`, "subject_token is required")
 		return
 	}
 	if organization == "" {
-		http.Error(w, `{"error":"invalid_request","error_description":"target_org is required"}`, http.StatusBadRequest)
+		fail(http.StatusBadRequest, `{"error":"invalid_request","error_description":"target_org is required"}`, "target_org is required")
 		return
 	}
 
@@ -52,7 +60,7 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 	_, orgExists := s.organizations[organization]
 	s.mu.RUnlock()
 	if !orgExists {
-		http.Error(w, `{"error":"invalid_request","error_description":"Organization not found"}`, http.StatusBadRequest)
+		fail(http.StatusBadRequest, `{"error":"invalid_request","error_description":"Organization not found"}`, "Organization not found")
 		return
 	}
 
@@ -62,12 +70,12 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 		return &s.privateKey.PublicKey, nil
 	})
 	if err != nil || !tok.Valid {
-		http.Error(w, `{"error":"invalid_grant","error_description":"subject_token invalid"}`, http.StatusBadRequest)
+		fail(http.StatusBadRequest, `{"error":"invalid_grant","error_description":"subject_token invalid"}`, "subject_token invalid")
 		return
 	}
-	sub, _ := subClaims["sub"].(string)
+	sub, _ = subClaims["sub"].(string)
 	if sub == "" {
-		http.Error(w, `{"error":"invalid_grant","error_description":"subject_token missing sub"}`, http.StatusBadRequest)
+		fail(http.StatusBadRequest, `{"error":"invalid_grant","error_description":"subject_token missing sub"}`, "subject_token missing sub")
 		return
 	}
 
@@ -75,7 +83,7 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 	// carries the required claim non-empty may exchange.
 	if ex.RequireClaim != "" {
 		if v, _ := subClaims[ex.RequireClaim].(string); v == "" {
-			http.Error(w, `{"error":"access_denied","error_description":"subject not permitted to exchange"}`, http.StatusForbidden)
+			fail(http.StatusForbidden, `{"error":"access_denied","error_description":"subject not permitted to exchange"}`, "subject not permitted to exchange")
 			return
 		}
 	}
@@ -121,9 +129,16 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 	at.Header["kid"] = "key-1"
 	signed, err := at.SignedString(s.privateKey)
 	if err != nil {
-		http.Error(w, "Token generation failed", http.StatusInternalServerError)
+		fail(http.StatusInternalServerError, "Token generation failed", "Token generation failed")
 		return
 	}
+
+	// Auth0 logs an organization only when the exchange sets one natively.
+	nativeOrg := ""
+	if orgClaim == "org_id" {
+		nativeOrg = organization
+	}
+	s.emitExchangeLog(r, "secte", "Successful token exchange", sub, nativeOrg)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{

@@ -244,6 +244,9 @@ type Config struct {
 	Clients                 []Client
 	Branding                Branding
 	Actions                 Actions
+	// LogStreamCAFile is a PEM CA bundle trusted when delivering to log
+	// streams, on top of the system pool. Empty uses the system pool alone.
+	LogStreamCAFile string
 }
 
 type Actions struct {

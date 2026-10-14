@@ -51,10 +51,11 @@ func Load(opts ...Option) (*Config, error) {
 	}
 
 	cfg := &Config{
-		Issuer:      viper.GetString("issuer"),
-		Audience:    viper.GetString("audience"),
-		Port:        viper.GetInt("port"),
-		CORSOrigins: viper.GetStringSlice("corsOrigins"),
+		Issuer:          viper.GetString("issuer"),
+		Audience:        viper.GetString("audience"),
+		Port:            viper.GetInt("port"),
+		CORSOrigins:     viper.GetStringSlice("corsOrigins"),
+		LogStreamCAFile: viper.GetString("logStreamCAFile"),
 		Branding: Branding{
 			ServiceName:  viper.GetString("branding.serviceName"),
 			LogoURL:      viper.GetString("branding.logoUrl"),

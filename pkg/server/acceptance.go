@@ -158,6 +158,25 @@ func roleForOrg(user *config.User, orgID string) string {
 	return ""
 }
 
+// invitationConnectionName is the connection a ticket signs in through: the
+// authorize parameter, else the invitation's own connection. Empty when neither
+// names one or the ticket no longer resolves.
+func (s *Server) invitationConnectionName(t invitationTicket) string {
+	if t.ConnectionName != "" {
+		return t.ConnectionName
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	inv, err := s.lookupInvitation(t, time.Now())
+	if err != nil || inv.ConnectionID == "" {
+		return ""
+	}
+	if c, ok := s.connections[inv.ConnectionID]; ok {
+		return c.Name
+	}
+	return ""
+}
+
 // redeemInvitation consumes a pending invitation, creating the user when the
 // email is unknown. One-time: the removal shares the lock with the read, so a
 // replay or a concurrent second attempt finds nothing.
