@@ -22,6 +22,7 @@ Full-featured OIDC provider mock with Auth0-compatible API for local development
 - Clients CRUD (`/api/v2/clients`), including `initiate_login_uri`
 - User metadata updates (`/api/v2/users/:id`)
 - Organization membership and member roles
+- Log streams (`/api/v2/log-streams`), with delivery of sign-in and token exchange events to `http` streams
 - Page-based pagination (`page`, `per_page`) on every list endpoint
 
 ### Organization login
@@ -379,6 +380,30 @@ PATCH /api/v2/users/:id
   }
 }
 ```
+
+### Log streams
+
+```bash
+GET|POST /api/v2/log-streams
+GET|PATCH|DELETE /api/v2/log-streams/:id
+```
+
+All eight stream types are accepted and validated against Auth0's Management API schemas, with
+`pii_config` and `startFrom`. Only `http` (custom webhook) streams deliver; `pii_config` is stored, not
+applied to delivered records. The mock emits:
+
+| Event | Type | When |
+|---|---|---|
+| Successful login | `s` | the code is exchanged and post-login Actions allow it |
+| Failed login | `f` | wrong code, refused invitation, non-member organization, post-login deny |
+| Token exchange | `secte` / `fecte` | custom token exchange succeeds / fails |
+
+Each active stream whose category filters match receives the record as `{log_id, data}` in its
+content format (`JSONLINES`, `JSONARRAY`, or `JSONOBJECT` as `{"logs": [...]}`), with its
+`httpAuthorization` and custom headers. The endpoint must be `https`. A non-2xx answer is retried up to
+three times. To deliver to a
+receiver behind a locally issued certificate, set `logStreamCAFile` in config, or
+`logStreamCA.secretName` in the chart.
 
 ## OIDC Endpoints
 

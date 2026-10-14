@@ -28,6 +28,8 @@ All state is in-memory on `Server`, guarded by one `sync.RWMutex`:
 - `orgConnections` — the `enabled_connections` pairings
 - `invitations` — pending organization invitations, keyed by org id
 - `pending`, `authCodes`, `refreshTokens` — login and token state
+- `logStreams` — log streams; deliveries run in goroutines tracked by `logDeliveries`, which
+  tests `Wait()` on instead of sleeping
 
 Reads hand back **copies** (`config.*.Clone()`). Handlers serialize outside the lock while update
 handlers mutate under it, so returning a pointer into the store is a data race.
@@ -155,3 +157,14 @@ from conflict-marker checks in pre-commit, CI, and editor diagnostics.
 - `PATCH /api/v2/organizations/{id}` merges metadata where real Auth0 replaces the object. Known
   divergence, not yet fixed.
 - The mock never sends email. `send_invitation_email` is accepted and logged.
+- Log stream records follow Auth0's tenant-log schema (`docs/tenant-logs/<category>/<type>`).
+  `secte` carries `organization_id` only when the exchange sets the organization natively, and
+  `details.actor` only when it sets an actor (`token_exchange.actor`, the mock's `setActor`). Failures carry
+  `details.error.message`, as Auth0's sample failed-login log does.
+- Log stream requests are validated against `pkg/server/log_stream_schemas.json`, the `*LogStream*`
+  schemas copied verbatim from the Management API OpenAPI document
+  (`/docs/oas/management/v2/management-api-oas.json`). Behaviour beyond the schemas follows go-auth0's
+  `TestLogStreamManager_*` recordings: priority streams store the
+  `security` filter whatever was sent, the Mixpanel password reads back as `********`, EventBridge and
+  Event Grid generate their partner source and topic and refuse a sink update. Neither source shows a
+  `JSONOBJECT` delivery body; the mock sends `{"logs": [...]}`. PEE uses `JSONARRAY`.

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -169,6 +170,8 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 
 			if err != nil {
+				// Refused before any credential is entered, so no user is known.
+				s.emitLoginLog(r, r.URL.Query(), "f", err.Error(), nil, "", ticket.OrgID)
 				s.redirectAuthorizeError(w, r, "invalid_request", err.Error())
 				return
 			}
@@ -180,6 +183,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			_, known := s.organizations[orgID]
 			s.mu.RUnlock()
 			if !known {
+				s.emitLoginLog(r, r.URL.Query(), "f", errOrgNotFound.Error(), nil, "", orgID)
 				s.redirectAuthorizeError(w, r, "invalid_request", errOrgNotFound.Error())
 				return
 			}
@@ -222,12 +226,22 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if code != "" {
+			params, _ := url.ParseQuery(originalQuery)
+			// The ticket's connection is authoritative for an invitation, so
+			// every log of this attempt names it rather than the user's identity.
+			logParams := params
+			if ticket, ok := ticketFromQuery(params); ok {
+				if name := s.invitationConnectionName(ticket); name != "" {
+					logParams = maps.Clone(params)
+					logParams.Set("connection", name)
+				}
+			}
+
 			if code != "123456" {
+				s.emitLoginLog(r, logParams, "f", "Wrong email or verification code.", s.findUser(identifier), identifier, params.Get("organization"))
 				http.Error(w, "Invalid code", 400)
 				return
 			}
-
-			params, _ := url.ParseQuery(originalQuery)
 
 			// Validate before minting, so a bad redirect_uri cannot leave an
 			// orphaned auth code behind.
@@ -247,6 +261,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			if ticket, ok := ticketFromQuery(params); ok {
 				redeemed, err := s.redeemInvitation(ticket, identifier, time.Now())
 				if err != nil {
+					s.emitLoginLog(r, logParams, "f", err.Error(), s.findUser(identifier), identifier, ticket.OrgID)
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
@@ -264,6 +279,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 				}
 
 				if err := s.authorizeOrgLogin(user, orgID, connectionID); err != nil {
+					s.emitLoginLog(r, logParams, "f", err.Error(), user, identifier, orgID)
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
@@ -284,6 +300,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 				ConnectionID:  connectionID,
 				Query:         originalQuery,
 				SessionID:     "sess_" + s.generateID(),
+				LoginLog:      s.loginLog(r, logParams, "s", "Successful login", user, identifier, orgID),
 			}
 
 			s.mu.Lock()
@@ -646,7 +663,9 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if claimed.SessionID != "" {
 		idClaims["sid"] = claimed.SessionID
 	}
-	if !s.postLogin(w, r, &user, clientID, orgID, claimed.Query, "oidc-basic-profile", claimed.SessionID, idClaims, accessClaims) {
+	allowed := s.postLogin(w, r, &user, clientID, orgID, claimed.Query, "oidc-basic-profile", claimed.SessionID, idClaims, accessClaims)
+	s.emitPendingLogin(claimed.LoginLog, allowed)
+	if !allowed {
 		return
 	}
 

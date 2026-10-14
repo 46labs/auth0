@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/46labs/auth0/pkg/config"
 	"github.com/46labs/auth0/pkg/contact"
@@ -34,6 +35,10 @@ type authCode struct {
 	// as event.session.id, the ID token carries it as sid, and every token
 	// refreshed from this login keeps it.
 	SessionID string
+	// LoginLog is the sign-in record for this login, emitted once the
+	// post-login Action has run: Auth0 logs a denied login as a failure. Nil
+	// for codes minted without the login UI.
+	LoginLog map[string]any
 }
 
 // refreshTokenState carries the bindings of the login that issued the token,
@@ -71,6 +76,13 @@ type Server struct {
 	orgConnections map[string][]config.OrganizationConnection
 	// keyed by org id, in creation order
 	invitations map[string][]config.OrganizationInvitation
+
+	logStreams        map[string]*logStream
+	logDeliveryClient *http.Client
+	logRetryBackoff   time.Duration
+	// logDeliveries tracks in-flight deliveries, so tests wait on them
+	// instead of sleeping.
+	logDeliveries sync.WaitGroup
 
 	mu sync.RWMutex
 }
@@ -118,6 +130,11 @@ func New(cfg *config.Config) (*Server, error) {
 
 	orgConnections := buildOrgConnections(cfg)
 
+	deliveryClient, err := logDeliveryClient(cfg.LogStreamCAFile)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Server{
 		cfg:            cfg,
 		privateKey:     key,
@@ -135,6 +152,10 @@ func New(cfg *config.Config) (*Server, error) {
 		roles:          roles,
 		orgConnections: orgConnections,
 		invitations:    make(map[string][]config.OrganizationInvitation),
+
+		logStreams:        make(map[string]*logStream),
+		logDeliveryClient: deliveryClient,
+		logRetryBackoff:   defaultLogStreamBackoff,
 	}, nil
 }
 
@@ -203,6 +224,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v2/clients/", s.handleClient)
 	mux.HandleFunc("/api/v2/roles", s.handleRoles)
 	mux.HandleFunc("/api/v2/roles/", s.handleRole)
+	mux.HandleFunc("/api/v2/log-streams", s.handleLogStreams)
+	mux.HandleFunc("/api/v2/log-streams/", s.handleLogStream)
 	s.registerActionsAPI(mux)
 
 	return mux

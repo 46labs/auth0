@@ -49,6 +49,11 @@ spec:
           mountPath: /config/login.html
           subPath: login.html
         {{- end }}
+        {{- if .Values.logStreamCA.secretName }}
+        - name: log-stream-ca
+          mountPath: /config/log-stream-ca
+          readOnly: true
+        {{- end }}
       volumes:
       - name: config
         configMap:
@@ -57,4 +62,9 @@ spec:
       - name: custom-login
         configMap:
           name: {{ include "auth0.fullname" . }}-login
+      {{- end }}
+      {{- if .Values.logStreamCA.secretName }}
+      - name: log-stream-ca
+        secret:
+          secretName: {{ .Values.logStreamCA.secretName }}
       {{- end }}
