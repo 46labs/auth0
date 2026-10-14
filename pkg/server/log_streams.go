@@ -467,7 +467,11 @@ func (s *Server) deliverLog(l *logStream, rec logRecord) {
 				}
 			}
 		}
-		resp, err := s.logDeliveryClient.Do(req)
+		client, err := s.deliveryClient()
+		var resp *http.Response
+		if err == nil {
+			resp, err = client.Do(req)
+		}
 		if err == nil {
 			// Drained, bounded, so the connection is reused for the next event.
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
@@ -505,18 +509,25 @@ func encodeLogBatch(format string, recs []logRecord) ([]byte, error) {
 	}
 }
 
-// logDeliveryClient builds the client streams are delivered with. caFile adds a
-// CA to the system pool, for a receiver behind a locally issued certificate.
-func logDeliveryClient(caFile string) (*http.Client, error) {
-	client := &http.Client{
+// logDeliveryClient builds the client streams are delivered with.
+func logDeliveryClient() *http.Client {
+	return &http.Client{
 		Timeout: 10 * time.Second,
 		// A redirect is a non-2xx answer to retry, not a delivery to follow:
 		// following it would count the redirect target's 200 as success and
 		// carry the authorization header to it.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
+}
+
+// deliveryClient is the client for one delivery attempt. LogStreamCAFile adds a
+// CA to the system pool, for a receiver behind a locally issued certificate. It
+// is read per attempt, so the CA may be issued or rotated after the mock starts;
+// until it can be read, attempts fail and are retried like any other.
+func (s *Server) deliveryClient() (*http.Client, error) {
+	caFile := s.cfg.LogStreamCAFile
 	if caFile == "" {
-		return client, nil
+		return s.logDeliveryClient, nil
 	}
 	pem, err := os.ReadFile(caFile)
 	if err != nil {
@@ -530,10 +541,14 @@ func logDeliveryClient(caFile string) (*http.Client, error) {
 		return nil, fmt.Errorf("log stream CA: no certificates in %s", caFile)
 	}
 	// Cloned so proxy, dial and HTTP/2 settings stay as the default client's.
+	// Keep-alives off: the client lives for one attempt, so a pooled connection
+	// would only be left open.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	transport.DisableKeepAlives = true
+	client := *s.logDeliveryClient
 	client.Transport = transport
-	return client, nil
+	return &client, nil
 }
 
 // emitLoginLog records a sign-in outcome from the /authorize form. user is nil

@@ -130,11 +130,6 @@ func New(cfg *config.Config) (*Server, error) {
 
 	orgConnections := buildOrgConnections(cfg)
 
-	deliveryClient, err := logDeliveryClient(cfg.LogStreamCAFile)
-	if err != nil {
-		return nil, err
-	}
-
 	return &Server{
 		cfg:            cfg,
 		privateKey:     key,
@@ -154,7 +149,7 @@ func New(cfg *config.Config) (*Server, error) {
 		invitations:    make(map[string][]config.OrganizationInvitation),
 
 		logStreams:        make(map[string]*logStream),
-		logDeliveryClient: deliveryClient,
+		logDeliveryClient: logDeliveryClient(),
 		logRetryBackoff:   defaultLogStreamBackoff,
 	}, nil
 }
