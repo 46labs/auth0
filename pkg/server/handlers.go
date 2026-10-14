@@ -90,11 +90,12 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 		"issuer":                                s.cfg.Issuer,
 		"authorization_endpoint":                s.cfg.Issuer + "authorize",
 		"token_endpoint":                        s.cfg.Issuer + "oauth/token",
+		"device_authorization_endpoint":         s.cfg.Issuer + "oauth/device/code",
 		"userinfo_endpoint":                     s.cfg.Issuer + "userinfo",
 		"jwks_uri":                              s.cfg.Issuer + ".well-known/jwks.json",
 		"end_session_endpoint":                  s.cfg.Issuer + "v2/logout",
 		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code", "client_credentials", "refresh_token"},
+		"grant_types_supported":                 []string{"authorization_code", "client_credentials", "refresh_token", deviceCodeGrantType},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      []string{"openid", "profile", "email", "offline_access"},
@@ -417,20 +418,9 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		s.mu.RLock()
-		issued, exists := s.refreshTokens[refreshToken]
-		s.mu.RUnlock()
-
-		if !exists {
-			http.Error(w, `{"error":"invalid_grant","error_description":"Invalid refresh token"}`, 400)
-			return
-		}
-		// The token belongs to the client the login was authorized for;
-		// otherwise the audience and action client context could be swapped.
-		if issued.ClientID != "" && clientID != issued.ClientID {
-			http.Error(w,
-				`{"error":"invalid_grant","error_description":"the refresh token was issued to a different client"}`,
-				http.StatusBadRequest)
+		issued, rotated, errBody, errStatus := s.redeemRefreshToken(refreshToken, clientID, s.lookupClient(clientID), time.Now())
+		if issued == nil {
+			http.Error(w, errBody, errStatus)
 			return
 		}
 
@@ -511,7 +501,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		if issued.SessionID != "" {
 			idClaims["sid"] = issued.SessionID
 		}
-		if !s.postLogin(w, r, user, clientID, orgID, "", "oauth2-refresh-token", issued.SessionID, idClaims, accessClaims) {
+		if !s.postLogin(w, r, user, clientID, orgID, "", "oauth2-refresh-token", issued.SessionID, nil, idClaims, accessClaims) {
 			return
 		}
 
@@ -524,23 +514,34 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		idToken := jwt.NewWithClaims(jwt.SigningMethodRS256, idClaims)
-		idToken.Header["kid"] = "key-1"
-
-		idTokenString, err := idToken.SignedString(s.privateKey)
-		if err != nil {
-			http.Error(w, "Token generation failed", 500)
-			return
+		response := map[string]interface{}{
+			"access_token": accessTokenString,
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+			"scope":        grantedScope(issued.Scope),
 		}
-
+		// Auth0 returns a refresh token on a refresh only with rotation.
+		// Without it the response has none and the redeemed token stays valid.
+		if rotated != "" {
+			response["refresh_token"] = rotated
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"access_token":  accessTokenString,
-			"id_token":      idTokenString,
-			"token_type":    "Bearer",
-			"expires_in":    3600,
-			"refresh_token": refreshToken, // Return the same refresh token
-		})
+		if issued.IncludeIDToken {
+			idToken := jwt.NewWithClaims(jwt.SigningMethodRS256, idClaims)
+			idToken.Header["kid"] = "key-1"
+			idTokenString, err := idToken.SignedString(s.privateKey)
+			if err != nil {
+				http.Error(w, "Token generation failed", 500)
+				return
+			}
+			response["id_token"] = idTokenString
+		}
+		_ = json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	if grantType == deviceCodeGrantType {
+		s.handleDeviceToken(w, r, clientID)
 		return
 	}
 
@@ -663,7 +664,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if claimed.SessionID != "" {
 		idClaims["sid"] = claimed.SessionID
 	}
-	allowed := s.postLogin(w, r, &user, clientID, orgID, claimed.Query, "oidc-basic-profile", claimed.SessionID, idClaims, accessClaims)
+	allowed := s.postLogin(w, r, &user, clientID, orgID, claimed.Query, "oidc-basic-profile", claimed.SessionID, nil, idClaims, accessClaims)
 	s.emitPendingLogin(claimed.LoginLog, allowed)
 	if !allowed {
 		return
@@ -690,11 +691,13 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		refreshToken = "rt_" + base64.RawURLEncoding.EncodeToString([]byte(s.generateID()))
 		s.mu.Lock()
 		s.refreshTokens[refreshToken] = &refreshTokenState{
-			UserID:    user.ID,
-			OrgID:     orgID,
-			ClientID:  claimed.ClientID,
-			Scope:     requestedScope,
-			SessionID: claimed.SessionID,
+			UserID:         user.ID,
+			OrgID:          orgID,
+			ClientID:       claimed.ClientID,
+			IncludeIDToken: true,
+			Scope:          requestedScope,
+			SessionID:      claimed.SessionID,
+			Family:         refreshToken,
 		}
 		s.mu.Unlock()
 	}

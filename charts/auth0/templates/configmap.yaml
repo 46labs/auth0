@@ -12,6 +12,9 @@ data:
     {{- if .Values.logStreamCA.secretName }}
     logStreamCAFile: /config/log-stream-ca/{{ .Values.logStreamCA.key }}
     {{- end }}
+    {{- with .Values.config.deviceCodeLifetime }}
+    deviceCodeLifetime: {{ . | quote }}
+    {{- end }}
     corsOrigins:
     {{- range .Values.config.corsOrigins }}
     - {{ . | quote }}
@@ -64,4 +67,16 @@ metadata:
 data:
   login.html: |
 {{ .Values.customLogin.html | indent 4 }}
+{{- end }}
+---
+{{- if .Values.customDevice.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "auth0.fullname" . }}-device
+  labels:
+    {{- include "auth0.labels" . | nindent 4 }}
+data:
+  device.html: |
+{{ .Values.customDevice.html | indent 4 }}
 {{- end }}
