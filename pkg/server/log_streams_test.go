@@ -713,54 +713,51 @@ func TestLogDeliveryTrustsConfiguredCA(t *testing.T) {
 	defer tlsRcv.Close()
 
 	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	srv := &Server{
+		cfg:               &config.Config{LogStreamCAFile: caFile},
+		logDeliveryClient: logDeliveryClient(),
+		logStreams: map[string]*logStream{"lst_1": {
+			ID: "lst_1", Type: "http", Status: "active",
+			Sink: map[string]any{"httpEndpoint": tlsRcv.URL, "httpContentFormat": "JSONARRAY", "httpContentType": "application/json"},
+		}},
+	}
+	deliver := func(t *testing.T, want int) {
+		t.Helper()
+		mu.Lock()
+		hits = 0
+		mu.Unlock()
+		srv.emitLog(map[string]any{"type": "s"})
+		srv.logDeliveries.Wait()
+		mu.Lock()
+		defer mu.Unlock()
+		if hits != want {
+			t.Fatalf("hits = %d, want %d", hits, want)
+		}
+	}
+
+	// The CA is read per delivery: absent at first, as when the Secret holding
+	// it is issued after the mock starts, then present.
+	deliver(t, 0)
+	if err := os.WriteFile(caFile, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deliver(t, 0)
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsRcv.Certificate().Raw})
 	if err := os.WriteFile(caFile, certPEM, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	deliver(t, 1)
 
-	for _, tc := range []struct {
-		name     string
-		caFile   string
-		wantHits int
-	}{
-		{"untrusted without CA", "", 0},
-		{"trusted with CA", caFile, 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			mu.Lock()
-			hits = 0
-			mu.Unlock()
+	srv.cfg.LogStreamCAFile = ""
+	deliver(t, 0)
 
-			client, err := logDeliveryClient(tc.caFile)
-			if err != nil {
-				t.Fatalf("client: %v", err)
-			}
-			srv := &Server{logDeliveryClient: client, logStreams: map[string]*logStream{}}
-			srv.logStreams["lst_1"] = &logStream{
-				ID: "lst_1", Type: "http", Status: "active",
-				Sink: map[string]any{"httpEndpoint": tlsRcv.URL, "httpContentFormat": "JSONARRAY", "httpContentType": "application/json"},
-			}
-			srv.emitLog(map[string]any{"type": "s"})
-			srv.logDeliveries.Wait()
-
-			mu.Lock()
-			defer mu.Unlock()
-			if hits != tc.wantHits {
-				t.Fatalf("hits = %d, want %d", hits, tc.wantHits)
-			}
-		})
-	}
-
-	client, err := logDeliveryClient(caFile)
+	srv.cfg.LogStreamCAFile = caFile
+	client, err := srv.deliveryClient()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tr, ok := client.Transport.(*http.Transport); !ok || tr.Proxy == nil {
-		t.Fatal("CA client dropped the default transport's proxy settings")
-	}
-
-	if _, err := logDeliveryClient(filepath.Join(t.TempDir(), "missing.pem")); err == nil {
-		t.Fatal("missing CA file accepted")
+	if tr, ok := client.Transport.(*http.Transport); !ok || tr.Proxy == nil || client.CheckRedirect == nil {
+		t.Fatal("CA client dropped the default transport's proxy settings or the redirect policy")
 	}
 }
 

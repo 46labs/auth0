@@ -403,7 +403,8 @@ content format (`JSONLINES`, `JSONARRAY`, or `JSONOBJECT` as `{"logs": [...]}`),
 `httpAuthorization` and custom headers. The endpoint must be `https`. A non-2xx answer is retried up to
 three times. To deliver to a
 receiver behind a locally issued certificate, set `logStreamCAFile` in config, or
-`logStreamCA.secretName` in the chart.
+`logStreamCA.secretName` in the chart. The file is read on each delivery, so it may appear or
+rotate after the mock starts; until it can be read, deliveries fail and are retried.
 
 ## OIDC Endpoints
 

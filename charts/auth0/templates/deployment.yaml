@@ -67,4 +67,10 @@ spec:
       - name: log-stream-ca
         secret:
           secretName: {{ .Values.logStreamCA.secretName }}
+          # Optional: the mock starts before the Secret is issued and reads
+          # the CA per delivery, so it is picked up once kubelet mounts it.
+          optional: true
+          items:
+          - key: {{ .Values.logStreamCA.key | quote }}
+            path: {{ .Values.logStreamCA.key | quote }}
       {{- end }}
