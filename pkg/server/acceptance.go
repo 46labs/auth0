@@ -180,18 +180,18 @@ func (s *Server) invitationConnectionName(t invitationTicket) string {
 // redeemInvitation consumes a pending invitation, creating the user when the
 // email is unknown. One-time: the removal shares the lock with the read, so a
 // replay or a concurrent second attempt finds nothing.
-func (s *Server) redeemInvitation(t invitationTicket, identifier string, now time.Time) (*config.User, error) {
+func (s *Server) redeemInvitation(t invitationTicket, identifier string, now time.Time) (*config.User, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	inv, err := s.lookupInvitation(t, now)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	// The ticket is bound to the invited address, compared case insensitively.
 	if !strings.EqualFold(strings.TrimSpace(identifier), inv.InviteeEmail) {
-		return nil, errInvitationWrongInvitee
+		return nil, "", errInvitationWrongInvitee
 	}
 
 	// Resolve the role before touching the user store: a role deleted between
@@ -201,18 +201,35 @@ func (s *Server) redeemInvitation(t invitationTicket, identifier string, now tim
 	if len(inv.Roles) > 0 {
 		role = s.roleNameByID(inv.Roles[0])
 		if role == "" {
-			return nil, errInvitationRoleGone
+			return nil, "", errInvitationRoleGone
 		}
 	}
 
-	user := s.findUserLocked(inv.InviteeEmail)
-	if user == nil {
-		user = s.autoCreateUserLocked(inv.InviteeEmail)
+	// An invitation through an enterprise connection is that connection's
+	// user, so a later SSO sign-in finds the same account.
+	var user *config.User
+	// One the invitation does not pin is the one named at sign-in.
+	connID := inv.ConnectionID
+	if connID == "" && t.ConnectionName != "" {
+		connID = s.connectionIDByName(t.ConnectionName)
+	}
+	var via string
+	if conn, ok := s.connections[connID]; ok && !conn.IsPasswordless() {
+		user, via = s.enterpriseUserLocked(conn, inv.InviteeEmail), conn.Name
+	} else {
+		// A passwordless sign-in, resolved as any other code login is.
+		var named *config.Connection
+		if ok && conn.IsPasswordless() {
+			named = conn
+		}
+		if user, via = s.passwordlessUserLocked(inv.InviteeEmail, named); user == nil {
+			return nil, "", errInvitationNotFound
+		}
 	}
 
 	stored, ok := s.users[user.ID]
 	if !ok {
-		return nil, errInvitationNotFound
+		return nil, "", errInvitationNotFound
 	}
 
 	s.addMemberLocked(t.OrgID, stored, role)
@@ -221,7 +238,7 @@ func (s *Server) redeemInvitation(t invitationTicket, identifier string, now tim
 	s.removeInvitationLocked(t.OrgID, inv.ID)
 
 	log.Printf("Invitation %s redeemed by %s into %s (role %q)", inv.ID, inv.InviteeEmail, t.OrgID, role)
-	return stored.Clone(), nil
+	return stored.Clone(), via, nil
 }
 
 // addMemberLocked requires the caller to hold the write lock.

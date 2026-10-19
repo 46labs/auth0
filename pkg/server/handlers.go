@@ -257,22 +257,20 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			var user *config.User
 			orgID := params.Get("organization")
 			connectionID := params.Get("connection")
+			// The connection signed in through, as resolved below.
+			var resolved string
 
 			if ticket, ok := ticketFromQuery(params); ok {
-				redeemed, err := s.redeemInvitation(ticket, identifier, time.Now())
+				redeemed, via, err := s.redeemInvitation(ticket, identifier, time.Now())
 				if err != nil {
 					s.emitLoginLog(r, logParams, "f", err.Error(), s.findUser(identifier), identifier, ticket.OrgID)
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
-				user = redeemed
+				user, resolved = redeemed, via
 				orgID = ticket.OrgID
 			} else {
-				user = s.findUser(identifier)
-				// Auto-create user if not found (like real Auth0 passwordless)
-				if user == nil {
-					user = s.autoCreateUser(identifier)
-				}
+				user, resolved = s.loginUser(identifier, connectionID)
 				if user == nil {
 					http.Error(w, "Invalid code", 400)
 					return
@@ -298,14 +296,16 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 				ClientID:      params.Get("client_id"),
 				OrgID:         orgID,
 				ConnectionID:  connectionID,
+				Connection:    resolved,
 				Query:         originalQuery,
 				SessionID:     "sess_" + s.generateID(),
-				LoginLog:      s.loginLog(r, logParams, "s", "Successful login", user, identifier, orgID),
+				LoginLog:      s.loginLog(r, withConnection(logParams, resolved), "s", "Successful login", user, identifier, orgID),
 			}
 
 			s.mu.Lock()
 			s.authCodes[code] = state
 			delete(s.pending, sessionID)
+			s.recordLoginLocked(user.ID, identifier, resolved)
 			s.mu.Unlock()
 
 			query := redirectURL.Query()
@@ -511,7 +511,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		if issued.SessionID != "" {
 			idClaims["sid"] = issued.SessionID
 		}
-		if !s.postLogin(w, r, user, clientID, orgID, "", "oauth2-refresh-token", issued.SessionID, idClaims, accessClaims) {
+		if !s.postLogin(w, r, user, clientID, orgID, "", "oauth2-refresh-token", issued.SessionID, issued.Connection, idClaims, accessClaims) {
 			return
 		}
 
@@ -663,7 +663,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if claimed.SessionID != "" {
 		idClaims["sid"] = claimed.SessionID
 	}
-	allowed := s.postLogin(w, r, &user, clientID, orgID, claimed.Query, "oidc-basic-profile", claimed.SessionID, idClaims, accessClaims)
+	allowed := s.postLogin(w, r, &user, clientID, orgID, claimed.Query, "oidc-basic-profile", claimed.SessionID, claimed.Connection, idClaims, accessClaims)
 	s.emitPendingLogin(claimed.LoginLog, allowed)
 	if !allowed {
 		return
@@ -690,11 +690,12 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		refreshToken = "rt_" + base64.RawURLEncoding.EncodeToString([]byte(s.generateID()))
 		s.mu.Lock()
 		s.refreshTokens[refreshToken] = &refreshTokenState{
-			UserID:    user.ID,
-			OrgID:     orgID,
-			ClientID:  claimed.ClientID,
-			Scope:     requestedScope,
-			SessionID: claimed.SessionID,
+			UserID:     user.ID,
+			OrgID:      orgID,
+			ClientID:   claimed.ClientID,
+			Scope:      requestedScope,
+			SessionID:  claimed.SessionID,
+			Connection: claimed.Connection,
 		}
 		s.mu.Unlock()
 	}

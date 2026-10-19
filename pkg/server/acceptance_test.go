@@ -500,7 +500,7 @@ func TestConcurrentInvitationRedemption(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-startGate
-				if _, err := f.srv.redeemInvitation(ticket, email, time.Now()); err == nil {
+				if _, _, err := f.srv.redeemInvitation(ticket, email, time.Now()); err == nil {
 					mu.Lock()
 					redeemed++
 					mu.Unlock()
@@ -724,7 +724,7 @@ func TestAcceptanceLeavesOrgRolesToTheAction(t *testing.T) {
 		TicketID: inv.GetTicketID(),
 		ClientID: f.clientID,
 	}
-	if _, err := f.srv.redeemInvitation(ticket, email, time.Now()); err != nil {
+	if _, _, err := f.srv.redeemInvitation(ticket, email, time.Now()); err != nil {
 		t.Fatalf("redeemInvitation: %v", err)
 	}
 

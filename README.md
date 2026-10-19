@@ -21,6 +21,8 @@ Full-featured OIDC provider mock with Auth0-compatible API for local development
 - Connections management (`/api/v2/connections`)
 - Clients CRUD (`/api/v2/clients`), including `initiate_login_uri`
 - User metadata updates (`/api/v2/users/:id`)
+- Passwordless user creation (`POST /api/v2/users`), lookup by email (`/api/v2/users-by-email`) and
+  identity linking (`POST /api/v2/users/:id/identities`)
 - Organization membership and member roles
 - Log streams (`/api/v2/log-streams`), with delivery of sign-in and token exchange events to `http` streams
 - Self-Service SSO profiles and tickets (`/api/v2/self-service-profiles`), with a setup page
@@ -406,6 +408,20 @@ three times. To deliver to a
 receiver behind a locally issued certificate, set `logStreamCAFile` in config, or
 `logStreamCA.secretName` in the chart. The file is read on each delivery, so it may appear or
 rotate after the mock starts; until it can be read, deliveries fail and are retried.
+
+### Users
+
+```bash
+POST /api/v2/users
+GET /api/v2/users-by-email?email=...
+POST /api/v2/users/:id/identities
+```
+
+Users are created on passwordless connections only, as `email|...` or `sms|...`. A sign-in through an
+enterprise connection (the `connection` authorize parameter) finds or provisions that connection's
+user, as `<strategy>|<connection>|...`. A passwordless sign-in prefers the user holding a
+passwordless identity for the address, so after a link it lands on the primary. Linking deletes the
+secondary user and its memberships. `link_with` is not implemented.
 
 ### Self-Service SSO
 

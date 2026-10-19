@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -642,8 +643,17 @@ func (s *Server) listConnections(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// name is a substring match and strategy may repeat, as Auth0 filters them.
+	names := r.URL.Query()["name"]
+	strategies := r.URL.Query()["strategy"]
 	all := make([]config.Connection, 0, len(s.connections))
 	for _, conn := range s.connections {
+		if len(names) > 0 && !slices.ContainsFunc(names, func(n string) bool { return strings.Contains(conn.Name, n) }) {
+			continue
+		}
+		if len(strategies) > 0 && !slices.Contains(strategies, conn.Strategy) {
+			continue
+		}
 		all = append(all, *conn.Clone())
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
@@ -672,6 +682,13 @@ func (s *Server) createConnection(w http.ResponseWriter, r *http.Request) {
 
 	stored := conn.Clone()
 	s.mu.Lock()
+	for _, c := range s.connections {
+		if c.Name == conn.Name {
+			s.mu.Unlock()
+			writeAuth0Error(w, http.StatusConflict, "A connection with the same name already exists")
+			return
+		}
+	}
 	s.connections[stored.ID] = stored
 	s.mu.Unlock()
 

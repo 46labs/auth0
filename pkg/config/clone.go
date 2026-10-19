@@ -116,7 +116,10 @@ func (u *User) Clone() *User {
 
 	if u.Identities != nil {
 		out.Identities = make([]UserIdentity, len(u.Identities))
-		copy(out.Identities, u.Identities)
+		for i, id := range u.Identities {
+			id.ProfileData = cloneAnyMap(id.ProfileData)
+			out.Identities[i] = id
+		}
 	}
 	if u.Organizations != nil {
 		out.Organizations = make([]string, len(u.Organizations))
@@ -125,6 +128,10 @@ func (u *User) Clone() *User {
 	if u.Blocked != nil {
 		blocked := *u.Blocked
 		out.Blocked = &blocked
+	}
+	if u.PhoneVerified != nil {
+		v := *u.PhoneVerified
+		out.PhoneVerified = &v
 	}
 	if u.LastLogin != nil {
 		lastLogin := *u.LastLogin

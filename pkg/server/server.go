@@ -29,6 +29,9 @@ type authCode struct {
 	ClientID      string
 	OrgID         string
 	ConnectionID  string
+	// Connection names the connection signed in through, which for a linked
+	// user need not be its main identity's.
+	Connection string
 	// Query is the /authorize request as sent, for Actions' event.request.query.
 	Query string
 	// SessionID names the login session this code belongs to: Actions see it
@@ -49,6 +52,8 @@ type refreshTokenState struct {
 	ClientID string
 	// SessionID is the login session the token was issued in.
 	SessionID string
+	// Connection is the connection the login went through.
+	Connection string
 	// Scope is the scope granted at login; a refresh re-issues it, as
 	// Auth0 does when the refresh request omits scope.
 	Scope string
@@ -219,8 +224,14 @@ func (s *Server) Handler() http.Handler {
 			s.handleUserOrganizations(w, r)
 			return
 		}
+		if strings.HasSuffix(r.URL.Path, "/identities") {
+			s.handleUserIdentities(w, r)
+			return
+		}
 		s.handleUser(w, r)
 	})
+	mux.HandleFunc("/api/v2/users", s.handleUsers)
+	mux.HandleFunc("/api/v2/users-by-email", s.handleUsersByEmail)
 	mux.HandleFunc("/api/v2/clients", s.handleClients)
 	mux.HandleFunc("/api/v2/client-grants", s.handleClientGrants)
 	mux.HandleFunc("/api/v2/clients/", s.handleClient)
@@ -285,57 +296,69 @@ func (s *Server) findUserLocked(identifier string) *config.User {
 	return nil
 }
 
-func (s *Server) autoCreateUser(identifier string) *config.User {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.autoCreateUserLocked(identifier)
+// passwordlessConnectionNameLocked names the tenant's connection for a
+// passwordless strategy: the one so named when it exists, else the only one
+// with the strategy, else the strategy itself. Caller holds the lock.
+func (s *Server) passwordlessConnectionNameLocked(strategy string) string {
+	name := ""
+	for _, c := range s.connections {
+		if c.Strategy != strategy {
+			continue
+		}
+		if c.Name == strategy {
+			return c.Name
+		}
+		if name == "" || c.Name < name {
+			name = c.Name
+		}
+	}
+	if name == "" {
+		return strategy
+	}
+	return name
 }
 
-// autoCreateUserLocked requires the caller to hold the write lock.
-func (s *Server) autoCreateUserLocked(identifier string) *config.User {
-	userID := "auth0|" + s.generateID()
-	userIDPart := userID[6:] // Extract part after "auth0|"
-
-	user := &config.User{
-		ID:            userID,
-		Name:          identifier,
-		EmailVerified: false,
-		AppMetadata:   config.AppMetadata{},
-		UserMetadata:  make(map[string]interface{}),
+// autoCreateUserLocked provisions a passwordless user for identifier on the
+// named connection, or on the default "email" or "sms" one when connName is
+// empty. Requires the caller to hold the write lock.
+func (s *Server) autoCreateUserLocked(identifier, connName string) *config.User {
+	isEmail := contact.IsEmail(identifier)
+	strategy := config.StrategySMS
+	if isEmail {
+		strategy = config.StrategyEmail
 	}
-
-	// Determine if email or phone based on format
-	if contact.IsEmail(identifier) {
-		user.Email = identifier
+	if connName == "" {
+		connName = s.passwordlessConnectionNameLocked(strategy)
+	}
+	// Auth0 names a passwordless user after its strategy: email|... or sms|...
+	userIDPart := s.generateID()
+	now := auth0Timestamp(time.Now())
+	user := &config.User{
+		ID:           strategy + "|" + userIDPart,
+		Name:         identifier,
+		AppMetadata:  config.AppMetadata{},
+		UserMetadata: make(map[string]interface{}),
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		Identities:   []config.UserIdentity{{Connection: connName, Provider: strategy, UserID: userIDPart}},
+	}
+	if isEmail {
+		// Auth0 stores the addresses it manages in lower case.
+		user.Email = strings.ToLower(identifier)
 		user.EmailVerified = true
-		user.Identities = []config.UserIdentity{
-			{
-				Connection: "email",
-				Provider:   "email",
-				UserID:     userIDPart,
-				IsSocial:   false,
-			},
-		}
 	} else {
-		// Phone number - normalize before storing
 		normalizedPhone, err := contact.NormalizePhoneToE164(identifier)
 		if err != nil {
 			log.Printf("Failed to normalize phone %s: %v", identifier, err)
-			normalizedPhone = identifier // Store as-is if normalization fails
+			normalizedPhone = identifier
 		}
 		user.Phone = normalizedPhone
-		user.Identities = []config.UserIdentity{
-			{
-				Connection: "sms",
-				Provider:   "sms",
-				UserID:     userIDPart,
-				IsSocial:   false,
-			},
-		}
+		verified := true
+		user.PhoneVerified = &verified
 	}
 
-	s.users[userID] = user.Clone()
-	log.Printf("Auto-created user: %s (%s)", userID, identifier)
+	s.users[user.ID] = user.Clone()
+	log.Printf("Auto-created user: %s (%s)", user.ID, identifier)
 	return user
 }
 
@@ -417,6 +440,9 @@ func (s *Server) updateUserMetadata(userID string, appMetadata *config.AppMetada
 
 	if blocked != nil {
 		user.Blocked = blocked
+	}
+	if user.CreatedAt != "" {
+		user.UpdatedAt = auth0Timestamp(time.Now())
 	}
 
 	return nil
