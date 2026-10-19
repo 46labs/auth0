@@ -8,6 +8,7 @@ import (
 	"net/mail"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -383,20 +384,57 @@ func (s *Server) enterpriseUserLocked(conn *config.Connection, email string) *co
 // address, so a linked user signs in as its primary. An enterprise connection
 // finds or provisions the user federated through it, as Auth0 does on a first
 // SSO sign-in; a phone number there falls back to the address lookup, since an
-// enterprise directory has none.
-func (s *Server) loginUser(identifier, connectionName string) (*config.User, string) {
+// enterprise directory has none. The connection actually used is checked for
+// clientID and orgID before anyone is found or provisioned, under the same
+// lock.
+func (s *Server) loginUser(identifier, connectionName, clientID, orgID string) (*config.User, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	allow := s.connectionAllowedLocked(clientID, orgID)
 	conn := s.connectionByNameLocked(connectionName)
-	if conn != nil && !conn.IsPasswordless() && contact.IsEmail(identifier) {
-		return s.enterpriseUserLocked(conn, identifier).Clone(), conn.Name
+	if connectionName != "" {
+		if conn == nil {
+			return nil, "", errConnectionUnknown
+		}
+		if err := allow(conn); err != nil {
+			return nil, "", err
+		}
 	}
-
 	if conn != nil && !conn.IsPasswordless() {
-		conn = nil
+		if contact.IsEmail(identifier) {
+			return s.enterpriseUserLocked(conn, identifier).Clone(), conn.Name, nil
+		}
+		// A phone through an enterprise connection keeps the mock's address
+		// lookup; the named connection is the one checked and reported.
+		u := s.findUserLocked(identifier)
+		if u == nil {
+			u = s.autoCreateUserLocked(identifier, "")
+		}
+		return u, conn.Name, nil
 	}
-	return s.passwordlessUserLocked(identifier, conn)
+	return s.passwordlessUserLocked(identifier, conn, allow)
+}
+
+// connectionAllowedLocked returns the check Auth0 applies to the connection a
+// sign-in uses: enabled for the calling client, when that client is
+// registered, and enabled on the organization, when one is named and exists.
+// Caller holds the lock.
+func (s *Server) connectionAllowedLocked(clientID, orgID string) func(*config.Connection) error {
+	return func(conn *config.Connection) error {
+		if conn == nil {
+			return nil
+		}
+		// The mock serves unregistered client ids, which have no enablement.
+		if _, registered := s.clients[clientID]; registered &&
+			!slices.Contains(conn.EnabledClients, "*") && !slices.Contains(conn.EnabledClients, clientID) {
+			return errConnectionNotForClient
+		}
+		if _, ok := s.organizations[orgID]; ok && !s.isConnectionEnabled(orgID, conn.ID) {
+			return errConnectionNotInOrg
+		}
+		return nil
+	}
 }
 
 // matchesIdentifier reports whether the user's identity i belongs to the
@@ -482,9 +520,10 @@ func (s *Server) connectionByName(name string) *config.Connection {
 }
 
 // passwordlessUserLocked resolves a passwordless sign-in for identifier,
-// through conn when one is named, and the connection it went through. Caller
-// holds the write lock.
-func (s *Server) passwordlessUserLocked(identifier string, conn *config.Connection) (*config.User, string) {
+// through conn when one is named, and the connection it went through. The
+// connection each candidate signs in through passes allow before the user is
+// returned or provisioned. Caller holds the write lock.
+func (s *Server) passwordlessUserLocked(identifier string, conn *config.Connection, allow func(*config.Connection) error) (*config.User, string, error) {
 	strategy := config.StrategySMS
 	if contact.IsEmail(identifier) {
 		strategy = config.StrategyEmail
@@ -494,28 +533,39 @@ func (s *Server) passwordlessUserLocked(identifier string, conn *config.Connecti
 	connName := ""
 	if conn != nil {
 		if conn.Strategy != strategy {
-			return nil, ""
+			return nil, "", errConnectionWrongIdentifier
 		}
 		connName = conn.Name
+	}
+	through := func(u *config.User, name string) (*config.User, string, error) {
+		if err := allow(s.connectionByNameLocked(name)); err != nil {
+			return nil, "", err
+		}
+		return u, name, nil
 	}
 	for _, u := range s.users {
 		for i, id := range u.Identities {
 			if id.Provider == strategy && (connName == "" || id.Connection == connName) && matchesIdentifier(u, i, identifier) {
-				return u.Clone(), id.Connection
+				return through(u.Clone(), id.Connection)
 			}
 		}
 	}
 	// Without a connection, any user with the address answers, as the mock
 	// always has. A configured user that lists no identities has no
 	// provenance to rule it out, so it answers a named connection too.
+	// Either way the code went through the passwordless connection for the
+	// identifier's strategy, so that is the one checked and reported.
+	if connName == "" {
+		connName = s.passwordlessConnectionNameLocked(strategy)
+	}
 	if u := s.findUserLocked(identifier); u != nil && (conn == nil || len(u.Identities) == 0) {
-		if len(u.Identities) > 0 {
-			return u, u.Identities[0].Connection
-		}
-		return u, connName
+		return through(u, connName)
+	}
+	if err := allow(s.connectionByNameLocked(connName)); err != nil {
+		return nil, "", err
 	}
 	u := s.autoCreateUserLocked(identifier, connName)
-	return u, u.Identities[0].Connection
+	return u, connName, nil
 }
 
 // withConnection returns params naming the connection signed in through, so

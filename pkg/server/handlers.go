@@ -270,9 +270,11 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 				user, resolved = redeemed, via
 				orgID = ticket.OrgID
 			} else {
-				user, resolved = s.loginUser(identifier, connectionID)
-				if user == nil {
-					http.Error(w, "Invalid code", 400)
+				// Refused before anyone is found or provisioned.
+				var err error
+				if user, resolved, err = s.loginUser(identifier, connectionID, params.Get("client_id"), orgID); err != nil {
+					s.emitLoginLog(r, logParams, "f", err.Error(), nil, identifier, orgID)
+					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
 

@@ -123,8 +123,12 @@ func (s *Server) authorizeOrgLoginLocked(user *config.User, orgID, connectionNam
 
 // Org-scoped login failures.
 var (
-	errOrgNotFound  = errors.New("the organization does not exist")
-	errOrgNotMember = errors.New("the user is not a member of the organization")
+	errConnectionUnknown         = errors.New("the connection does not exist")
+	errConnectionWrongIdentifier = errors.New("the connection does not send codes to this identifier")
+	errConnectionNotForClient    = errors.New("the connection is not enabled for this client")
+	errConnectionNotInOrg        = errors.New("the connection is not enabled for the organization")
+	errOrgNotFound               = errors.New("the organization does not exist")
+	errOrgNotMember              = errors.New("the user is not a member of the organization")
 )
 
 // authorizeOrgLogin is authorizeOrgLoginLocked with the lock taken.
@@ -211,19 +215,30 @@ func (s *Server) redeemInvitation(t invitationTicket, identifier string, now tim
 	// One the invitation does not pin is the one named at sign-in.
 	connID := inv.ConnectionID
 	if connID == "" && t.ConnectionName != "" {
-		connID = s.connectionIDByName(t.ConnectionName)
+		if connID = s.connectionIDByName(t.ConnectionName); connID == "" {
+			return nil, "", errConnectionUnknown
+		}
 	}
+	// Checked here, under the lock that spends the ticket.
+	allow := s.connectionAllowedLocked(t.ClientID, t.OrgID)
 	var via string
-	if conn, ok := s.connections[connID]; ok && !conn.IsPasswordless() {
+	conn, ok := s.connections[connID]
+	if ok && !conn.IsPasswordless() {
+		if err := allow(conn); err != nil {
+			return nil, "", err
+		}
 		user, via = s.enterpriseUserLocked(conn, inv.InviteeEmail), conn.Name
 	} else {
 		// A passwordless sign-in, resolved as any other code login is.
 		var named *config.Connection
-		if ok && conn.IsPasswordless() {
+		if ok {
 			named = conn
+			if err := allow(named); err != nil {
+				return nil, "", err
+			}
 		}
-		if user, via = s.passwordlessUserLocked(inv.InviteeEmail, named); user == nil {
-			return nil, "", errInvitationNotFound
+		if user, via, err = s.passwordlessUserLocked(inv.InviteeEmail, named, allow); err != nil {
+			return nil, "", err
 		}
 	}
 

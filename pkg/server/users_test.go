@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"slices"
 	"strings"
@@ -498,5 +499,163 @@ func TestSMSVerificationRoundTrips(t *testing.T) {
 	got, err := m.User.Read(ctx, primary.GetID())
 	if err != nil || (*got.Identities[1].ProfileData)["phone_verified"] != true {
 		t.Fatalf("after sms login = %+v, err %v", got.Identities, err)
+	}
+}
+
+// A named connection signs in only when it exists, is enabled for the calling
+// client, and is enabled on the organization, as Auth0 requires.
+func TestLoginRefusesAConnectionAuth0WouldRefuse(t *testing.T) {
+	srv, m, base := ssoMgmt(t)
+	ctx := context.Background()
+	// Registered, so its enablement is checked.
+	srv.mu.Lock()
+	srv.clients["test_client"] = &config.Client{ClientID: "test_client", Name: "spa"}
+	srv.mu.Unlock()
+
+	srv.mu.RLock()
+	before := len(srv.users)
+	srv.mu.RUnlock()
+	if tokens, _, msg := loginToOrgVia(t, base, "pat@acme.com", "", "openid", "no-such-connection"); tokens != nil || !strings.Contains(msg, "does not exist") {
+		t.Fatalf("unknown connection: tokens %v, %s", tokens, msg)
+	}
+
+	sso := &management.Connection{Name: auth0.String("acme-oidc"), Strategy: auth0.String("oidc")}
+	if err := m.Connection.Create(ctx, sso); err != nil {
+		t.Fatal(err)
+	}
+	if tokens, _, msg := loginToOrgVia(t, base, "pat@acme.com", "", "openid", "acme-oidc"); tokens != nil || !strings.Contains(msg, "not enabled for this client") {
+		t.Fatalf("not enabled for the client: tokens %v, %s", tokens, msg)
+	}
+	if err := m.Connection.UpdateEnabledClients(ctx, sso.GetID(), []management.ConnectionEnabledClient{
+		{ClientID: auth0.String("test_client"), Status: auth0.Bool(true)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if tokens, _, msg := loginToOrgVia(t, base, "pat@acme.com", "org_test", "openid", "acme-oidc"); tokens != nil || !strings.Contains(msg, "not enabled for the organization") {
+		t.Fatalf("not on the organization: tokens %v, %s", tokens, msg)
+	}
+	// No refused attempt provisioned anyone.
+	srv.mu.RLock()
+	after := len(srv.users)
+	srv.mu.RUnlock()
+	if after != before {
+		t.Fatalf("users %d -> %d across refused logins", before, after)
+	}
+
+	if err := m.Organization.AddConnection(ctx, "org_test", &management.OrganizationConnection{
+		ConnectionID: sso.ID, AssignMembershipOnLogin: auth0.Bool(true),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if tokens, status, msg := loginToOrgVia(t, base, "pat@acme.com", "org_test", "openid", "acme-oidc"); tokens == nil {
+		t.Fatalf("enabled everywhere: %d %s", status, msg)
+	}
+}
+
+// An invitation through a connection not enabled for its registered client
+// is refused before the ticket is spent.
+func TestInvitationRefusesAConnectionNotEnabledForTheClient(t *testing.T) {
+	f, cleanup := newInviteFixture(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if err := f.m.Connection.UpdateEnabledClients(ctx, f.connectionID, []management.ConnectionEnabledClient{
+		{ClientID: auth0.String(f.clientID), Status: auth0.Bool(false)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	inv := f.invitation("lee@example.test")
+	inv.ConnectionID = &f.connectionID
+	if err := f.m.Organization.CreateInvitation(ctx, f.orgID, inv); err != nil {
+		t.Fatal(err)
+	}
+	if tokens, _, body := followInvitation(t, f.ts.URL, inv.GetInvitationURL(), "lee@example.test", f.clientID); tokens != nil || !strings.Contains(body, "not enabled for this client") {
+		t.Fatalf("redeemed through a disabled connection: tokens %v, %s", tokens, body)
+	}
+	if _, err := f.m.Organization.Invitation(ctx, f.orgID, inv.GetID()); err != nil {
+		t.Fatalf("the refused attempt spent the invitation: %v", err)
+	}
+}
+
+// loginUser itself refuses a named connection that no longer exists, so a
+// delete between the caller's check and the lookup cannot fall back to a
+// passwordless sign-in.
+func TestLoginUserRefusesAVanishedConnection(t *testing.T) {
+	srv, _, _ := ssoMgmt(t)
+	if u, conn, err := srv.loginUser("pat@acme.com", "deleted-sso", "", ""); u != nil || !errors.Is(err, errConnectionUnknown) {
+		t.Fatalf("signed in %v through %q, err %v", u, conn, err)
+	}
+}
+
+// A sign-in naming no connection is checked on the connection it resolves
+// to, before anyone is provisioned.
+func TestUnnamedLoginChecksTheResolvedConnection(t *testing.T) {
+	srv, m, base := ssoMgmt(t)
+	ctx := context.Background()
+	srv.mu.Lock()
+	srv.clients["test_client"] = &config.Client{ClientID: "test_client", Name: "spa"}
+	n := len(srv.users)
+	srv.mu.Unlock()
+
+	// The seeded email connection allows every client ("*"); disabling one
+	// must take effect anyway.
+	if err := m.Connection.UpdateEnabledClients(ctx, "con_email", []management.ConnectionEnabledClient{
+		{ClientID: auth0.String("test_client"), Status: auth0.Bool(false)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clients, err := m.Connection.ReadEnabledClients(ctx, "con_email")
+	if err != nil || clients.Clients == nil || slices.ContainsFunc(*clients.Clients, func(c management.ConnectionEnabledClient) bool {
+		return c.GetClientID() == "test_client" || c.GetClientID() == "*"
+	}) {
+		t.Fatalf("enabled clients after disable = %+v, err %v", clients, err)
+	}
+
+	if tokens, _, msg := loginToOrgVia(t, base, "new@acme.com", "", "openid", ""); tokens != nil || !strings.Contains(msg, "not enabled for this client") {
+		t.Fatalf("unnamed login through a disabled connection: tokens %v, %s", tokens, msg)
+	}
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+	if len(srv.users) != n {
+		t.Fatalf("a refused login provisioned a user: %d -> %d", n, len(srv.users))
+	}
+}
+
+// An invitation naming a connection that does not exist is refused and not
+// spent, rather than redeemed as a passwordless sign-in.
+func TestInvitationRefusesAnUnknownNamedConnection(t *testing.T) {
+	f, cleanup := newInviteFixture(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	inv := f.invitation("lee@example.test")
+	if err := f.m.Organization.CreateInvitation(ctx, f.orgID, inv); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := f.srv.redeemInvitation(invitationTicket{OrgID: f.orgID, TicketID: inv.GetTicketID(), ClientID: f.clientID, ConnectionName: "gone"}, "lee@example.test", time.Now())
+	if !errors.Is(err, errConnectionUnknown) {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := f.m.Organization.Invitation(ctx, f.orgID, inv.GetID()); err != nil {
+		t.Fatalf("the refused redemption spent the invitation: %v", err)
+	}
+}
+
+// An email code for a user known only by an sms identity goes through the
+// email connection, which is the one checked.
+func TestProfileFallbackChecksTheCodesConnection(t *testing.T) {
+	srv, m, base := ssoMgmt(t)
+	ctx := context.Background()
+	srv.mu.Lock()
+	srv.clients["test_client"] = &config.Client{ClientID: "test_client", Name: "spa"}
+	srv.mu.Unlock()
+	if err := m.Connection.UpdateEnabledClients(ctx, "con_email", []management.ConnectionEnabledClient{
+		{ClientID: auth0.String("test_client"), Status: auth0.Bool(false)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// test_user_1 has the address test@example.test but only an sms identity.
+	if tokens, _, msg := loginToOrgVia(t, base, "test@example.test", "", "openid", ""); tokens != nil || !strings.Contains(msg, "not enabled for this client") {
+		t.Fatalf("email code through a disabled email connection: tokens %v, %s", tokens, msg)
 	}
 }

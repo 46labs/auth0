@@ -369,35 +369,42 @@ func (s *Server) createSSOTicket(w http.ResponseWriter, r *http.Request, profile
 		return
 	}
 
+	status, msg, ticketURL := s.storeSSOTicket(profileID, req)
+	if ticketURL == "" {
+		writeAuth0Error(w, status, msg)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]string{"ticket": ticketURL})
+}
+
+// storeSSOTicket validates and stores a ticket, answering a refusal or the
+// ticket's link. The response is written after the lock is released.
+func (s *Server) storeSSOTicket(profileID string, req ssoTicketRequest) (int, string, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	profile, ok := s.selfServiceProfiles[profileID]
 	if !ok {
-		profileNotFound(w, profileID)
-		return
+		return http.StatusNotFound, "Profile with ID: " + profileID + " not found", ""
 	}
 	if req.ConnectionID != nil {
 		conn, ok := s.connections[*req.ConnectionID]
 		if !ok {
-			writeAuth0Error(w, http.StatusNotFound, "connection not found")
-			return
+			return http.StatusNotFound, "connection not found", ""
 		}
 		if !slices.Contains(profile.AllowedStrategies, conn.Strategy) {
-			writeAuth0Error(w, http.StatusBadRequest, "connection strategy "+conn.Strategy+" is not allowed by the profile")
-			return
+			return http.StatusBadRequest, "connection strategy " + conn.Strategy + " is not allowed by the profile", ""
 		}
 	}
 	for _, c := range req.EnabledClients {
 		if _, ok := s.clients[c]; !ok {
-			writeAuth0Error(w, http.StatusBadRequest, "unknown client "+c)
-			return
+			return http.StatusBadRequest, "unknown client " + c, ""
 		}
 	}
 	for _, o := range req.EnabledOrganizations {
 		if _, ok := s.organizations[o.OrganizationID]; !ok {
-			writeAuth0Error(w, http.StatusBadRequest, "unknown organization "+o.OrganizationID)
-			return
+			return http.StatusBadRequest, "unknown organization " + o.OrganizationID, ""
 		}
 	}
 
@@ -414,8 +421,7 @@ func (s *Server) createSSOTicket(w http.ResponseWriter, r *http.Request, profile
 	t := &ssoTicket{ID: s.generateID(), ProfileID: profileID, Request: req, ExpiresAt: now.Add(ttl)}
 	s.ssoTickets[t.ID] = t
 
-	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(map[string]string{"ticket": s.ticketURL(t.ID)})
+	return http.StatusCreated, "", s.ticketURL(t.ID)
 }
 
 func (s *Server) ticketURL(id string) string {

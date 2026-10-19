@@ -599,6 +599,9 @@ func TestExistingUserAcceptsInvitationToSecondOrg(t *testing.T) {
 		&management.OrganizationConnection{ConnectionID: &f.connectionID}); err != nil {
 		t.Fatalf("Organization.AddConnection: %v", err)
 	}
+	// test_user_2 signs in with an email code, which Auth0 allows only
+	// through a connection enabled on the organization.
+	enablePasswordless(t, f.m, secondOrg.GetID())
 
 	const email = "email@example.test" // test_user_2
 	inviter := "Platform Admin"

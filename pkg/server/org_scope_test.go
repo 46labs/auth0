@@ -117,6 +117,7 @@ func TestOrgScopedLoginRequiresMembership(t *testing.T) {
 	if err := f.m.Organization.Create(ctx, otherOrg); err != nil {
 		t.Fatalf("Organization.Create: %v", err)
 	}
+	enablePasswordless(t, f.m, otherOrg.GetID())
 
 	t.Run("MemberIsAllowed", func(t *testing.T) {
 		// test_user_1 is a seeded member of org_test.
@@ -213,6 +214,7 @@ func TestLegacyRoleDoesNotLeakAcrossOrgs(t *testing.T) {
 	if err := f.m.Organization.Create(ctx, secondOrg); err != nil {
 		t.Fatalf("Organization.Create: %v", err)
 	}
+	enablePasswordless(t, f.m, secondOrg.GetID())
 	if err := f.m.Organization.AddMembers(ctx, secondOrg.GetID(), []string{"test_user_1"}); err != nil {
 		t.Fatalf("Organization.AddMembers: %v", err)
 	}
@@ -248,6 +250,7 @@ func TestRefreshTokenKeepsItsOrganization(t *testing.T) {
 	if err := f.m.Organization.Create(ctx, secondOrg); err != nil {
 		t.Fatalf("Organization.Create: %v", err)
 	}
+	enablePasswordless(t, f.m, secondOrg.GetID())
 	if err := f.m.Organization.AddMembers(ctx, secondOrg.GetID(), []string{"test_user_1"}); err != nil {
 		t.Fatalf("Organization.AddMembers: %v", err)
 	}
@@ -441,4 +444,18 @@ func TestPostLoginActionUsesSelectedOrg(t *testing.T) {
 // decodeJSON unmarshals a token response body.
 func decodeJSON(data []byte, v any) error {
 	return json.Unmarshal(data, v)
+}
+
+// enablePasswordless enables the seeded sms and email connections on an
+// organization, without auto-membership, so its members can sign in with a
+// code: Auth0 signs in only through connections enabled on the organization.
+func enablePasswordless(t *testing.T, m *management.Management, orgID string) {
+	t.Helper()
+	for _, id := range []string{"con_sms", "con_email"} {
+		if err := m.Organization.AddConnection(context.Background(), orgID, &management.OrganizationConnection{
+			ConnectionID: &id, AssignMembershipOnLogin: new(bool),
+		}); err != nil {
+			t.Fatalf("Organization.AddConnection %s: %v", id, err)
+		}
+	}
 }
