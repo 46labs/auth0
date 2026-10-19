@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"maps"
 	"reflect"
 )
 
@@ -187,6 +188,7 @@ func (c *Client) Clone() *Client {
 	}
 	out := *c
 	out.JWTConfig = cloneAnyMap(c.JWTConfig)
+	out.ClientMetadata = maps.Clone(c.ClientMetadata)
 
 	if c.Callbacks != nil {
 		out.Callbacks = make([]string, len(c.Callbacks))

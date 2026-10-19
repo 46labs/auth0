@@ -68,6 +68,7 @@ type Server struct {
 	refreshTokens map[string]*refreshTokenState
 
 	actions *actionStore
+	teps    *tokenExchangeProfiles
 
 	users         map[string]*config.User
 	organizations map[string]*config.Organization
@@ -145,6 +146,7 @@ func New(cfg *config.Config) (*Server, error) {
 		pending:        make(map[string]string),
 		authCodes:      make(map[string]*authCode),
 		actions:        newActionStore(),
+		teps:           &tokenExchangeProfiles{profiles: map[string]*tokenExchangeProfile{}},
 		refreshTokens:  make(map[string]*refreshTokenState),
 		users:          users,
 		organizations:  organizations,
@@ -242,6 +244,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v2/self-service-profiles/", s.handleSelfServiceProfile)
 	mux.HandleFunc("/self-service/connections-flow", s.handleConnectionsFlow)
 	s.registerActionsAPI(mux)
+	s.registerTokenExchangeProfiles(mux)
 
 	return mux
 }

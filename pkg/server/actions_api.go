@@ -53,9 +53,9 @@ func (s *Server) json(fn func(*http.Request) (int, any, error)) http.HandlerFunc
 
 func actionErrStatus(err error) (int, string) {
 	switch {
-	case errors.Is(err, errActionNotFound):
+	case errors.Is(err, errActionNotFound), errors.Is(err, errProfileNotFound):
 		return http.StatusNotFound, "Not Found"
-	case errors.Is(err, errActionNameTaken), errors.Is(err, errActionBound):
+	case errors.Is(err, errActionNameTaken), errors.Is(err, errActionBound), errors.Is(err, errProfileConflict):
 		return http.StatusConflict, "Conflict"
 	default:
 		return http.StatusBadRequest, "Bad Request"
@@ -157,9 +157,26 @@ func (s *Server) updateAction(r *http.Request) (int, any, error) {
 	return http.StatusOK, a, err
 }
 
+// deleteAction treats a token exchange profile as the action's binding: it
+// refuses, or with force removes the profile too. Profiles lock first, as
+// their create does.
 func (s *Server) deleteAction(r *http.Request) (int, any, error) {
 	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
-	return http.StatusNoContent, nil, s.actions.remove(r.PathValue("id"), force)
+	id := r.PathValue("id")
+	s.teps.mu.Lock()
+	defer s.teps.mu.Unlock()
+	if s.teps.usesActionLocked(id) && !force {
+		return 0, nil, errActionBound
+	}
+	if err := s.actions.remove(id, force); err != nil {
+		return 0, nil, err
+	}
+	for pid, p := range s.teps.profiles {
+		if p.ActionID == id {
+			delete(s.teps.profiles, pid)
+		}
+	}
+	return http.StatusNoContent, nil, nil
 }
 
 func (s *Server) listBindings(r *http.Request) (int, any, error) {
