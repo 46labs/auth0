@@ -126,7 +126,7 @@ func TestConcurrentLoginFlows(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			// Distinct identifiers force autoCreateUser writes to s.users
+			// Distinct identifiers force autoCreateUserLocked writes to s.users
 			// concurrently with the login-state writes.
 			runLogin(t, ts.URL, "concurrent+"+string(rune('a'+n%26))+"@example.test")
 		}(i)

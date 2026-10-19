@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -642,8 +643,17 @@ func (s *Server) listConnections(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// name is a substring match and strategy may repeat, as Auth0 filters them.
+	names := r.URL.Query()["name"]
+	strategies := r.URL.Query()["strategy"]
 	all := make([]config.Connection, 0, len(s.connections))
 	for _, conn := range s.connections {
+		if len(names) > 0 && !slices.ContainsFunc(names, func(n string) bool { return strings.Contains(conn.Name, n) }) {
+			continue
+		}
+		if len(strategies) > 0 && !slices.Contains(strategies, conn.Strategy) {
+			continue
+		}
 		all = append(all, *conn.Clone())
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
@@ -672,6 +682,11 @@ func (s *Server) createConnection(w http.ResponseWriter, r *http.Request) {
 
 	stored := conn.Clone()
 	s.mu.Lock()
+	if s.connectionByNameLocked(conn.Name) != nil {
+		s.mu.Unlock()
+		writeAuth0Error(w, http.StatusConflict, "A connection with the same name already exists")
+		return
+	}
 	s.connections[stored.ID] = stored
 	s.mu.Unlock()
 
@@ -892,21 +907,20 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, userID strin
 		return
 	}
 
-	// Remove user from all organizations
-	for orgID, members := range s.members {
-		filtered := []config.OrganizationMember{}
-		for _, member := range members {
-			if member.UserID != userID {
-				filtered = append(filtered, member)
-			}
-		}
-		s.members[orgID] = filtered
-	}
+	s.removeMembershipsLocked(userID)
 
 	// Delete the user
 	delete(s.users, userID)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// removeMembershipsLocked requires the write lock. It builds new slices: a
+// reader may still range over one it took under the read lock.
+func (s *Server) removeMembershipsLocked(userID string) {
+	for orgID, members := range s.members {
+		s.members[orgID] = slices.DeleteFunc(slices.Clone(members), func(m config.OrganizationMember) bool { return m.UserID == userID })
+	}
 }
 
 func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {

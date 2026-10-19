@@ -29,6 +29,8 @@ type authCode struct {
 	ClientID      string
 	OrgID         string
 	ConnectionID  string
+	// Connection is the one signed in through.
+	Connection string
 	// Query is the /authorize request as sent, for Actions' event.request.query.
 	Query string
 	// SessionID names the login session this code belongs to: Actions see it
@@ -49,6 +51,8 @@ type refreshTokenState struct {
 	ClientID string
 	// SessionID is the login session the token was issued in.
 	SessionID string
+	// Connection is the one signed in through.
+	Connection string
 	// Scope is the scope granted at login; a refresh re-issues it, as
 	// Auth0 does when the refresh request omits scope.
 	Scope string
@@ -76,6 +80,10 @@ type Server struct {
 	orgConnections map[string][]config.OrganizationConnection
 	// keyed by org id, in creation order
 	invitations map[string][]config.OrganizationInvitation
+
+	selfServiceProfiles map[string]*selfServiceProfile
+	// keyed by ticket id
+	ssoTickets map[string]*ssoTicket
 
 	logStreams        map[string]*logStream
 	logDeliveryClient *http.Client
@@ -148,6 +156,9 @@ func New(cfg *config.Config) (*Server, error) {
 		orgConnections: orgConnections,
 		invitations:    make(map[string][]config.OrganizationInvitation),
 
+		selfServiceProfiles: make(map[string]*selfServiceProfile),
+		ssoTickets:          make(map[string]*ssoTicket),
+
 		logStreams:        make(map[string]*logStream),
 		logDeliveryClient: logDeliveryClient(),
 		logRetryBackoff:   defaultLogStreamBackoff,
@@ -212,8 +223,14 @@ func (s *Server) Handler() http.Handler {
 			s.handleUserOrganizations(w, r)
 			return
 		}
+		if strings.HasSuffix(r.URL.Path, "/identities") {
+			s.handleUserIdentities(w, r)
+			return
+		}
 		s.handleUser(w, r)
 	})
+	mux.HandleFunc("/api/v2/users", s.handleUsers)
+	mux.HandleFunc("/api/v2/users-by-email", s.handleUsersByEmail)
 	mux.HandleFunc("/api/v2/clients", s.handleClients)
 	mux.HandleFunc("/api/v2/client-grants", s.handleClientGrants)
 	mux.HandleFunc("/api/v2/clients/", s.handleClient)
@@ -221,6 +238,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v2/roles/", s.handleRole)
 	mux.HandleFunc("/api/v2/log-streams", s.handleLogStreams)
 	mux.HandleFunc("/api/v2/log-streams/", s.handleLogStream)
+	mux.HandleFunc("/api/v2/self-service-profiles", s.handleSelfServiceProfiles)
+	mux.HandleFunc("/api/v2/self-service-profiles/", s.handleSelfServiceProfile)
+	mux.HandleFunc("/self-service/connections-flow", s.handleConnectionsFlow)
 	s.registerActionsAPI(mux)
 
 	return mux
@@ -275,57 +295,66 @@ func (s *Server) findUserLocked(identifier string) *config.User {
 	return nil
 }
 
-func (s *Server) autoCreateUser(identifier string) *config.User {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.autoCreateUserLocked(identifier)
+// passwordlessConnectionNameLocked names the tenant's connection for the
+// strategy, preferring one named after it. Caller holds the lock.
+func (s *Server) passwordlessConnectionNameLocked(strategy string) string {
+	name := ""
+	for _, c := range s.connections {
+		if c.Strategy != strategy {
+			continue
+		}
+		if c.Name == strategy {
+			return c.Name
+		}
+		if name == "" || c.Name < name {
+			name = c.Name
+		}
+	}
+	if name == "" {
+		return strategy
+	}
+	return name
 }
 
-// autoCreateUserLocked requires the caller to hold the write lock.
-func (s *Server) autoCreateUserLocked(identifier string) *config.User {
-	userID := "auth0|" + s.generateID()
-	userIDPart := userID[6:] // Extract part after "auth0|"
-
-	user := &config.User{
-		ID:            userID,
-		Name:          identifier,
-		EmailVerified: false,
-		AppMetadata:   config.AppMetadata{},
-		UserMetadata:  make(map[string]interface{}),
+// autoCreateUserLocked provisions a passwordless user on connName, or the
+// strategy's connection when empty. Caller holds the write lock.
+func (s *Server) autoCreateUserLocked(identifier, connName string) *config.User {
+	isEmail := contact.IsEmail(identifier)
+	strategy := config.StrategySMS
+	if isEmail {
+		strategy = config.StrategyEmail
 	}
-
-	// Determine if email or phone based on format
-	if contact.IsEmail(identifier) {
-		user.Email = identifier
+	if connName == "" {
+		connName = s.passwordlessConnectionNameLocked(strategy)
+	}
+	userIDPart := s.generateID()
+	now := auth0Timestamp(time.Now())
+	user := &config.User{
+		ID:           strategy + "|" + userIDPart,
+		Name:         identifier,
+		AppMetadata:  config.AppMetadata{},
+		UserMetadata: make(map[string]interface{}),
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		Identities:   []config.UserIdentity{{Connection: connName, Provider: strategy, UserID: userIDPart}},
+	}
+	if isEmail {
+		// Auth0 stores the addresses it manages in lower case.
+		user.Email = strings.ToLower(identifier)
 		user.EmailVerified = true
-		user.Identities = []config.UserIdentity{
-			{
-				Connection: "email",
-				Provider:   "email",
-				UserID:     userIDPart,
-				IsSocial:   false,
-			},
-		}
 	} else {
-		// Phone number - normalize before storing
 		normalizedPhone, err := contact.NormalizePhoneToE164(identifier)
 		if err != nil {
 			log.Printf("Failed to normalize phone %s: %v", identifier, err)
-			normalizedPhone = identifier // Store as-is if normalization fails
+			normalizedPhone = identifier
 		}
 		user.Phone = normalizedPhone
-		user.Identities = []config.UserIdentity{
-			{
-				Connection: "sms",
-				Provider:   "sms",
-				UserID:     userIDPart,
-				IsSocial:   false,
-			},
-		}
+		verified := true
+		user.PhoneVerified = &verified
 	}
 
-	s.users[userID] = user.Clone()
-	log.Printf("Auto-created user: %s (%s)", userID, identifier)
+	s.users[user.ID] = user.Clone()
+	log.Printf("Auto-created user: %s (%s)", user.ID, identifier)
 	return user
 }
 
@@ -407,6 +436,9 @@ func (s *Server) updateUserMetadata(userID string, appMetadata *config.AppMetada
 
 	if blocked != nil {
 		user.Blocked = blocked
+	}
+	if user.CreatedAt != "" {
+		user.UpdatedAt = auth0Timestamp(time.Now())
 	}
 
 	return nil

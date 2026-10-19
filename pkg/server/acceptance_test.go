@@ -500,7 +500,7 @@ func TestConcurrentInvitationRedemption(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-startGate
-				if _, err := f.srv.redeemInvitation(ticket, email, time.Now()); err == nil {
+				if _, _, err := f.srv.redeemInvitation(ticket, email, time.Now()); err == nil {
 					mu.Lock()
 					redeemed++
 					mu.Unlock()
@@ -599,6 +599,9 @@ func TestExistingUserAcceptsInvitationToSecondOrg(t *testing.T) {
 		&management.OrganizationConnection{ConnectionID: &f.connectionID}); err != nil {
 		t.Fatalf("Organization.AddConnection: %v", err)
 	}
+	// test_user_2 signs in with an email code, which Auth0 allows only
+	// through a connection enabled on the organization.
+	enablePasswordless(t, f.m, secondOrg.GetID())
 
 	const email = "email@example.test" // test_user_2
 	inviter := "Platform Admin"
@@ -724,7 +727,7 @@ func TestAcceptanceLeavesOrgRolesToTheAction(t *testing.T) {
 		TicketID: inv.GetTicketID(),
 		ClientID: f.clientID,
 	}
-	if _, err := f.srv.redeemInvitation(ticket, email, time.Now()); err != nil {
+	if _, _, err := f.srv.redeemInvitation(ticket, email, time.Now()); err != nil {
 		t.Fatalf("redeemInvitation: %v", err)
 	}
 

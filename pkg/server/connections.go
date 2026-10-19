@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -330,6 +331,15 @@ func (s *Server) updateConnectionClients(w http.ResponseWriter, r *http.Request,
 			writeAuth0Error(w, http.StatusBadRequest, "unknown client "+c.ClientID)
 			return
 		}
+	}
+	// A wildcard cannot exclude one client, so it expands first.
+	if slices.Contains(conn.EnabledClients, "*") && slices.ContainsFunc(patch, func(c connectionClient) bool { return !*c.Status }) {
+		expanded := make([]string, 0, len(s.clients))
+		for id := range s.clients {
+			expanded = append(expanded, id)
+		}
+		sort.Strings(expanded)
+		conn.EnabledClients = expanded
 	}
 	for _, c := range patch {
 		conn.EnabledClients = setClientEnabled(conn.EnabledClients, c.ClientID, *c.Status)

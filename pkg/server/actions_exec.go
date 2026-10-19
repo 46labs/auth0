@@ -46,16 +46,19 @@ type postLoginRequest struct {
 	LoginHint   string
 	// SessionID is the login session, the same across refreshes of it.
 	SessionID string
+	// Connection is the one signed in through.
+	Connection string
 }
 
 // postLogin runs the declarative claims block and then every deployed
 // post-login Action. It answers the token request itself when an Action
 // denies or fails, and reports whether the caller may go on to issue tokens.
-func (s *Server) postLogin(w http.ResponseWriter, r *http.Request, user *config.User, clientID, orgID, authorizeQuery, protocol, sessionID string, idClaims, accessClaims jwt.MapClaims) bool {
+func (s *Server) postLogin(w http.ResponseWriter, r *http.Request, user *config.User, clientID, orgID, authorizeQuery, protocol, sessionID, connection string, idClaims, accessClaims jwt.MapClaims) bool {
 	client := s.lookupClient(clientID)
 	s.applyPostLogin(user, client, orgID, idClaims, accessClaims)
 	req := requestFromToken(r, authorizeQuery, protocol)
 	req.SessionID = sessionID
+	req.Connection = connection
 	for _, b := range s.actions.listBindings(TriggerPostLogin) {
 		if b.Action.DeployedVersion == nil {
 			continue // bound but not deployed: Auth0 skips it too
@@ -333,7 +336,10 @@ func (s *Server) buildEvent(a *Action, b *ActionBinding, user *config.User, clie
 		}
 	}
 	ev["connection"] = map[string]any{"id": "", "name": "", "strategy": ""}
-	if len(user.Identities) > 0 {
+	// For a linked user, not necessarily its main identity's.
+	if conn := s.connectionByName(req.Connection); conn != nil {
+		ev["connection"] = map[string]any{"id": conn.ID, "name": conn.Name, "strategy": conn.Strategy}
+	} else if len(user.Identities) > 0 {
 		ev["connection"] = map[string]any{"id": "con_" + user.Identities[0].Connection, "name": user.Identities[0].Connection, "strategy": user.Identities[0].Provider}
 	}
 	ev["request"] = map[string]any{
