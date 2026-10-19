@@ -77,6 +77,10 @@ type Server struct {
 	// keyed by org id, in creation order
 	invitations map[string][]config.OrganizationInvitation
 
+	selfServiceProfiles map[string]*selfServiceProfile
+	// keyed by ticket id
+	ssoTickets map[string]*ssoTicket
+
 	logStreams        map[string]*logStream
 	logDeliveryClient *http.Client
 	logRetryBackoff   time.Duration
@@ -147,6 +151,9 @@ func New(cfg *config.Config) (*Server, error) {
 		roles:          roles,
 		orgConnections: orgConnections,
 		invitations:    make(map[string][]config.OrganizationInvitation),
+
+		selfServiceProfiles: make(map[string]*selfServiceProfile),
+		ssoTickets:          make(map[string]*ssoTicket),
 
 		logStreams:        make(map[string]*logStream),
 		logDeliveryClient: logDeliveryClient(),
@@ -221,6 +228,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v2/roles/", s.handleRole)
 	mux.HandleFunc("/api/v2/log-streams", s.handleLogStreams)
 	mux.HandleFunc("/api/v2/log-streams/", s.handleLogStream)
+	mux.HandleFunc("/api/v2/self-service-profiles", s.handleSelfServiceProfiles)
+	mux.HandleFunc("/api/v2/self-service-profiles/", s.handleSelfServiceProfile)
+	mux.HandleFunc("/self-service/connections-flow", s.handleConnectionsFlow)
 	s.registerActionsAPI(mux)
 
 	return mux

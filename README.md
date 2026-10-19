@@ -23,6 +23,7 @@ Full-featured OIDC provider mock with Auth0-compatible API for local development
 - User metadata updates (`/api/v2/users/:id`)
 - Organization membership and member roles
 - Log streams (`/api/v2/log-streams`), with delivery of sign-in and token exchange events to `http` streams
+- Self-Service SSO profiles and tickets (`/api/v2/self-service-profiles`), with a setup page
 - Page-based pagination (`page`, `per_page`) on every list endpoint
 
 ### Organization login
@@ -405,6 +406,21 @@ three times. To deliver to a
 receiver behind a locally issued certificate, set `logStreamCAFile` in config, or
 `logStreamCA.secretName` in the chart. The file is read on each delivery, so it may appear or
 rotate after the mock starts; until it can be read, deliveries fail and are retried.
+
+### Self-Service SSO
+
+```bash
+GET|POST /api/v2/self-service-profiles
+GET|PATCH|DELETE /api/v2/self-service-profiles/:id
+POST /api/v2/self-service-profiles/:id/sso-ticket
+POST /api/v2/self-service-profiles/:id/sso-ticket/:ticket/revoke
+GET|POST /self-service/connections-flow?ticket=...
+```
+
+A ticket names either `connection_config` (create a connection) or `connection_id` (edit one). Its
+link opens a form for the strategy, display name and email domains. Finishing it creates or edits
+the connection, enables it for the ticket's clients and organizations, and spends the ticket. Every
+domain is treated as verified. Ticket fields the mock cannot apply are refused with 400.
 
 ## OIDC Endpoints
 
