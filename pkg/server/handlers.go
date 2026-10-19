@@ -257,7 +257,6 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			var user *config.User
 			orgID := params.Get("organization")
 			connectionID := params.Get("connection")
-			// The connection signed in through, as resolved below.
 			var resolved string
 
 			if ticket, ok := ticketFromQuery(params); ok {
@@ -270,7 +269,6 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 				user, resolved = redeemed, via
 				orgID = ticket.OrgID
 			} else {
-				// Refused before anyone is found or provisioned.
 				var err error
 				if user, resolved, err = s.loginUser(identifier, connectionID, params.Get("client_id"), orgID); err != nil {
 					s.emitLoginLog(r, logParams, "f", err.Error(), nil, identifier, orgID)

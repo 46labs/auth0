@@ -16,24 +16,20 @@ import (
 	"github.com/46labs/auth0/pkg/config"
 )
 
-// selfServiceStrategies are the strategies the SDK documents in a profile's
-// allowed_strategies.
+// selfServiceStrategies are those the SDK documents for allowed_strategies.
 var selfServiceStrategies = []string{"oidc", "samlp", "waad", "google-apps", "adfs", "okta", "keycloak-samlp"}
 
-// domainVerificationModes are the values of domain_aliases_config.domain_verification.
 var domainVerificationModes = []string{"none", "optional", "required"}
 
-// defaultTicketTTL is Auth0's ttl_sec default, five days.
+// defaultTicketTTL is Auth0's ttl_sec default.
 const defaultTicketTTL = 5 * 24 * time.Hour
 
-// profileUserAttribute is one entry of a profile's user_attributes.
 type profileUserAttribute struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	IsOptional  bool   `json:"is_optional"`
 }
 
-// profileBranding is a profile's branding: a logo and a primary color.
 type profileBranding struct {
 	LogoURL string `json:"logo_url,omitempty"`
 	Colors  *struct {
@@ -53,7 +49,6 @@ func (b *profileBranding) Clone() *profileBranding {
 	return &out
 }
 
-// selfServiceProfile is a Self-Service SSO profile, in Auth0's wire shape.
 type selfServiceProfile struct {
 	ID                     string                 `json:"id"`
 	Name                   string                 `json:"name"`
@@ -74,9 +69,7 @@ func (p *selfServiceProfile) Clone() *selfServiceProfile {
 	return &out
 }
 
-// selfServiceProfileBody is the create and update request. Every field the
-// profile holds, so DisallowUnknownFields refuses only what the mock cannot
-// keep.
+// selfServiceProfileBody holds every field a profile stores; others are refused.
 type selfServiceProfileBody struct {
 	Name                   *string                `json:"name"`
 	Description            *string                `json:"description"`
@@ -86,9 +79,7 @@ type selfServiceProfileBody struct {
 	UserAttributeProfileID *string                `json:"user_attribute_profile_id"`
 }
 
-// ssoTicketRequest is POST /self-service-profiles/{id}/sso-ticket. Fields the
-// mock cannot carry through to the connection it creates are absent, so the
-// decoder refuses them instead of dropping them.
+// ssoTicketRequest omits what the mock cannot apply, so the decoder refuses it.
 type ssoTicketRequest struct {
 	ConnectionID     *string `json:"connection_id"`
 	ConnectionConfig *struct {
@@ -111,7 +102,6 @@ type ssoTicketRequest struct {
 	} `json:"domain_aliases_config"`
 }
 
-// ssoTicket is an issued guided-setup link and what completing it applies.
 type ssoTicket struct {
 	ID        string
 	ProfileID string
@@ -136,8 +126,8 @@ func (s *Server) handleSelfServiceProfiles(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-// handleSelfServiceProfile serves a profile by id and its sso-ticket
-// subresource. Any other path 404s rather than falling through to the profile.
+// handleSelfServiceProfile serves a profile and its sso-ticket subresource;
+// any other path 404s.
 func (s *Server) handleSelfServiceProfile(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w, r)
 	w.Header().Set("Content-Type", "application/json")
@@ -171,9 +161,7 @@ func (s *Server) handleSelfServiceProfile(w http.ResponseWriter, r *http.Request
 	writeAuth0Error(w, http.StatusNotFound, "route not implemented by the auth0 mock: "+r.URL.Path)
 }
 
-func profileNotFound(w http.ResponseWriter, id string) {
-	writeAuth0Error(w, http.StatusNotFound, "Profile with ID: "+id+" not found")
-}
+func profileNotFound(id string) string { return "Profile with ID: " + id + " not found" }
 
 func (s *Server) listSelfServiceProfiles(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
@@ -192,14 +180,13 @@ func (s *Server) listSelfServiceProfiles(w http.ResponseWriter, r *http.Request)
 		_ = json.NewEncoder(w).Encode(page)
 		return
 	}
-	// No length: the recorded envelope has none (TestSelfServiceProfileManager_List.yaml).
+	// No length, as recorded (TestSelfServiceProfileManager_List.yaml).
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"self_service_profiles": page, "start": window.Start, "limit": window.Limit, "total": window.Total,
 	})
 }
 
-// decodeProfileBody decodes a profile write, refusing fields the mock cannot
-// hold and values Auth0 refuses.
+// decodeProfileBody decodes a profile write, refusing what Auth0 refuses.
 func decodeProfileBody(w http.ResponseWriter, r *http.Request) (*selfServiceProfileBody, bool) {
 	var body selfServiceProfileBody
 	dec := json.NewDecoder(r.Body)
@@ -222,12 +209,13 @@ func decodeProfileBody(w http.ResponseWriter, r *http.Request) (*selfServiceProf
 			return nil, false
 		}
 	}
-	if b := body.Branding; b != nil && b.LogoURL != "" && !strings.HasPrefix(b.LogoURL, "https://") {
-		writeAuth0Error(w, http.StatusBadRequest, "branding.logo_url must be an https URL")
-		return nil, false
-	}
+	// By presence, as the SDK refuses it; validate also checks the result.
 	if len(body.UserAttributes) > 0 && body.UserAttributeProfileID != nil {
 		writeAuth0Error(w, http.StatusBadRequest, "only one of user_attributes or user_attribute_profile_id can be set")
+		return nil, false
+	}
+	if b := body.Branding; b != nil && b.LogoURL != "" && !strings.HasPrefix(b.LogoURL, "https://") {
+		writeAuth0Error(w, http.StatusBadRequest, "branding.logo_url must be an https URL")
 		return nil, false
 	}
 	return &body, true
@@ -254,6 +242,17 @@ func (p *selfServiceProfile) apply(b *selfServiceProfileBody) {
 	}
 }
 
+// validate refuses a profile Auth0 would not store.
+func (p *selfServiceProfile) validate() string {
+	if p.Name == "" {
+		return "name is required"
+	}
+	if len(p.UserAttributes) > 0 && p.UserAttributeProfileID != "" {
+		return "only one of user_attributes or user_attribute_profile_id can be set"
+	}
+	return ""
+}
+
 func auth0Timestamp(t time.Time) string {
 	return t.UTC().Format("2006-01-02T15:04:05.000Z")
 }
@@ -263,13 +262,13 @@ func (s *Server) createSelfServiceProfile(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	if body.Name == nil || *body.Name == "" {
-		writeAuth0Error(w, http.StatusBadRequest, "name is required")
-		return
-	}
 	now := auth0Timestamp(time.Now())
 	p := &selfServiceProfile{ID: "ssp_" + s.generateID(), UserAttributes: []profileUserAttribute{}, CreatedAt: now, UpdatedAt: now}
 	p.apply(body)
+	if err := p.validate(); err != "" {
+		writeAuth0Error(w, http.StatusBadRequest, err)
+		return
+	}
 
 	s.mu.Lock()
 	s.selfServiceProfiles[p.ID] = p
@@ -289,7 +288,7 @@ func (s *Server) getSelfServiceProfile(w http.ResponseWriter, id string) {
 	}
 	s.mu.RUnlock()
 	if !ok {
-		profileNotFound(w, id)
+		writeAuth0Error(w, http.StatusNotFound, profileNotFound(id))
 		return
 	}
 	_ = json.NewEncoder(w).Encode(out)
@@ -304,31 +303,25 @@ func (s *Server) updateSelfServiceProfile(w http.ResponseWriter, r *http.Request
 	p, ok := s.selfServiceProfiles[id]
 	if !ok {
 		s.mu.Unlock()
-		profileNotFound(w, id)
-		return
-	}
-	if body.Name != nil && *body.Name == "" {
-		s.mu.Unlock()
-		writeAuth0Error(w, http.StatusBadRequest, "name must not be empty")
+		writeAuth0Error(w, http.StatusNotFound, profileNotFound(id))
 		return
 	}
 	next := p.Clone()
 	next.apply(body)
-	if len(next.UserAttributes) > 0 && next.UserAttributeProfileID != "" {
+	if err := next.validate(); err != "" {
 		s.mu.Unlock()
-		writeAuth0Error(w, http.StatusBadRequest, "only one of user_attributes or user_attribute_profile_id can be set")
+		writeAuth0Error(w, http.StatusBadRequest, err)
 		return
 	}
 	next.UpdatedAt = auth0Timestamp(time.Now())
 	s.selfServiceProfiles[id] = next
-	p = next
-	out := p.Clone()
+	out := next.Clone()
 	s.mu.Unlock()
 	_ = json.NewEncoder(w).Encode(out)
 }
 
-// deleteSelfServiceProfile answers 204 whether or not the profile existed, as
-// the recorded repeat delete does (TestSelfServiceProfileManager_Delete.yaml).
+// deleteSelfServiceProfile answers 204 even when absent, as recorded
+// (TestSelfServiceProfileManager_Delete.yaml).
 func (s *Server) deleteSelfServiceProfile(w http.ResponseWriter, id string) {
 	s.mu.Lock()
 	delete(s.selfServiceProfiles, id)
@@ -341,8 +334,7 @@ func (s *Server) deleteSelfServiceProfile(w http.ResponseWriter, id string) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// createSSOTicket issues a guided-setup link. It validates what completing the
-// setup would need now, so a ticket that could never complete is refused.
+// createSSOTicket refuses a ticket that could never complete.
 func (s *Server) createSSOTicket(w http.ResponseWriter, r *http.Request, profileID string) {
 	var req ssoTicketRequest
 	dec := json.NewDecoder(r.Body)
@@ -378,15 +370,15 @@ func (s *Server) createSSOTicket(w http.ResponseWriter, r *http.Request, profile
 	_ = json.NewEncoder(w).Encode(map[string]string{"ticket": ticketURL})
 }
 
-// storeSSOTicket validates and stores a ticket, answering a refusal or the
-// ticket's link. The response is written after the lock is released.
+// storeSSOTicket answers a refusal or the ticket's link, so the caller writes
+// the response after the lock is released.
 func (s *Server) storeSSOTicket(profileID string, req ssoTicketRequest) (int, string, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	profile, ok := s.selfServiceProfiles[profileID]
 	if !ok {
-		return http.StatusNotFound, "Profile with ID: " + profileID + " not found", ""
+		return http.StatusNotFound, profileNotFound(profileID), ""
 	}
 	if req.ConnectionID != nil {
 		conn, ok := s.connections[*req.ConnectionID]
@@ -397,15 +389,8 @@ func (s *Server) storeSSOTicket(profileID string, req ssoTicketRequest) (int, st
 			return http.StatusBadRequest, "connection strategy " + conn.Strategy + " is not allowed by the profile", ""
 		}
 	}
-	for _, c := range req.EnabledClients {
-		if _, ok := s.clients[c]; !ok {
-			return http.StatusBadRequest, "unknown client " + c, ""
-		}
-	}
-	for _, o := range req.EnabledOrganizations {
-		if _, ok := s.organizations[o.OrganizationID]; !ok {
-			return http.StatusBadRequest, "unknown organization " + o.OrganizationID, ""
-		}
+	if err := s.ticketTargetsLocked(req); err != "" {
+		return http.StatusBadRequest, err, ""
 	}
 
 	ttl := defaultTicketTTL
@@ -424,11 +409,27 @@ func (s *Server) storeSSOTicket(profileID string, req ssoTicketRequest) (int, st
 	return http.StatusCreated, "", s.ticketURL(t.ID)
 }
 
+// ticketTargetsLocked refuses clients or organizations that do not exist.
+// Caller holds the lock.
+func (s *Server) ticketTargetsLocked(req ssoTicketRequest) string {
+	for _, c := range req.EnabledClients {
+		if _, ok := s.clients[c]; !ok {
+			return "unknown client " + c
+		}
+	}
+	for _, o := range req.EnabledOrganizations {
+		if _, ok := s.organizations[o.OrganizationID]; !ok {
+			return "unknown organization " + o.OrganizationID
+		}
+	}
+	return ""
+}
+
 func (s *Server) ticketURL(id string) string {
 	return strings.TrimRight(s.cfg.Issuer, "/") + "/self-service/connections-flow?ticket=" + url.QueryEscape(id)
 }
 
-// revokeSSOTicket answers 202, as Auth0 documents, and is idempotent.
+// revokeSSOTicket answers 202, as Auth0 documents.
 func (s *Server) revokeSSOTicket(w http.ResponseWriter, profileID, ticketID string) {
 	s.mu.Lock()
 	if t, ok := s.ssoTickets[ticketID]; ok && t.ProfileID == profileID {
@@ -466,9 +467,8 @@ type connectionsFlowView struct {
 	Domains     string
 }
 
-// handleConnectionsFlow is the browser page a ticket opens. GET shows the
-// setup form; POST creates or edits the connection, enables it for the
-// ticket's clients and organizations, and spends the ticket.
+// handleConnectionsFlow is the page a ticket opens: GET shows the form, POST
+// creates or edits the connection, enables it and spends the ticket.
 func (s *Server) handleConnectionsFlow(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -478,8 +478,8 @@ func (s *Server) handleConnectionsFlow(w http.ResponseWriter, r *http.Request) {
 
 	var view connectionsFlowView
 	status := http.StatusOK
-	// Read the body before taking the lock, so a slow client cannot hold it.
-	formErr := error(nil)
+	// Read before taking the lock, so a slow client cannot hold it.
+	var formErr error
 	if r.Method == http.MethodPost {
 		formErr = r.ParseForm()
 	}
@@ -522,20 +522,13 @@ func (s *Server) handleConnectionsFlow(w http.ResponseWriter, r *http.Request) {
 			status, view.Error = http.StatusBadRequest, "Could not read the form."
 			return
 		}
-		// Everything the ticket names is checked again before anything is
-		// written: it may have been deleted during the ticket's lifetime.
-		for _, c := range t.Request.EnabledClients {
-			if _, ok := s.clients[c]; !ok {
-				status, view.Error = http.StatusBadRequest, "The application "+c+" no longer exists."
-				return
-			}
+		// Rechecked: what the ticket names may have gone since it was issued.
+		if err := s.ticketTargetsLocked(t.Request); err != "" {
+			status, view.Error = http.StatusBadRequest, err
+			return
 		}
 		pairings := make([]config.OrganizationConnection, 0, len(t.Request.EnabledOrganizations))
 		for _, o := range t.Request.EnabledOrganizations {
-			if _, ok := s.organizations[o.OrganizationID]; !ok {
-				status, view.Error = http.StatusBadRequest, "The organization "+o.OrganizationID+" no longer exists."
-				return
-			}
 			connID := ""
 			if conn != nil {
 				connID = conn.ID
@@ -554,11 +547,9 @@ func (s *Server) handleConnectionsFlow(w http.ResponseWriter, r *http.Request) {
 				status, view.Error = http.StatusBadRequest, "That identity provider is not allowed."
 				return
 			}
-			for _, c := range s.connections {
-				if c.Name == view.Name {
-					status, view.Error = http.StatusConflict, "A connection named "+view.Name+" already exists."
-					return
-				}
+			if s.connectionByNameLocked(view.Name) != nil {
+				status, view.Error = http.StatusConflict, "A connection named "+view.Name+" already exists."
+				return
 			}
 			conn = &config.Connection{ID: "con_" + s.generateID(), Name: view.Name, DisplayName: view.DisplayName, Strategy: strategy, Options: map[string]any{}}
 			if cc := t.Request.ConnectionConfig; cc.IsDomainConnection != nil {
@@ -573,7 +564,7 @@ func (s *Server) handleConnectionsFlow(w http.ResponseWriter, r *http.Request) {
 			conn.Options = map[string]any{}
 		}
 		if len(domains) > 0 {
-			// []any, the shape a JSON-decoded connection holds, so clones copy it.
+			// []any, as JSON decodes it, so clones copy it.
 			aliases := make([]any, len(domains))
 			for i, d := range domains {
 				aliases[i] = d
@@ -608,9 +599,8 @@ func (s *Server) handleConnectionsFlow(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(buf.Bytes())
 }
 
-// ticketPairingLocked returns the pairing a ticket leaves between the
-// organization and the connection: the existing one updated, or a new one.
-// connID is empty for a connection not yet created. Caller holds the lock.
+// ticketPairingLocked returns the existing pairing updated, or a new one when
+// connID is empty or unpaired. Caller holds the lock.
 func (s *Server) ticketPairingLocked(orgID, connID string, assign, show *bool) config.OrganizationConnection {
 	oc := config.OrganizationConnection{OrgID: orgID, ConnectionID: connID, ShowAsButton: true}
 	if connID != "" {
@@ -629,8 +619,7 @@ func (s *Server) ticketPairingLocked(orgID, connID string, assign, show *bool) c
 	return oc
 }
 
-// putOrgConnectionLocked stores a pairing, replacing one for the same
-// connection. Caller holds the lock.
+// putOrgConnectionLocked stores or replaces a pairing. Caller holds the lock.
 func (s *Server) putOrgConnectionLocked(oc config.OrganizationConnection) {
 	pairings := s.orgConnections[oc.OrgID]
 	if i := slices.IndexFunc(pairings, func(p config.OrganizationConnection) bool { return p.ConnectionID == oc.ConnectionID }); i >= 0 {
@@ -641,19 +630,21 @@ func (s *Server) putOrgConnectionLocked(oc config.OrganizationConnection) {
 	s.orgConnections[oc.OrgID] = pairings
 }
 
+// connectionDomainAliases reads []string from Go config and []any from JSON.
 func connectionDomainAliases(c *config.Connection) []string {
-	var out []string
 	switch v := c.Options["domain_aliases"].(type) {
 	case []string:
-		out = v
+		return v
 	case []any:
+		out := make([]string, 0, len(v))
 		for _, d := range v {
 			if str, ok := d.(string); ok {
 				out = append(out, str)
 			}
 		}
+		return out
 	}
-	return out
+	return nil
 }
 
 func splitDomains(raw string) []string {

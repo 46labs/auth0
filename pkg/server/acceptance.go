@@ -141,10 +141,8 @@ func (s *Server) authorizeOrgLogin(user *config.User, orgID, connectionName stri
 // connectionIDByName resolves the `connection` authorize parameter, which
 // Auth0 expresses as a name, to the stored id. Caller holds the lock.
 func (s *Server) connectionIDByName(name string) string {
-	for _, c := range s.connections {
-		if c.Name == name {
-			return c.ID
-		}
+	if c := s.connectionByNameLocked(name); c != nil {
+		return c.ID
 	}
 	return ""
 }
@@ -209,10 +207,7 @@ func (s *Server) redeemInvitation(t invitationTicket, identifier string, now tim
 		}
 	}
 
-	// An invitation through an enterprise connection is that connection's
-	// user, so a later SSO sign-in finds the same account.
 	var user *config.User
-	// One the invitation does not pin is the one named at sign-in.
 	connID := inv.ConnectionID
 	if connID == "" && t.ConnectionName != "" {
 		if connID = s.connectionIDByName(t.ConnectionName); connID == "" {
@@ -229,7 +224,6 @@ func (s *Server) redeemInvitation(t invitationTicket, identifier string, now tim
 		}
 		user, via = s.enterpriseUserLocked(conn, inv.InviteeEmail), conn.Name
 	} else {
-		// A passwordless sign-in, resolved as any other code login is.
 		var named *config.Connection
 		if ok {
 			named = conn

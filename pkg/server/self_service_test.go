@@ -14,6 +14,8 @@ import (
 
 	"github.com/auth0/go-auth0"
 	"github.com/auth0/go-auth0/management"
+
+	"github.com/46labs/auth0/pkg/config"
 )
 
 func ssoMgmt(t *testing.T) (*Server, *management.Management, string) {
@@ -200,10 +202,7 @@ func TestSSOTicketEditsAnExistingConnection(t *testing.T) {
 	ctx := context.Background()
 	p := createProfile(t, m)
 
-	conn := &management.Connection{Name: auth0.String("acme-oidc"), Strategy: auth0.String("oidc")}
-	if err := m.Connection.Create(ctx, conn); err != nil {
-		t.Fatal(err)
-	}
+	conn := ssoConnection(t, m)
 	tk := newConnectionTicket()
 	tk.ConnectionConfig = nil
 	tk.ConnectionID = conn.ID
@@ -386,10 +385,7 @@ func TestSSOTicketFlowRefusesAnInvalidPairing(t *testing.T) {
 	ctx := context.Background()
 	p := createProfile(t, m)
 
-	conn := &management.Connection{Name: auth0.String("acme-oidc"), Strategy: auth0.String("oidc")}
-	if err := m.Connection.Create(ctx, conn); err != nil {
-		t.Fatal(err)
-	}
+	conn := ssoConnection(t, m)
 	if err := m.Organization.AddConnection(ctx, "org_test", &management.OrganizationConnection{
 		ConnectionID: conn.ID, AssignMembershipOnLogin: auth0.Bool(true), IsSignupEnabled: auth0.Bool(true),
 	}); err != nil {
@@ -480,5 +476,43 @@ func TestSSOTicketStoreDropsFinishedTickets(t *testing.T) {
 	srv.mu.RUnlock()
 	if n != 1 {
 		t.Fatalf("tickets stored = %d, want only %s", n, live)
+	}
+}
+
+// Sent together, the two attribute sources are refused even when the id is
+// empty, as the SDK refuses them.
+func TestSelfServiceProfileRefusesBothAttributeSources(t *testing.T) {
+	_, m, _ := ssoMgmt(t)
+	body := map[string]any{
+		"name":                      "x",
+		"user_attributes":           []any{map[string]any{"name": "email", "description": "Email", "is_optional": false}},
+		"user_attribute_profile_id": "",
+	}
+	wantStatus(t, m.Request(context.Background(), http.MethodPost, m.URI("self-service-profiles"), body), http.StatusBadRequest)
+}
+
+// A connection configured in Go holds domain_aliases as []string; editing it
+// through a ticket keeps them.
+func TestSSOTicketEditKeepsConfiguredStringAliases(t *testing.T) {
+	srv, m, _ := ssoMgmt(t)
+	ctx := context.Background()
+	p := createProfile(t, m)
+	srv.mu.Lock()
+	srv.connections["con_cfg"] = &config.Connection{ID: "con_cfg", Name: "cfg-oidc", Strategy: "oidc", Options: map[string]any{"domain_aliases": []string{"acme.com"}}}
+	srv.mu.Unlock()
+
+	tk := newConnectionTicket()
+	tk.ConnectionConfig, tk.ConnectionID = nil, auth0.String("con_cfg")
+	if err := m.SelfServiceProfile.CreateTicket(ctx, p.GetID(), tk); err != nil {
+		t.Fatal(err)
+	}
+	page, err := http.Get(tk.GetTicket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(page.Body)
+	_ = page.Body.Close()
+	if !strings.Contains(string(body), `value="acme.com"`) {
+		t.Fatalf("setup page does not show the configured domains: %s", body)
 	}
 }

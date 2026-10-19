@@ -46,7 +46,7 @@ type postLoginRequest struct {
 	LoginHint   string
 	// SessionID is the login session, the same across refreshes of it.
 	SessionID string
-	// Connection is the connection the login went through.
+	// Connection is the one signed in through.
 	Connection string
 }
 
@@ -336,8 +336,7 @@ func (s *Server) buildEvent(a *Action, b *ActionBinding, user *config.User, clie
 		}
 	}
 	ev["connection"] = map[string]any{"id": "", "name": "", "strategy": ""}
-	// The connection signed in through, which for a linked user need not be
-	// its main identity's.
+	// For a linked user, not necessarily its main identity's.
 	if conn := s.connectionByName(req.Connection); conn != nil {
 		ev["connection"] = map[string]any{"id": conn.ID, "name": conn.Name, "strategy": conn.Strategy}
 	} else if len(user.Identities) > 0 {

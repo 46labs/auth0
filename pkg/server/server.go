@@ -29,8 +29,7 @@ type authCode struct {
 	ClientID      string
 	OrgID         string
 	ConnectionID  string
-	// Connection names the connection signed in through, which for a linked
-	// user need not be its main identity's.
+	// Connection is the one signed in through.
 	Connection string
 	// Query is the /authorize request as sent, for Actions' event.request.query.
 	Query string
@@ -52,7 +51,7 @@ type refreshTokenState struct {
 	ClientID string
 	// SessionID is the login session the token was issued in.
 	SessionID string
-	// Connection is the connection the login went through.
+	// Connection is the one signed in through.
 	Connection string
 	// Scope is the scope granted at login; a refresh re-issues it, as
 	// Auth0 does when the refresh request omits scope.
@@ -296,9 +295,8 @@ func (s *Server) findUserLocked(identifier string) *config.User {
 	return nil
 }
 
-// passwordlessConnectionNameLocked names the tenant's connection for a
-// passwordless strategy: the one so named when it exists, else the only one
-// with the strategy, else the strategy itself. Caller holds the lock.
+// passwordlessConnectionNameLocked names the tenant's connection for the
+// strategy, preferring one named after it. Caller holds the lock.
 func (s *Server) passwordlessConnectionNameLocked(strategy string) string {
 	name := ""
 	for _, c := range s.connections {
@@ -318,9 +316,8 @@ func (s *Server) passwordlessConnectionNameLocked(strategy string) string {
 	return name
 }
 
-// autoCreateUserLocked provisions a passwordless user for identifier on the
-// named connection, or on the default "email" or "sms" one when connName is
-// empty. Requires the caller to hold the write lock.
+// autoCreateUserLocked provisions a passwordless user on connName, or the
+// strategy's connection when empty. Caller holds the write lock.
 func (s *Server) autoCreateUserLocked(identifier, connName string) *config.User {
 	isEmail := contact.IsEmail(identifier)
 	strategy := config.StrategySMS
@@ -330,7 +327,6 @@ func (s *Server) autoCreateUserLocked(identifier, connName string) *config.User 
 	if connName == "" {
 		connName = s.passwordlessConnectionNameLocked(strategy)
 	}
-	// Auth0 names a passwordless user after its strategy: email|... or sms|...
 	userIDPart := s.generateID()
 	now := auth0Timestamp(time.Now())
 	user := &config.User{

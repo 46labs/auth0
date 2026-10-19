@@ -332,8 +332,7 @@ func (s *Server) updateConnectionClients(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	}
-	// A wildcard cannot exclude one client, so disabling one expands it to
-	// every registered client first.
+	// A wildcard cannot exclude one client, so it expands first.
 	if slices.Contains(conn.EnabledClients, "*") && slices.ContainsFunc(patch, func(c connectionClient) bool { return !*c.Status }) {
 		expanded := make([]string, 0, len(s.clients))
 		for id := range s.clients {

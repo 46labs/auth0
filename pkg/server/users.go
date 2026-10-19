@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"encoding/json"
 	"log"
 	"maps"
@@ -16,9 +17,8 @@ import (
 	"github.com/46labs/auth0/pkg/contact"
 )
 
-// handleUsers serves POST /api/v2/users. Only passwordless users can be
-// created: the mock has no database connections and enterprise users arrive
-// by signing in.
+// handleUsers serves POST /api/v2/users, for passwordless users only:
+// enterprise users arrive by signing in.
 func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w, r)
 	w.Header().Set("Content-Type", "application/json")
@@ -32,8 +32,7 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// createUserRequest holds every field the mock can store. Anything else is
-// refused rather than dropped.
+// createUserRequest holds every field the mock stores; others are refused.
 type createUserRequest struct {
 	Connection    string             `json:"connection"`
 	Email         string             `json:"email"`
@@ -69,19 +68,13 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(user)
 }
 
-// storeNewUser validates and stores a created user, answering the status and
-// message of a refusal, or the stored user's copy. The response is written
-// after the lock is released.
+// storeNewUser answers a refusal or the stored user, so the caller writes the
+// response after the lock is released.
 func (s *Server) storeNewUser(req createUserRequest) (int, string, *config.User) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var conn *config.Connection
-	for _, c := range s.connections {
-		if c.Name == req.Connection {
-			conn = c
-		}
-	}
+	conn := s.connectionByNameLocked(req.Connection)
 	if conn == nil {
 		return http.StatusBadRequest, "The connection does not exist.", nil
 	}
@@ -89,17 +82,17 @@ func (s *Server) storeNewUser(req createUserRequest) (int, string, *config.User)
 		return http.StatusBadRequest, "the auth0 mock creates users only on passwordless connections", nil
 	}
 
-	id := s.generateID()
+	id, now := s.generateID(), auth0Timestamp(time.Now())
 	user := &config.User{
 		ID:           conn.Strategy + "|" + id,
 		Name:         req.Name,
 		AppMetadata:  req.AppMetadata,
 		UserMetadata: req.UserMetadata,
 		Blocked:      req.Blocked,
+		CreatedAt:    now,
+		UpdatedAt:    now,
 		Identities:   []config.UserIdentity{{Connection: conn.Name, Provider: conn.Strategy, UserID: id}},
 	}
-	user.CreatedAt = auth0Timestamp(time.Now())
-	user.UpdatedAt = user.CreatedAt
 	switch conn.Strategy {
 	case config.StrategyEmail:
 		if req.PhoneNumber != "" {
@@ -119,9 +112,7 @@ func (s *Server) storeNewUser(req createUserRequest) (int, string, *config.User)
 		}
 		user.Email = strings.ToLower(req.Email)
 	}
-	if user.Name == "" {
-		user.Name = firstNonEmpty(user.Email, user.Phone)
-	}
+	user.Name = cmp.Or(user.Name, user.Email, user.Phone)
 	if req.EmailVerified != nil {
 		user.EmailVerified = *req.EmailVerified
 	}
@@ -132,12 +123,11 @@ func (s *Server) storeNewUser(req createUserRequest) (int, string, *config.User)
 		v := *req.PhoneVerified
 		user.PhoneVerified = &v
 	}
-	// An sms user always reports phone_verified, false until a code proves it.
+	// False until a code proves the number.
 	if conn.Strategy == config.StrategySMS && user.PhoneVerified == nil {
 		user.PhoneVerified = new(bool)
 	}
 	if req.VerifyEmail != nil && *req.VerifyEmail {
-		// The mock never sends email; accepted and logged, as invitations are.
 		log.Printf("verify_email requested for %s; the auth0 mock sends no email", user.Email)
 	}
 	// Keyed by the identifier the connection sends codes to.
@@ -153,32 +143,23 @@ func (s *Server) storeNewUser(req createUserRequest) (int, string, *config.User)
 	return http.StatusCreated, "", user
 }
 
-// e164 is the phone format Auth0 requires on user creation.
 var e164 = regexp.MustCompile(`^\+[1-9][0-9]{1,14}$`)
 
-// validEmail reports a bare address, as Auth0's payload validation requires.
 func validEmail(raw string) bool {
 	a, err := mail.ParseAddress(raw)
 	return err == nil && a.Address == raw
 }
 
-// userInConnectionLocked returns the user holding an identity in the named
-// connection for this address, including one a link carried over. Caller
-// holds the lock.
+// userInConnectionLocked returns the user with an identity in the connection
+// for this address. Caller holds the lock.
 func (s *Server) userInConnectionLocked(connection, email, phone string) *config.User {
 	for _, u := range s.users {
 		for i, id := range u.Identities {
 			if id.Connection != connection {
 				continue
 			}
-			// The main identity is the user's live profile; a linked one
-			// keeps the profile it carried over.
-			uEmail, uPhone := u.Email, u.Phone
-			if i > 0 && id.ProfileData != nil {
-				uEmail, _ = id.ProfileData["email"].(string)
-				uPhone, _ = id.ProfileData["phone_number"].(string)
-			}
-			if (email != "" && strings.EqualFold(uEmail, email)) || (phone != "" && uPhone == phone) {
+			idEmail, idPhone := identityContact(u, i)
+			if (email != "" && strings.EqualFold(idEmail, email)) || (phone != "" && idPhone == phone) {
 				return u
 			}
 		}
@@ -186,18 +167,19 @@ func (s *Server) userInConnectionLocked(connection, email, phone string) *config
 	return nil
 }
 
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
+// identityContact is identity i's address: the user's own for the main
+// identity, the profile a link carried over for the others.
+func identityContact(u *config.User, i int) (email, phone string) {
+	if p := u.Identities[i].ProfileData; i > 0 && p != nil {
+		email, _ = p["email"].(string)
+		phone, _ = p["phone_number"].(string)
+		return email, phone
 	}
-	return ""
+	return u.Email, u.Phone
 }
 
-// handleUsersByEmail serves GET /api/v2/users-by-email: every user with the
-// address, as a bare array. The match is exact, as Auth0's is: it lowercases
-// the addresses it manages when storing them, not when searching.
+// handleUsersByEmail serves GET /api/v2/users-by-email. The match is exact:
+// Auth0 lowercases the addresses it manages on store, not on search.
 func (s *Server) handleUsersByEmail(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w, r)
 	w.Header().Set("Content-Type", "application/json")
@@ -225,9 +207,8 @@ func (s *Server) handleUsersByEmail(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
-// handleUserIdentities serves POST /api/v2/users/{id}/identities: link the
-// user named by provider and user_id into the primary. Auth0 deletes the
-// secondary user and keeps only the primary's metadata.
+// handleUserIdentities serves POST /api/v2/users/{id}/identities. Auth0
+// deletes the linked user and keeps only the primary's metadata.
 func (s *Server) handleUserIdentities(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w, r)
 	w.Header().Set("Content-Type", "application/json")
@@ -259,8 +240,7 @@ func (s *Server) handleUserIdentities(w http.ResponseWriter, r *http.Request) {
 		writeAuth0Error(w, http.StatusBadRequest, "Payload validation error: provider and user_id are required")
 		return
 	}
-	// Both the identity's own id and the full user id name the user to link,
-	// as the SDK's own Link test passes the latter.
+	// The SDK's own Link test passes the full user id, not the identity's.
 	identityID := strings.TrimPrefix(req.UserID, req.Provider+"|")
 
 	status, msg, ids := s.linkUser(primaryID, req.Provider, identityID, req.ConnectionID)
@@ -272,9 +252,8 @@ func (s *Server) handleUserIdentities(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(ids)
 }
 
-// linkUser moves the secondary's identities onto the primary and deletes the
-// secondary, answering a refusal or the primary's identities. The response is
-// written after the lock is released.
+// linkUser answers a refusal or the primary's identities, so the caller writes
+// the response after the lock is released.
 func (s *Server) linkUser(primaryID, provider, identityID, connectionID string) (int, string, []config.UserIdentity) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -283,7 +262,7 @@ func (s *Server) linkUser(primaryID, provider, identityID, connectionID string) 
 	if !ok {
 		return http.StatusNotFound, "The user does not exist.", nil
 	}
-	// Found by its main identity, which a configured user's id need not spell.
+	// By its main identity: a configured user's id need not spell it.
 	var secondary *config.User
 	for _, u := range s.users {
 		if len(u.Identities) > 0 && u.Identities[0].Provider == provider && u.Identities[0].UserID == identityID {
@@ -293,8 +272,7 @@ func (s *Server) linkUser(primaryID, provider, identityID, connectionID string) 
 	if secondary == nil {
 		return http.StatusBadRequest, "The user to link does not exist.", nil
 	}
-	// Linking needs the primary's own identity at index 0, which the lookups
-	// read as its live profile.
+	// Index 0 must be the primary's own identity; see identityContact.
 	if len(primary.Identities) == 0 {
 		return http.StatusBadRequest, "the auth0 mock cannot link into a user with no identities", nil
 	}
@@ -309,13 +287,9 @@ func (s *Server) linkUser(primaryID, provider, identityID, connectionID string) 
 		}
 	}
 
+	// Auth0 puts profileData on every identity; the primary's is refreshed.
+	primary.Identities[0].ProfileData = userProfile(primary)
 	profile := userProfile(secondary)
-	// Auth0 answers with profileData on every identity, the primary's own too.
-	// The main identity's is rebuilt each time, so a profile change since
-	// the last link shows.
-	if len(primary.Identities) > 0 {
-		primary.Identities[0].ProfileData = userProfile(primary)
-	}
 	for _, id := range secondary.Identities {
 		if id.ProfileData == nil {
 			id.ProfileData = profile
@@ -324,20 +298,11 @@ func (s *Server) linkUser(primaryID, provider, identityID, connectionID string) 
 	}
 
 	delete(s.users, secondaryID)
-	for orgID, ms := range s.members {
-		kept := ms[:0]
-		for _, m := range ms {
-			if m.UserID != secondaryID {
-				kept = append(kept, m)
-			}
-		}
-		s.members[orgID] = kept
-	}
+	s.removeMembershipsLocked(secondaryID)
 
 	return http.StatusCreated, "", primary.Clone().Identities
 }
 
-// userProfile is the profileData Auth0 records for a linked identity.
 func userProfile(u *config.User) map[string]any {
 	p := map[string]any{}
 	if u.Email != "" {
@@ -356,37 +321,29 @@ func userProfile(u *config.User) map[string]any {
 	return p
 }
 
-// enterpriseUserLocked returns the user federated through the enterprise
-// connection for the address, provisioning it as Auth0 does on a first SSO
-// sign-in. Caller holds the write lock.
+// enterpriseUserLocked finds or provisions the connection's user for the
+// address, as a first SSO sign-in does. Caller holds the write lock.
 func (s *Server) enterpriseUserLocked(conn *config.Connection, email string) *config.User {
 	if u := s.userInConnectionLocked(conn.Name, email, ""); u != nil {
 		return u
 	}
-	sub := conn.Name + "|" + s.generateID()
+	sub, now := conn.Name+"|"+s.generateID(), auth0Timestamp(time.Now())
 	u := &config.User{
 		ID: conn.Strategy + "|" + sub,
-		// Kept as typed: an enterprise IdP, not Auth0, owns its casing.
+		// As typed: the IdP, not Auth0, owns its casing.
 		Email:         email,
 		Name:          email,
 		EmailVerified: true,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 		Identities:    []config.UserIdentity{{Connection: conn.Name, Provider: conn.Strategy, UserID: sub}},
 	}
-	u.CreatedAt = auth0Timestamp(time.Now())
-	u.UpdatedAt = u.CreatedAt
 	s.users[u.ID] = u
 	return u
 }
 
-// loginUser resolves who signs in with identifier through the named
-// connection, and the connection the sign-in went through. A passwordless or
-// unnamed connection prefers the user holding a passwordless identity for the
-// address, so a linked user signs in as its primary. An enterprise connection
-// finds or provisions the user federated through it, as Auth0 does on a first
-// SSO sign-in; a phone number there falls back to the address lookup, since an
-// enterprise directory has none. The connection actually used is checked for
-// clientID and orgID before anyone is found or provisioned, under the same
-// lock.
+// loginUser resolves who signs in and the connection actually used, which is
+// checked for the client and organization before anyone is provisioned.
 func (s *Server) loginUser(identifier, connectionName, clientID, orgID string) (*config.User, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -405,8 +362,7 @@ func (s *Server) loginUser(identifier, connectionName, clientID, orgID string) (
 		if contact.IsEmail(identifier) {
 			return s.enterpriseUserLocked(conn, identifier).Clone(), conn.Name, nil
 		}
-		// A phone through an enterprise connection keeps the mock's address
-		// lookup; the named connection is the one checked and reported.
+		// A directory has no phones; the mock keeps its address lookup.
 		u := s.findUserLocked(identifier)
 		if u == nil {
 			u = s.autoCreateUserLocked(identifier, "")
@@ -416,16 +372,13 @@ func (s *Server) loginUser(identifier, connectionName, clientID, orgID string) (
 	return s.passwordlessUserLocked(identifier, conn, allow)
 }
 
-// connectionAllowedLocked returns the check Auth0 applies to the connection a
-// sign-in uses: enabled for the calling client, when that client is
-// registered, and enabled on the organization, when one is named and exists.
-// Caller holds the lock.
+// connectionAllowedLocked checks a sign-in's connection is enabled for the
+// client, when registered, and on the organization. Caller holds the lock.
 func (s *Server) connectionAllowedLocked(clientID, orgID string) func(*config.Connection) error {
 	return func(conn *config.Connection) error {
 		if conn == nil {
 			return nil
 		}
-		// The mock serves unregistered client ids, which have no enablement.
 		if _, registered := s.clients[clientID]; registered &&
 			!slices.Contains(conn.EnabledClients, "*") && !slices.Contains(conn.EnabledClients, clientID) {
 			return errConnectionNotForClient
@@ -437,16 +390,9 @@ func (s *Server) connectionAllowedLocked(clientID, orgID string) func(*config.Co
 	}
 }
 
-// matchesIdentifier reports whether the user's identity i belongs to the
-// address: the user's own for the main identity, else the profile a link
-// carried over.
 func matchesIdentifier(u *config.User, i int, identifier string) bool {
-	if id := u.Identities[i]; i > 0 && id.ProfileData != nil {
-		email, _ := id.ProfileData["email"].(string)
-		phone, _ := id.ProfileData["phone_number"].(string)
-		return strings.EqualFold(email, identifier) || samePhone(phone, identifier)
-	}
-	return strings.EqualFold(u.Email, identifier) || samePhone(u.Phone, identifier)
+	email, phone := identityContact(u, i)
+	return strings.EqualFold(email, identifier) || samePhone(phone, identifier)
 }
 
 func samePhone(a, b string) bool {
@@ -458,9 +404,8 @@ func samePhone(a, b string) bool {
 	return errA == nil && errB == nil && na == nb
 }
 
-// recordLoginLocked counts a successful sign-in through the named connection.
-// A passwordless code proves the address: the user's own when it is the user's
-// main identity, else the linked identity's profile. Caller holds the lock.
+// recordLoginLocked counts a sign-in; a passwordless code also verifies the
+// identity it went through. Caller holds the lock.
 func (s *Server) recordLoginLocked(userID, identifier, connectionName string) {
 	u, ok := s.users[userID]
 	if !ok {
@@ -473,28 +418,23 @@ func (s *Server) recordLoginLocked(userID, identifier, connectionName string) {
 		return
 	}
 	for i, id := range u.Identities {
-		if id.Connection != connectionName {
+		if id.Connection != connectionName || !matchesIdentifier(u, i, identifier) {
 			continue
+		}
+		key := "email_verified"
+		if id.Provider == config.StrategySMS {
+			key = "phone_verified"
 		}
 		switch {
 		case i > 0 && id.ProfileData != nil:
-			if id.Provider == config.StrategyEmail {
-				if email, _ := id.ProfileData["email"].(string); strings.EqualFold(email, identifier) {
-					id.ProfileData["email_verified"] = true
-					return
-				}
-			} else if phone, _ := id.ProfileData["phone_number"].(string); id.Provider == config.StrategySMS && samePhone(phone, identifier) {
-				id.ProfileData["phone_verified"] = true
-				return
-			}
-		case id.Provider == config.StrategyEmail && strings.EqualFold(u.Email, identifier):
+			id.ProfileData[key] = true
+		case key == "email_verified":
 			u.EmailVerified = true
-			return
-		case id.Provider == config.StrategySMS && samePhone(u.Phone, identifier):
+		default:
 			verified := true
 			u.PhoneVerified = &verified
-			return
 		}
+		return
 	}
 }
 
@@ -519,17 +459,14 @@ func (s *Server) connectionByName(name string) *config.Connection {
 	return s.connectionByNameLocked(name).Clone()
 }
 
-// passwordlessUserLocked resolves a passwordless sign-in for identifier,
-// through conn when one is named, and the connection it went through. The
-// connection each candidate signs in through passes allow before the user is
-// returned or provisioned. Caller holds the write lock.
+// passwordlessUserLocked resolves a code sign-in, through conn when named,
+// checking the connection used with allow first. Caller holds the write lock.
 func (s *Server) passwordlessUserLocked(identifier string, conn *config.Connection, allow func(*config.Connection) error) (*config.User, string, error) {
 	strategy := config.StrategySMS
 	if contact.IsEmail(identifier) {
 		strategy = config.StrategyEmail
 	}
-	// A named passwordless connection signs in only its own users, and only
-	// with the kind of identifier it sends codes to.
+	// A named connection signs in only its own users and identifier kind.
 	connName := ""
 	if conn != nil {
 		if conn.Strategy != strategy {
@@ -550,11 +487,8 @@ func (s *Server) passwordlessUserLocked(identifier string, conn *config.Connecti
 			}
 		}
 	}
-	// Without a connection, any user with the address answers, as the mock
-	// always has. A configured user that lists no identities has no
-	// provenance to rule it out, so it answers a named connection too.
-	// Either way the code went through the passwordless connection for the
-	// identifier's strategy, so that is the one checked and reported.
+	// Otherwise any user with the address answers, as the mock always has;
+	// the code still went through the strategy's connection.
 	if connName == "" {
 		connName = s.passwordlessConnectionNameLocked(strategy)
 	}
@@ -568,8 +502,7 @@ func (s *Server) passwordlessUserLocked(identifier string, conn *config.Connecti
 	return u, connName, nil
 }
 
-// withConnection returns params naming the connection signed in through, so
-// the login record names it rather than the user's first matching identity.
+// withConnection names the connection signed in through in the login record.
 func withConnection(params url.Values, connection string) url.Values {
 	if connection == "" || params.Get("connection") == connection {
 		return params

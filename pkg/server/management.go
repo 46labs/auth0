@@ -682,12 +682,10 @@ func (s *Server) createConnection(w http.ResponseWriter, r *http.Request) {
 
 	stored := conn.Clone()
 	s.mu.Lock()
-	for _, c := range s.connections {
-		if c.Name == conn.Name {
-			s.mu.Unlock()
-			writeAuth0Error(w, http.StatusConflict, "A connection with the same name already exists")
-			return
-		}
+	if s.connectionByNameLocked(conn.Name) != nil {
+		s.mu.Unlock()
+		writeAuth0Error(w, http.StatusConflict, "A connection with the same name already exists")
+		return
 	}
 	s.connections[stored.ID] = stored
 	s.mu.Unlock()
@@ -909,21 +907,20 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, userID strin
 		return
 	}
 
-	// Remove user from all organizations
-	for orgID, members := range s.members {
-		filtered := []config.OrganizationMember{}
-		for _, member := range members {
-			if member.UserID != userID {
-				filtered = append(filtered, member)
-			}
-		}
-		s.members[orgID] = filtered
-	}
+	s.removeMembershipsLocked(userID)
 
 	// Delete the user
 	delete(s.users, userID)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// removeMembershipsLocked requires the write lock. It builds new slices: a
+// reader may still range over one it took under the read lock.
+func (s *Server) removeMembershipsLocked(userID string) {
+	for orgID, members := range s.members {
+		s.members[orgID] = slices.DeleteFunc(slices.Clone(members), func(m config.OrganizationMember) bool { return m.UserID == userID })
+	}
 }
 
 func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {

@@ -15,6 +15,36 @@ import (
 	"github.com/46labs/auth0/pkg/config"
 )
 
+// ssoConnection creates the oidc connection acme-oidc.
+func ssoConnection(t *testing.T, m *management.Management) *management.Connection {
+	t.Helper()
+	c := &management.Connection{Name: auth0.String("acme-oidc"), Strategy: auth0.String("oidc")}
+	if err := m.Connection.Create(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// ssoInOrg is ssoConnection enabled on org_test with auto-membership.
+func ssoInOrg(t *testing.T, m *management.Management) *management.Connection {
+	t.Helper()
+	c := ssoConnection(t, m)
+	if err := m.Organization.AddConnection(context.Background(), "org_test", &management.OrganizationConnection{
+		ConnectionID: c.ID, AssignMembershipOnLogin: auth0.Bool(true),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// registerTestClient registers the client loginToOrgVia signs in as, so its
+// connection enablement is checked.
+func registerTestClient(srv *Server) {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	srv.clients["test_client"] = &config.Client{ClientID: "test_client", Name: "spa"}
+}
+
 func createEmailUser(t *testing.T, m *management.Management, email string) *management.User {
 	t.Helper()
 	u := &management.User{
@@ -71,10 +101,7 @@ func TestCreatePasswordlessUser(t *testing.T) {
 		t.Fatalf("logins_count present before a sign-in: %v", raw)
 	}
 
-	sso := &management.Connection{Name: auth0.String("acme-oidc"), Strategy: auth0.String("oidc")}
-	if err := m.Connection.Create(ctx, sso); err != nil {
-		t.Fatal(err)
-	}
+	ssoConnection(t, m)
 	wantStatus(t, m.User.Create(ctx, &management.User{Email: auth0.String("a@b.c"), Connection: auth0.String("acme-oidc")}), http.StatusBadRequest)
 }
 
@@ -119,15 +146,7 @@ func TestLinkPasswordlessIntoSSOUser(t *testing.T) {
 	srv, m, base := ssoMgmt(t)
 	ctx := context.Background()
 
-	sso := &management.Connection{Name: auth0.String("acme-oidc"), Strategy: auth0.String("oidc")}
-	if err := m.Connection.Create(ctx, sso); err != nil {
-		t.Fatal(err)
-	}
-	if err := m.Organization.AddConnection(ctx, "org_test", &management.OrganizationConnection{
-		ConnectionID: sso.ID, AssignMembershipOnLogin: auth0.Bool(true),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	ssoInOrg(t, m)
 
 	secondary := createEmailUser(t, m, "pat@acme.com")
 	if err := m.Organization.AddMembers(ctx, "org_test", []string{secondary.GetID()}); err != nil {
@@ -253,17 +272,8 @@ func TestLinkFindsTheSecondaryByItsIdentity(t *testing.T) {
 // users: an SSO user with the address is someone else until linked.
 func TestPasswordlessLoginIgnoresAnEnterpriseUserWithTheAddress(t *testing.T) {
 	srv, m, base := ssoMgmt(t)
-	ctx := context.Background()
 
-	sso := &management.Connection{Name: auth0.String("acme-oidc"), Strategy: auth0.String("oidc")}
-	if err := m.Connection.Create(ctx, sso); err != nil {
-		t.Fatal(err)
-	}
-	if err := m.Organization.AddConnection(ctx, "org_test", &management.OrganizationConnection{
-		ConnectionID: sso.ID, AssignMembershipOnLogin: auth0.Bool(true),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	ssoInOrg(t, m)
 	tokens, status, msg := loginToOrgVia(t, base, "pat@acme.com", "org_test", "openid", "acme-oidc")
 	if tokens == nil {
 		t.Fatalf("sso login: %d %s", status, msg)
@@ -507,10 +517,7 @@ func TestSMSVerificationRoundTrips(t *testing.T) {
 func TestLoginRefusesAConnectionAuth0WouldRefuse(t *testing.T) {
 	srv, m, base := ssoMgmt(t)
 	ctx := context.Background()
-	// Registered, so its enablement is checked.
-	srv.mu.Lock()
-	srv.clients["test_client"] = &config.Client{ClientID: "test_client", Name: "spa"}
-	srv.mu.Unlock()
+	registerTestClient(srv)
 
 	srv.mu.RLock()
 	before := len(srv.users)
@@ -519,10 +526,7 @@ func TestLoginRefusesAConnectionAuth0WouldRefuse(t *testing.T) {
 		t.Fatalf("unknown connection: tokens %v, %s", tokens, msg)
 	}
 
-	sso := &management.Connection{Name: auth0.String("acme-oidc"), Strategy: auth0.String("oidc")}
-	if err := m.Connection.Create(ctx, sso); err != nil {
-		t.Fatal(err)
-	}
+	sso := ssoConnection(t, m)
 	if tokens, _, msg := loginToOrgVia(t, base, "pat@acme.com", "", "openid", "acme-oidc"); tokens != nil || !strings.Contains(msg, "not enabled for this client") {
 		t.Fatalf("not enabled for the client: tokens %v, %s", tokens, msg)
 	}
@@ -577,9 +581,8 @@ func TestInvitationRefusesAConnectionNotEnabledForTheClient(t *testing.T) {
 	}
 }
 
-// loginUser itself refuses a named connection that no longer exists, so a
-// delete between the caller's check and the lookup cannot fall back to a
-// passwordless sign-in.
+// loginUser refuses a named connection that is gone, rather than falling back
+// to a passwordless sign-in.
 func TestLoginUserRefusesAVanishedConnection(t *testing.T) {
 	srv, _, _ := ssoMgmt(t)
 	if u, conn, err := srv.loginUser("pat@acme.com", "deleted-sso", "", ""); u != nil || !errors.Is(err, errConnectionUnknown) {
@@ -592,10 +595,10 @@ func TestLoginUserRefusesAVanishedConnection(t *testing.T) {
 func TestUnnamedLoginChecksTheResolvedConnection(t *testing.T) {
 	srv, m, base := ssoMgmt(t)
 	ctx := context.Background()
-	srv.mu.Lock()
-	srv.clients["test_client"] = &config.Client{ClientID: "test_client", Name: "spa"}
+	registerTestClient(srv)
+	srv.mu.RLock()
 	n := len(srv.users)
-	srv.mu.Unlock()
+	srv.mu.RUnlock()
 
 	// The seeded email connection allows every client ("*"); disabling one
 	// must take effect anyway.
@@ -646,9 +649,7 @@ func TestInvitationRefusesAnUnknownNamedConnection(t *testing.T) {
 func TestProfileFallbackChecksTheCodesConnection(t *testing.T) {
 	srv, m, base := ssoMgmt(t)
 	ctx := context.Background()
-	srv.mu.Lock()
-	srv.clients["test_client"] = &config.Client{ClientID: "test_client", Name: "spa"}
-	srv.mu.Unlock()
+	registerTestClient(srv)
 	if err := m.Connection.UpdateEnabledClients(ctx, "con_email", []management.ConnectionEnabledClient{
 		{ClientID: auth0.String("test_client"), Status: auth0.Bool(false)},
 	}); err != nil {
