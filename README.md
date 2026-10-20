@@ -19,11 +19,12 @@ Full-featured OIDC provider mock with Auth0-compatible API for local development
 - Organization enabled connections (`/api/v2/organizations/:id/enabled_connections`)
 - Roles registry (`/api/v2/roles`), including `name_filter` for read-or-create by name
 - Connections management (`/api/v2/connections`)
-- Clients CRUD (`/api/v2/clients`), including `initiate_login_uri`
+- Clients CRUD (`/api/v2/clients`), including `initiate_login_uri` and `client_metadata`
 - User metadata updates (`/api/v2/users/:id`)
 - Passwordless user creation (`POST /api/v2/users`), lookup by email (`/api/v2/users-by-email`) and
   identity linking (`POST /api/v2/users/:id/identities`)
 - Organization membership and member roles
+- Token exchange profiles (`/api/v2/token-exchange-profiles`), checkpoint-paginated; `include_totals` is refused as Auth0 refuses it
 - Log streams (`/api/v2/log-streams`), with delivery of sign-in and token exchange events to `http` streams
 - Self-Service SSO profiles and tickets (`/api/v2/self-service-profiles`), with a setup page
 - Page-based pagination (`page`, `per_page`) on every list endpoint

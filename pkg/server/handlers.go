@@ -347,12 +347,9 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		audience := r.FormValue("audience")
 		organization := r.FormValue("organization")
 
-		// Validate client credentials against configured clients
-		s.mu.RLock()
-		client, exists := s.clients[clientID]
-		s.mu.RUnlock()
-
-		if !exists || client.ClientSecret != clientSecret {
+		// A copy, since updates mutate the stored client under the write lock.
+		client := s.lookupClient(clientID)
+		if client == nil || client.ClientSecret != clientSecret {
 			http.Error(w, `{"error":"invalid_client","error_description":"Invalid client_id or client_secret"}`, http.StatusUnauthorized)
 			return
 		}
