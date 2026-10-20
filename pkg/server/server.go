@@ -172,6 +172,10 @@ func New(cfg *config.Config) (*Server, error) {
 
 	clients := make(map[string]*config.Client)
 	for i := range cfg.Clients {
+		// A seeded refresh_token reads back complete, as Auth0's always does.
+		if cfg.Clients[i].RefreshToken != nil {
+			cfg.Clients[i].RefreshToken = cfg.Clients[i].RefreshToken.WithDefaults()
+		}
 		clients[cfg.Clients[i].ClientID] = &cfg.Clients[i]
 	}
 

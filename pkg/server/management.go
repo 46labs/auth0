@@ -3,6 +3,8 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"regexp"
@@ -1001,8 +1003,18 @@ func (s *Server) listClients(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createClient(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, `{"error":"invalid_body"}`, http.StatusBadRequest)
+		return
+	}
 	var client config.Client
-	if err := json.NewDecoder(r.Body).Decode(&client); err != nil {
+	// refresh_token is read again as sent, so an empty value is told apart
+	// from an absent one.
+	var sent struct {
+		RefreshToken *refreshTokenPatch `json:"refresh_token"`
+	}
+	if json.Unmarshal(body, &client) != nil || json.Unmarshal(body, &sent) != nil {
 		http.Error(w, `{"error":"invalid_body"}`, http.StatusBadRequest)
 		return
 	}
@@ -1011,6 +1023,11 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"name_required"}`, http.StatusBadRequest)
 		return
 	}
+	if err := sent.RefreshToken.validate(); err != nil {
+		writeAuth0Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	client.RefreshToken = sent.RefreshToken.apply(nil)
 	if len(client.ClientMetadata) > 0 {
 		patch := make(map[string]any, len(client.ClientMetadata))
 		for k, v := range client.ClientMetadata {
@@ -1079,14 +1096,15 @@ func (s *Server) updateClient(w http.ResponseWriter, r *http.Request, clientID s
 	// Pointers distinguish absent from present-and-empty, so a PATCH can
 	// clear a value. Mirrors the SDK's client patch shape.
 	var updates struct {
-		Name             *string         `json:"name"`
-		Description      *string         `json:"description"`
-		AppType          *string         `json:"app_type"`
-		Callbacks        *[]string       `json:"callbacks"`
-		GrantTypes       *[]string       `json:"grant_types"`
-		JWTConfig        *map[string]any `json:"jwt_configuration"`
-		InitiateLoginURI *string         `json:"initiate_login_uri"`
-		ClientMetadata   *map[string]any `json:"client_metadata"`
+		Name             *string            `json:"name"`
+		Description      *string            `json:"description"`
+		AppType          *string            `json:"app_type"`
+		Callbacks        *[]string          `json:"callbacks"`
+		GrantTypes       *[]string          `json:"grant_types"`
+		JWTConfig        *map[string]any    `json:"jwt_configuration"`
+		InitiateLoginURI *string            `json:"initiate_login_uri"`
+		ClientMetadata   *map[string]any    `json:"client_metadata"`
+		RefreshToken     *refreshTokenPatch `json:"refresh_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
 		s.mu.Unlock()
@@ -1114,6 +1132,11 @@ func (s *Server) updateClient(w http.ResponseWriter, r *http.Request, clientID s
 			return
 		}
 	}
+	if err := updates.RefreshToken.validate(); err != nil {
+		s.mu.Unlock()
+		writeAuth0Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	if updates.Name != nil {
 		client.Name = *updates.Name
@@ -1139,10 +1162,99 @@ func (s *Server) updateClient(w http.ResponseWriter, r *http.Request, clientID s
 	if updates.ClientMetadata != nil {
 		client.ClientMetadata = metadata
 	}
+	if updates.RefreshToken != nil {
+		client.RefreshToken = updates.RefreshToken.apply(client.RefreshToken)
+	}
 	response := client.Clone()
 	s.mu.Unlock()
 
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+// refreshTokenPatch is the SDK's ClientRefreshToken: a field it leaves out
+// keeps its stored value.
+type refreshTokenPatch struct {
+	RotationType              *string                      `json:"rotation_type"`
+	ExpirationType            *string                      `json:"expiration_type"`
+	Leeway                    *int                         `json:"leeway"`
+	TokenLifetime             *int                         `json:"token_lifetime"`
+	InfiniteTokenLifetime     *bool                        `json:"infinite_token_lifetime"`
+	IdleTokenLifetime         *int                         `json:"idle_token_lifetime"`
+	InfiniteIdleTokenLifetime *bool                        `json:"infinite_idle_token_lifetime"`
+	Policies                  *[]config.RefreshTokenPolicy `json:"policies"`
+}
+
+// validate refuses what Auth0 refuses in a refresh_token as sent: an enum
+// outside its values, empty included, and a negative duration.
+func (p *refreshTokenPatch) validate() error {
+	if p == nil {
+		return nil
+	}
+	if p.RotationType != nil && *p.RotationType != config.RefreshTokenRotating && *p.RotationType != config.RefreshTokenNonRotating {
+		return fmt.Errorf("refresh_token.rotation_type must be %q or %q", config.RefreshTokenRotating, config.RefreshTokenNonRotating)
+	}
+	if p.ExpirationType != nil && *p.ExpirationType != config.RefreshTokenExpiring && *p.ExpirationType != config.RefreshTokenNonExpiring {
+		return fmt.Errorf("refresh_token.expiration_type must be %q or %q", config.RefreshTokenExpiring, config.RefreshTokenNonExpiring)
+	}
+	for name, v := range map[string]*int{"leeway": p.Leeway, "token_lifetime": p.TokenLifetime, "idle_token_lifetime": p.IdleTokenLifetime} {
+		if v != nil && *v < 0 {
+			return fmt.Errorf("refresh_token.%s must not be negative", name)
+		}
+	}
+	return nil
+}
+
+// apply returns current with the patch's fields written over it, as a copy
+// carrying Auth0's defaults for whatever neither sets. A nil patch returns
+// current.
+func (p *refreshTokenPatch) apply(current *config.RefreshTokenConfig) *config.RefreshTokenConfig {
+	if p == nil && current != nil {
+		return current
+	}
+	out := current.Clone()
+	if out == nil {
+		out = &config.RefreshTokenConfig{}
+	}
+	return p.over(out).WithDefaults()
+}
+
+// over writes the patch's fields onto out.
+func (p *refreshTokenPatch) over(out *config.RefreshTokenConfig) *config.RefreshTokenConfig {
+	if p == nil {
+		return out
+	}
+	if p.RotationType != nil {
+		out.RotationType = *p.RotationType
+	}
+	if p.ExpirationType != nil {
+		out.ExpirationType = *p.ExpirationType
+		// The infinite flags follow the expiration type unless sent with it.
+		if p.InfiniteTokenLifetime == nil {
+			out.InfiniteTokenLifetime = nil
+		}
+		if p.InfiniteIdleTokenLifetime == nil {
+			out.InfiniteIdleTokenLifetime = nil
+		}
+	}
+	if p.Leeway != nil {
+		out.Leeway = *p.Leeway
+	}
+	if p.TokenLifetime != nil {
+		out.TokenLifetime = p.TokenLifetime
+	}
+	if p.InfiniteTokenLifetime != nil {
+		out.InfiniteTokenLifetime = p.InfiniteTokenLifetime
+	}
+	if p.IdleTokenLifetime != nil {
+		out.IdleTokenLifetime = p.IdleTokenLifetime
+	}
+	if p.InfiniteIdleTokenLifetime != nil {
+		out.InfiniteIdleTokenLifetime = p.InfiniteIdleTokenLifetime
+	}
+	if p.Policies != nil {
+		out.Policies = *p.Policies
+	}
+	return out
 }
 
 // clientMetadataKey is the key charset the SDK documents for client_metadata.

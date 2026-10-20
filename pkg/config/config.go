@@ -1,6 +1,9 @@
 package config
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // AppMetadata mirrors Auth0's user.app_metadata — an open map, not a typed
 // struct. Two keys have first-class meaning to the mock's JWT wiring
@@ -224,9 +227,9 @@ type Client struct {
 	// native org_id claim for the organization login context, and
 	// client-credentials cannot enter one.
 	ClientMetadata map[string]string `json:"client_metadata,omitempty" yaml:"client_metadata,omitempty" mapstructure:"client_metadata"`
-	// RefreshToken is the application's refresh token configuration. Only
-	// rotation_type is modelled; without it the client is non-rotating, as an
-	// Auth0 application is by default.
+	// RefreshToken is the application's refresh token configuration. Every
+	// field is stored; rotation_type and leeway drive behaviour. Without it the
+	// client is non-rotating, as an Auth0 application is by default.
 	RefreshToken *RefreshTokenConfig `json:"refresh_token,omitempty" yaml:"refresh_token,omitempty" mapstructure:"refresh_token"`
 }
 
@@ -245,7 +248,97 @@ type RefreshTokenConfig struct {
 	// Leeway is Auth0's reuse interval in seconds: for that long after a
 	// rotation the retired token can still be exchanged without being taken
 	// for reuse, which would revoke the whole family.
-	Leeway int `json:"leeway,omitempty" yaml:"leeway,omitempty" mapstructure:"leeway"`
+	Leeway int `json:"leeway" yaml:"leeway,omitempty" mapstructure:"leeway"`
+	// The remaining fields are stored and returned, not enforced.
+	ExpirationType            string               `json:"expiration_type,omitempty" yaml:"expiration_type,omitempty" mapstructure:"expiration_type"`
+	TokenLifetime             *int                 `json:"token_lifetime,omitempty" yaml:"token_lifetime,omitempty" mapstructure:"token_lifetime"`
+	InfiniteTokenLifetime     *bool                `json:"infinite_token_lifetime,omitempty" yaml:"infinite_token_lifetime,omitempty" mapstructure:"infinite_token_lifetime"`
+	IdleTokenLifetime         *int                 `json:"idle_token_lifetime,omitempty" yaml:"idle_token_lifetime,omitempty" mapstructure:"idle_token_lifetime"`
+	InfiniteIdleTokenLifetime *bool                `json:"infinite_idle_token_lifetime,omitempty" yaml:"infinite_idle_token_lifetime,omitempty" mapstructure:"infinite_idle_token_lifetime"`
+	Policies                  []RefreshTokenPolicy `json:"policies,omitempty" yaml:"policies,omitempty" mapstructure:"policies"`
+}
+
+// RefreshTokenPolicy is a multi-resource refresh token policy: the API a
+// refresh token may also mint access tokens for, and the scopes it grants.
+type RefreshTokenPolicy struct {
+	Audience string   `json:"audience" yaml:"audience" mapstructure:"audience"`
+	Scope    []string `json:"scope" yaml:"scope" mapstructure:"scope"`
+}
+
+// Refresh token expiration types, as Auth0 names them.
+const (
+	RefreshTokenExpiring    = "expiring"
+	RefreshTokenNonExpiring = "non-expiring"
+)
+
+// Lifetimes Auth0 gives a refresh token configuration that sets none.
+const (
+	defaultRefreshTokenLifetime     = 2592000
+	defaultRefreshTokenIdleLifetime = 1296000
+)
+
+// WithDefaults fills what Auth0 fills on a client create: non-rotating,
+// non-expiring, its default lifetimes, and lifetimes that are infinite only
+// for a non-expiring token.
+func (c *RefreshTokenConfig) WithDefaults() *RefreshTokenConfig {
+	out := c.Clone()
+	if out == nil {
+		out = &RefreshTokenConfig{}
+	}
+	if out.RotationType == "" {
+		out.RotationType = RefreshTokenNonRotating
+	}
+	if out.ExpirationType == "" {
+		out.ExpirationType = RefreshTokenNonExpiring
+	}
+	infinite := out.ExpirationType == RefreshTokenNonExpiring
+	if out.TokenLifetime == nil {
+		v := defaultRefreshTokenLifetime
+		out.TokenLifetime = &v
+	}
+	if out.IdleTokenLifetime == nil {
+		v := defaultRefreshTokenIdleLifetime
+		out.IdleTokenLifetime = &v
+	}
+	if out.InfiniteTokenLifetime == nil {
+		out.InfiniteTokenLifetime = &infinite
+	}
+	if out.InfiniteIdleTokenLifetime == nil {
+		v := infinite
+		out.InfiniteIdleTokenLifetime = &v
+	}
+	return out
+}
+
+// Clone copies the configuration, its pointers and policies included.
+func (c *RefreshTokenConfig) Clone() *RefreshTokenConfig {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	if c.TokenLifetime != nil {
+		v := *c.TokenLifetime
+		out.TokenLifetime = &v
+	}
+	if c.InfiniteTokenLifetime != nil {
+		v := *c.InfiniteTokenLifetime
+		out.InfiniteTokenLifetime = &v
+	}
+	if c.IdleTokenLifetime != nil {
+		v := *c.IdleTokenLifetime
+		out.IdleTokenLifetime = &v
+	}
+	if c.InfiniteIdleTokenLifetime != nil {
+		v := *c.InfiniteIdleTokenLifetime
+		out.InfiniteIdleTokenLifetime = &v
+	}
+	if c.Policies != nil {
+		out.Policies = make([]RefreshTokenPolicy, len(c.Policies))
+		for i, p := range c.Policies {
+			out.Policies[i] = RefreshTokenPolicy{Audience: p.Audience, Scope: slices.Clone(p.Scope)}
+		}
+	}
+	return &out
 }
 
 // RefreshTokenLeeway is the client's reuse interval.

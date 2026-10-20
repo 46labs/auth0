@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/auth0/go-auth0"
+	"github.com/auth0/go-auth0/management"
 
 	"github.com/46labs/auth0/pkg/config"
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -850,5 +854,127 @@ func TestDeviceTokenHandlesDeletedApprover(t *testing.T) {
 	response, body := deviceTokenRequest(t, ts.URL, "device_client", issued.DeviceCode)
 	if response.StatusCode != http.StatusBadRequest || body["error"] != "invalid_grant" {
 		t.Fatalf("deleted approver response = %d %#v", response.StatusCode, body)
+	}
+}
+
+// A client switched to rotating refresh tokens through the Management API
+// keeps every refresh_token field it was sent, and a value Auth0 refuses is
+// refused without changing the client.
+func TestClientRefreshTokenThroughSDK(t *testing.T) {
+	_, ts := setupTestServer(t)
+	defer ts.Close()
+	m := newMgmt(t, ts.URL)
+	ctx := context.Background()
+
+	policies := []management.ClientRefreshTokenPolicy{{Audience: auth0.String("https://api.test"), Scope: &[]string{"read:things"}}}
+	client := &management.Client{Name: auth0.String("refreshing"), AppType: auth0.String("native"),
+		RefreshToken: &management.ClientRefreshToken{RotationType: auth0.String("non-rotating"), ExpirationType: auth0.String("non-expiring"), Policies: &policies}}
+	if err := m.Client.Create(ctx, client); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	id := client.GetClientID()
+	if err := m.Client.Update(ctx, id, &management.Client{RefreshToken: &management.ClientRefreshToken{
+		RotationType: auth0.String("rotating"), Leeway: auth0.Int(30), TokenLifetime: auth0.Int(3600),
+	}}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	read, err := m.Client.Read(ctx, id)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	rt := read.GetRefreshToken()
+	if rt.GetRotationType() != "rotating" || rt.GetExpirationType() != "non-expiring" || rt.GetLeeway() != 30 || rt.GetTokenLifetime() != 3600 {
+		t.Fatalf("refresh_token = %+v", rt)
+	}
+	if got := rt.GetPolicies(); len(got) != 1 || got[0].GetAudience() != "https://api.test" || len(got[0].GetScope()) != 1 {
+		t.Fatalf("policies = %+v", got)
+	}
+
+	err = m.Client.Update(ctx, id, &management.Client{RefreshToken: &management.ClientRefreshToken{RotationType: auth0.String("sometimes")}})
+	if statusOf(err) != http.StatusBadRequest {
+		t.Fatalf("invalid rotation_type = %v", err)
+	}
+	if read, err = m.Client.Read(ctx, id); err != nil || read.GetRefreshToken().GetRotationType() != "rotating" {
+		t.Fatalf("a refused update changed the client: %+v %v", read.GetRefreshToken(), err)
+	}
+	// Auth0 fills the rest on create (go-auth0's TestClient_Create and
+	// TestClient_CreateWithClientRefreshToken recordings).
+	for _, tc := range []struct {
+		sent     *management.ClientRefreshToken
+		infinite bool
+	}{
+		{sent: nil, infinite: true},
+		{sent: &management.ClientRefreshToken{ExpirationType: auth0.String("expiring")}, infinite: false},
+	} {
+		created := &management.Client{Name: auth0.String("defaults"), RefreshToken: tc.sent}
+		if err := m.Client.Create(ctx, created); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		rt := created.GetRefreshToken()
+		if rt.GetRotationType() != "non-rotating" || rt.Leeway == nil || rt.GetTokenLifetime() != 2592000 || rt.GetIdleTokenLifetime() != 1296000 ||
+			rt.InfiniteTokenLifetime == nil || rt.GetInfiniteTokenLifetime() != tc.infinite || rt.GetInfiniteIdleTokenLifetime() != tc.infinite {
+			t.Fatalf("defaults for %+v = %+v", tc.sent, rt)
+		}
+	}
+	for name, rt := range map[string]*management.ClientRefreshToken{
+		"unknown expiration_type": {ExpirationType: auth0.String("never")},
+		"empty rotation_type":     {RotationType: auth0.String("")},
+		"negative token_lifetime": {TokenLifetime: auth0.Int(-1)},
+	} {
+		if err := m.Client.Create(ctx, &management.Client{Name: auth0.String("refused"), RefreshToken: rt}); statusOf(err) != http.StatusBadRequest {
+			t.Fatalf("create with %s = %v", name, err)
+		}
+		if err := m.Client.Update(ctx, id, &management.Client{RefreshToken: rt}); statusOf(err) != http.StatusBadRequest {
+			t.Fatalf("update with %s = %v", name, err)
+		}
+	}
+
+	// A client seeded from configuration has no refresh_token; its first one
+	// carries Auth0's defaults around what the update sets.
+	if err := m.Client.Update(ctx, "mgmt_client_test", &management.Client{RefreshToken: &management.ClientRefreshToken{
+		RotationType: auth0.String("rotating"), ExpirationType: auth0.String("expiring"),
+	}}); err != nil {
+		t.Fatalf("update seeded client: %v", err)
+	}
+	seeded, err := m.Client.Read(ctx, "mgmt_client_test")
+	if err != nil {
+		t.Fatalf("read seeded client: %v", err)
+	}
+	if rt := seeded.GetRefreshToken(); rt.GetRotationType() != "rotating" || rt.GetTokenLifetime() != 2592000 || rt.InfiniteTokenLifetime == nil || rt.GetInfiniteTokenLifetime() {
+		t.Fatalf("seeded client refresh_token = %+v", rt)
+	}
+
+	// Changing only the expiration type re-derives the infinite flags.
+	if err := m.Client.Update(ctx, id, &management.Client{RefreshToken: &management.ClientRefreshToken{ExpirationType: auth0.String("expiring")}}); err != nil {
+		t.Fatalf("update expiration_type: %v", err)
+	}
+	if read, err = m.Client.Read(ctx, id); err != nil || read.GetRefreshToken().GetInfiniteTokenLifetime() || read.GetRefreshToken().GetInfiniteIdleTokenLifetime() {
+		t.Fatalf("expiring client keeps infinite lifetimes: %+v %v", read.GetRefreshToken(), err)
+	}
+}
+
+// A refresh_token block seeded from configuration reads back with Auth0's
+// defaults filled in around what it sets.
+func TestSeededClientRefreshTokenReadsComplete(t *testing.T) {
+	srv, err := New(&config.Config{
+		Issuer:   "http://localhost:4646/",
+		Audience: "https://api.test",
+		Clients: []config.Client{{ClientID: "seeded", Name: "seeded",
+			RefreshToken: &config.RefreshTokenConfig{RotationType: config.RefreshTokenRotating, Leeway: 30}}},
+	})
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	read, err := newMgmt(t, ts.URL).Client.Read(context.Background(), "seeded")
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	rt := read.GetRefreshToken()
+	if rt.GetRotationType() != "rotating" || rt.GetLeeway() != 30 || rt.GetExpirationType() != "non-expiring" ||
+		rt.GetTokenLifetime() != 2592000 || rt.GetIdleTokenLifetime() != 1296000 || !rt.GetInfiniteTokenLifetime() {
+		t.Fatalf("seeded refresh_token = %+v", rt)
 	}
 }

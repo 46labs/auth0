@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -257,4 +258,27 @@ func loadFrom(t *testing.T, body string) *config.Config {
 		t.Fatalf("the chart rendered a config the loader rejects: %v\n---\n%s", err, body)
 	}
 	return cfg
+}
+
+// A seeded client's refresh_token loads whole from YAML, policies included.
+func TestRefreshTokenLoadsFromYAML(t *testing.T) {
+	cfg := loadFrom(t, `
+clients:
+  - client_id: seeded
+    name: Seeded
+    refresh_token:
+      rotation_type: rotating
+      leeway: 30
+      token_lifetime: 3600
+      policies:
+        - audience: https://api.test
+          scope: [read:things]
+`)
+	rt := cfg.Clients[0].RefreshToken
+	if rt == nil || rt.RotationType != "rotating" || rt.Leeway != 30 || rt.TokenLifetime == nil || *rt.TokenLifetime != 3600 {
+		t.Fatalf("refresh_token = %+v", rt)
+	}
+	if len(rt.Policies) != 1 || rt.Policies[0].Audience != "https://api.test" || !slices.Equal(rt.Policies[0].Scope, []string{"read:things"}) {
+		t.Fatalf("policies = %+v", rt.Policies)
+	}
 }

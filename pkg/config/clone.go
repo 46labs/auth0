@@ -198,9 +198,6 @@ func (c *Client) Clone() *Client {
 		out.GrantTypes = make([]string, len(c.GrantTypes))
 		copy(out.GrantTypes, c.GrantTypes)
 	}
-	if c.RefreshToken != nil {
-		refreshToken := *c.RefreshToken
-		out.RefreshToken = &refreshToken
-	}
+	out.RefreshToken = c.RefreshToken.Clone()
 	return &out
 }
