@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -112,7 +113,7 @@ func (s *Server) runPostLoginAction(b *ActionBinding, user *config.User, client 
 		s.installRequire(vm)
 		installFetch(ctx, vm, loop)
 		_ = vm.Set("event", vm.ToValue(s.buildEvent(a, b, user, client, orgID, req)))
-		api := s.newActionAPI(vm, user, idClaims, accessClaims, func(reason string) {
+		api := s.newActionAPI(vm, user, orgID, idClaims, accessClaims, func(reason string) {
 			if denied == nil {
 				denied = &errAccessDenied{reason: reason}
 			}
@@ -169,8 +170,9 @@ func loadPostLoginHandler(vm *goja.Runtime, a *Action) (goja.Callable, error) {
 	return handler, nil
 }
 
-// newActionAPI is the `api` object: claims, denial, metadata.
-func (s *Server) newActionAPI(vm *goja.Runtime, user *config.User, idClaims, accessClaims jwt.MapClaims, deny func(string)) *goja.Object {
+// newActionAPI is the `api` object: claims, denial, metadata, and the
+// user's roles in the login's organization (orgID, empty for none).
+func (s *Server) newActionAPI(vm *goja.Runtime, user *config.User, orgID string, idClaims, accessClaims jwt.MapClaims, deny func(string)) *goja.Object {
 	claimSetter := func(claims jwt.MapClaims) *goja.Object {
 		o := vm.NewObject()
 		_ = o.Set("setCustomClaim", func(name string, value goja.Value) { claims[name] = value.Export() })
@@ -181,12 +183,54 @@ func (s *Server) newActionAPI(vm *goja.Runtime, user *config.User, idClaims, acc
 	userAPI := vm.NewObject()
 	_ = userAPI.Set("setAppMetadata", func(key string, value goja.Value) { s.setAppMetadata(user, key, value.Export()) })
 	_ = userAPI.Set("setUserMetadata", func(key string, value goja.Value) { s.setUserMetadata(user, key, value.Export()) })
+	rolesAPI := vm.NewObject()
+	_ = rolesAPI.Set("getUserEffectiveRolesByNames", func(names []string) goja.Value {
+		p, resolve, reject := vm.NewPromise()
+		if len(names) > maxRoleNames {
+			_ = reject(vm.NewGoError(fmt.Errorf("getUserEffectiveRolesByNames takes up to %d names, got %d", maxRoleNames, len(names))))
+		} else {
+			_ = resolve(map[string]any{"roles": s.effectiveRolesByNames(user.ID, orgID, names)})
+		}
+		return vm.ToValue(p)
+	})
 	api := vm.NewObject()
 	_ = api.Set("idToken", claimSetter(idClaims))
 	_ = api.Set("accessToken", claimSetter(accessClaims))
 	_ = api.Set("access", access)
 	_ = api.Set("user", userAPI)
+	_ = api.Set("roles", rolesAPI)
 	return api
+}
+
+// maxRoleNames is how many names getUserEffectiveRolesByNames takes, as
+// @auth0/actions documents it.
+const maxRoleNames = 50
+
+// effectiveRolesByNames is api.roles.getUserEffectiveRolesByNames: the roles
+// among names that userID holds in orgID, shaped as @auth0/actions types a
+// Role, {id, name, type}. Auth0 scopes an organization login to that
+// organization's roles. The mock models one role per member, assigned
+// directly, and no roles outside an organization, so a login with no
+// organization holds none. A member role seeded by name with no registry
+// entry gets a stable id so id is never empty.
+func (s *Server) effectiveRolesByNames(userID, orgID string, names []string) []map[string]any {
+	roles := []map[string]any{}
+	if orgID == "" {
+		return roles
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, m := range s.members[orgID] {
+		if m.UserID != userID || m.Role == "" || !slices.Contains(names, m.Role) {
+			continue
+		}
+		id := s.roleIDByName(m.Role)
+		if id == "" {
+			id = "rol_" + m.Role
+		}
+		roles = append(roles, map[string]any{"id": id, "name": m.Role, "type": "direct"})
+	}
+	return roles
 }
 
 // actionPrinter routes an Action's console output to the server log.
