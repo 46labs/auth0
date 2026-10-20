@@ -141,9 +141,8 @@ func assertContainsAll(t *testing.T, page string, want []string) {
 	}
 }
 
-// TestShippedDeviceTemplateParsesAndRenders is the device counterpart of
-// TestShippedTemplateParsesAndRenders: the shipped file is only parsed when
-// the process runs from the repo root, so nothing else exercises it.
+// The shipped device template is parsed only from the repo root, so nothing
+// else exercises it; the device counterpart of TestShippedTemplateParsesAndRenders.
 func TestShippedDeviceTemplateParsesAndRenders(t *testing.T) {
 	loader, err := newWithPaths(nil, []string{"../../templates/device.html"})
 	if err != nil {
@@ -166,9 +165,8 @@ func TestShippedDeviceTemplateParsesAndRenders(t *testing.T) {
 	}
 }
 
-// TestTemplatesResolveIndependently pins the bug where a mounted login
-// template returned early and forced the inline device page, so a custom
-// device page could never load alongside a custom login page.
+// A mounted login template must not force the inline device page: each page
+// resolves its own template.
 func TestTemplatesResolveIndependently(t *testing.T) {
 	dir := t.TempDir()
 	login := filepath.Join(dir, "login.html")

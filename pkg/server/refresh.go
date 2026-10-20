@@ -13,14 +13,8 @@ const unknownRefreshTokenError = `{"error":"invalid_grant","error_description":"
 
 const wrongClientRefreshTokenError = `{"error":"invalid_grant","error_description":"the refresh token was issued to a different client"}`
 
-// redeemRefreshToken claims a refresh token for a refresh by clientID and, when
-// the client rotates refresh tokens, replaces it, under one lock so concurrent
-// refreshes see one consistent family. It returns the token's state and the new
-// refresh token ("" without rotation), or an error body and status.
-//
-// A token a rotation retired is reuse. Within the client's leeway (Auth0's reuse
-// interval) the most recently retired token of its family is exchanged as usual;
-// any other reuse revokes the whole family, as Auth0's breach detection does.
+// redeemRefreshToken claims a token for clientID, rotating it when the client
+// does; reuse outside the leeway revokes the family, as Auth0's breach detection does.
 func (s *Server) redeemRefreshToken(token, clientID string, client *config.Client, now time.Time) (*refreshTokenState, string, string, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -46,7 +40,7 @@ func (s *Server) redeemRefreshToken(token, clientID string, client *config.Clien
 		return state, "", "", 0
 	}
 
-	rotated := "rt_" + s.generateID()
+	rotated := s.newRefreshToken()
 	if live {
 		delete(s.refreshTokens, token)
 		s.retiredRefreshTokens[token] = &retiredRefreshToken{State: state, RetiredAt: now}
@@ -55,9 +49,8 @@ func (s *Server) redeemRefreshToken(token, clientID string, client *config.Clien
 	return state, rotated, "", 0
 }
 
-// reusableWithinLeeway reports whether a retired token is the latest one its
-// family retired and was retired no longer ago than the client's leeway. Caller
-// holds s.mu.
+// reusableWithinLeeway reports whether a retired token is its family's latest
+// and within the client's leeway. Caller holds s.mu.
 func (s *Server) reusableWithinLeeway(token string, retired *retiredRefreshToken, client *config.Client, now time.Time) bool {
 	leeway := client.RefreshTokenLeeway()
 	if leeway <= 0 || now.Sub(retired.RetiredAt) > leeway {
@@ -84,4 +77,9 @@ func (s *Server) revokeRefreshTokenFamily(family string) {
 			delete(s.retiredRefreshTokens, token)
 		}
 	}
+}
+
+// newRefreshToken mints a refresh token id.
+func (s *Server) newRefreshToken() string {
+	return "rt_" + s.generateID()
 }

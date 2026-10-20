@@ -227,9 +227,8 @@ type Client struct {
 	// native org_id claim for the organization login context, and
 	// client-credentials cannot enter one.
 	ClientMetadata map[string]string `json:"client_metadata,omitempty" yaml:"client_metadata,omitempty" mapstructure:"client_metadata"`
-	// RefreshToken is the application's refresh token configuration. Every
-	// field is stored; rotation_type and leeway drive behaviour. Without it the
-	// client is non-rotating, as an Auth0 application is by default.
+	// RefreshToken is stored whole; rotation_type and leeway drive behaviour.
+	// Without it the client is non-rotating, as Auth0's default is.
 	RefreshToken *RefreshTokenConfig `json:"refresh_token,omitempty" yaml:"refresh_token,omitempty" mapstructure:"refresh_token"`
 }
 
@@ -241,13 +240,11 @@ const (
 
 // RefreshTokenConfig mirrors an Auth0 application's refresh_token settings.
 type RefreshTokenConfig struct {
-	// RotationType "rotating" issues a new refresh token on every refresh and
-	// retires the redeemed one. "non-rotating" keeps the refresh token valid
-	// and leaves it out of the refresh response.
+	// RotationType "rotating" replaces the refresh token on every refresh;
+	// "non-rotating" keeps it and leaves it out of the response.
 	RotationType string `json:"rotation_type,omitempty" yaml:"rotation_type,omitempty" mapstructure:"rotation_type"`
-	// Leeway is Auth0's reuse interval in seconds: for that long after a
-	// rotation the retired token can still be exchanged without being taken
-	// for reuse, which would revoke the whole family.
+	// Leeway is Auth0's reuse interval in seconds: how long a retired token
+	// still exchanges before reuse revokes its family.
 	Leeway int `json:"leeway" yaml:"leeway,omitempty" mapstructure:"leeway"`
 	// The remaining fields are stored and returned, not enforced.
 	ExpirationType            string               `json:"expiration_type,omitempty" yaml:"expiration_type,omitempty" mapstructure:"expiration_type"`
@@ -277,9 +274,8 @@ const (
 	defaultRefreshTokenIdleLifetime = 1296000
 )
 
-// WithDefaults fills what Auth0 fills on a client create: non-rotating,
-// non-expiring, its default lifetimes, and lifetimes that are infinite only
-// for a non-expiring token.
+// WithDefaults fills what Auth0 fills on a client create; lifetimes are
+// infinite only for a non-expiring token.
 func (c *RefreshTokenConfig) WithDefaults() *RefreshTokenConfig {
 	out := c.Clone()
 	if out == nil {

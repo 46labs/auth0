@@ -1204,9 +1204,8 @@ func (p *refreshTokenPatch) validate() error {
 	return nil
 }
 
-// apply returns current with the patch's fields written over it, as a copy
-// carrying Auth0's defaults for whatever neither sets. A nil patch returns
-// current.
+// apply returns a copy of current with the patch written over it and Auth0's
+// defaults for what neither sets. A nil patch returns current.
 func (p *refreshTokenPatch) apply(current *config.RefreshTokenConfig) *config.RefreshTokenConfig {
 	if p == nil && current != nil {
 		return current

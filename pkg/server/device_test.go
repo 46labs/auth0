@@ -86,9 +86,8 @@ func issueDeviceAuthorizationForOrganization(t *testing.T, baseURL, clientID, au
 	})
 }
 
-// The device flow's endpoints are OAuth, not Management API: the SDK has no
-// call for /oauth/device/code, and /oauth/token and /device are the OIDC and
-// browser flows AGENTS.md leaves to raw HTTP.
+// Raw HTTP: the SDK has no /oauth/device/code call, and /oauth/token and
+// /device are the OIDC and browser flows AGENTS.md leaves to it.
 func issueDeviceAuthorizationRequest(t *testing.T, baseURL string, values url.Values) deviceAuthorizationResponse {
 	t.Helper()
 	resp, err := http.PostForm(baseURL+"/oauth/device/code", values)
@@ -109,65 +108,70 @@ func issueDeviceAuthorizationRequest(t *testing.T, baseURL string, values url.Va
 
 func deviceTokenRequest(t *testing.T, baseURL, clientID, deviceCode string) (*http.Response, map[string]any) {
 	t.Helper()
-	resp, err := http.PostForm(baseURL+"/oauth/token", url.Values{
-		"grant_type":  {deviceCodeGrantType},
-		"client_id":   {clientID},
-		"device_code": {deviceCode},
-	})
-	if err != nil {
-		t.Fatalf("poll device token: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read device token response: %v", err)
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(body, &decoded); err != nil {
-		t.Fatalf("decode device token response: %v (%s)", err, body)
-	}
-	return resp, decoded
+	return postToken(t, baseURL, url.Values{"grant_type": {deviceCodeGrantType}, "client_id": {clientID}, "device_code": {deviceCode}})
 }
 
 func refreshTokenRequest(t *testing.T, baseURL, clientID, refreshToken string) (*http.Response, map[string]any) {
 	t.Helper()
-	resp, err := http.PostForm(baseURL+"/oauth/token", url.Values{
-		"grant_type":    {"refresh_token"},
-		"client_id":     {clientID},
-		"refresh_token": {refreshToken},
-	})
+	return postToken(t, baseURL, url.Values{"grant_type": {"refresh_token"}, "client_id": {clientID}, "refresh_token": {refreshToken}})
+}
+
+// postToken posts values to /oauth/token and decodes the JSON answer.
+func postToken(t *testing.T, baseURL string, values url.Values) (*http.Response, map[string]any) {
+	t.Helper()
+	resp, err := http.PostForm(baseURL+"/oauth/token", values)
 	if err != nil {
-		t.Fatalf("refresh device token: %v", err)
+		t.Fatalf("token request: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("read refreshed device token response: %v", err)
+		t.Fatalf("read token response: %v", err)
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal(body, &decoded); err != nil {
-		t.Fatalf("decode refreshed device token response: %v (%s)", err, body)
+		t.Fatalf("decode token response: %v (%s)", err, body)
 	}
 	return resp, decoded
 }
 
-func approveDevice(t *testing.T, baseURL string, issued deviceAuthorizationResponse, decision string) {
+// postDevice submits the device page as identifier and returns the status and
+// body. It reports with t.Errorf, so a goroutine may call it.
+func postDevice(t *testing.T, baseURL, userCode, identifier, code, decision string) (int, string) {
 	t.Helper()
 	resp, err := http.PostForm(baseURL+"/device", url.Values{
-		"user_code":         {issued.UserCode},
-		"confirm_user_code": {issued.UserCode},
-		"identifier":        {"test@example.test"},
-		"code":              {"123456"},
-		"decision":          {decision},
+		"user_code": {userCode}, "confirm_user_code": {userCode},
+		"identifier": {identifier}, "code": {code}, "decision": {decision},
 	})
 	if err != nil {
-		t.Fatalf("device approval: %v", err)
+		t.Errorf("device post: %v", err)
+		return 0, ""
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("device approval: status %d: %s", resp.StatusCode, body)
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
+}
+
+func approveDevice(t *testing.T, baseURL string, issued deviceAuthorizationResponse, decision string) {
+	t.Helper()
+	if status, body := postDevice(t, baseURL, issued.UserCode, "test@example.test", "123456", decision); status != http.StatusOK {
+		t.Fatalf("device %s: status %d: %s", decision, status, body)
 	}
+}
+
+// addOtherOrganization creates an organization the test user may sign in to
+// but is not a member of.
+func addOtherOrganization(t *testing.T, m *management.Management) string {
+	t.Helper()
+	org := &management.Organization{Name: auth0.String("other-org")}
+	if err := m.Organization.Create(context.Background(), org); err != nil {
+		t.Fatalf("create organization: %v", err)
+	}
+	if err := m.Organization.AddConnection(context.Background(), org.GetID(),
+		&management.OrganizationConnection{ConnectionID: auth0.String("con_email")}); err != nil {
+		t.Fatalf("enable connection: %v", err)
+	}
+	return org.GetID()
 }
 
 func allowDevicePoll(s *Server, deviceCode string) {
@@ -598,31 +602,11 @@ func TestDeviceAuthorizationRejectsNonMemberOrganization(t *testing.T) {
 	defer ts.Close()
 	dm := newMgmt(t, ts.URL)
 	deviceClient := addDeviceClient(t, dm, "device_client")
-	// An organization the user could sign in to but is not a member of.
-	other := &management.Organization{Name: auth0.String("other-org")}
-	if err := dm.Organization.Create(context.Background(), other); err != nil {
-		t.Fatalf("create organization: %v", err)
-	}
-	if err := dm.Organization.AddConnection(context.Background(), other.GetID(),
-		&management.OrganizationConnection{ConnectionID: auth0.String("con_email")}); err != nil {
-		t.Fatalf("enable connection: %v", err)
-	}
+	other := addOtherOrganization(t, dm)
 
-	issued := issueDeviceAuthorizationForOrganization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid", other.GetID())
-	response, err := http.PostForm(ts.URL+"/device", url.Values{
-		"user_code":         {issued.UserCode},
-		"confirm_user_code": {issued.UserCode},
-		"identifier":        {"test@example.test"},
-		"code":              {"123456"},
-		"decision":          {"approve"},
-	})
-	if err != nil {
-		t.Fatalf("nonmember device approval: %v", err)
-	}
-	body, _ := io.ReadAll(response.Body)
-	_ = response.Body.Close()
-	if response.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "not a member") {
-		t.Fatalf("nonmember device approval = %d: %s", response.StatusCode, body)
+	issued := issueDeviceAuthorizationForOrganization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid", other)
+	if status, body := postDevice(t, ts.URL, issued.UserCode, "test@example.test", "123456", "approve"); status != http.StatusBadRequest || !strings.Contains(body, "not a member") {
+		t.Fatalf("nonmember device approval = %d: %s", status, body)
 	}
 }
 
@@ -650,35 +634,13 @@ func TestDeviceVerificationRateLimit(t *testing.T) {
 	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
 
 	for attempt := 0; attempt < 5; attempt++ {
-		response, err := http.PostForm(ts.URL+"/device", url.Values{
-			"user_code":         {issued.UserCode},
-			"confirm_user_code": {issued.UserCode},
-			"identifier":        {"test@example.test"},
-			"code":              {"000000"},
-			"decision":          {"approve"},
-		})
-		if err != nil {
-			t.Fatalf("verification attempt %d: %v", attempt+1, err)
-		}
-		_ = response.Body.Close()
-		if response.StatusCode != http.StatusBadRequest {
-			t.Fatalf("verification attempt %d status = %d, want 400", attempt+1, response.StatusCode)
+		if status, _ := postDevice(t, ts.URL, issued.UserCode, "test@example.test", "000000", "approve"); status != http.StatusBadRequest {
+			t.Fatalf("verification attempt %d status = %d, want 400", attempt+1, status)
 		}
 	}
 
-	blocked, err := http.PostForm(ts.URL+"/device", url.Values{
-		"user_code":         {issued.UserCode},
-		"confirm_user_code": {issued.UserCode},
-		"identifier":        {"test@example.test"},
-		"code":              {"000000"},
-		"decision":          {"approve"},
-	})
-	if err != nil {
-		t.Fatalf("blocked verification attempt: %v", err)
-	}
-	_ = blocked.Body.Close()
-	if blocked.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("blocked verification status = %d, want 429", blocked.StatusCode)
+	if status, _ := postDevice(t, ts.URL, issued.UserCode, "test@example.test", "000000", "approve"); status != http.StatusTooManyRequests {
+		t.Fatalf("blocked verification status = %d, want 429", status)
 	}
 }
 
@@ -891,9 +853,8 @@ func TestDeviceTokenHandlesDeletedApprover(t *testing.T) {
 	}
 }
 
-// A client switched to rotating refresh tokens through the Management API
-// keeps every refresh_token field it was sent, and a value Auth0 refuses is
-// refused without changing the client.
+// refresh_token round-trips through the Management API with Auth0's defaults,
+// and a value Auth0 refuses is refused without changing the client.
 func TestClientRefreshTokenThroughSDK(t *testing.T) {
 	_, ts := setupTestServer(t)
 	defer ts.Close()
@@ -994,16 +955,9 @@ func TestDeviceAuthorizationNonMemberMayDeny(t *testing.T) {
 	defer ts.Close()
 	dm := newMgmt(t, ts.URL)
 	deviceClient := addDeviceClient(t, dm, "device_client")
-	other := &management.Organization{Name: auth0.String("other-org")}
-	if err := dm.Organization.Create(context.Background(), other); err != nil {
-		t.Fatalf("create organization: %v", err)
-	}
-	if err := dm.Organization.AddConnection(context.Background(), other.GetID(),
-		&management.OrganizationConnection{ConnectionID: auth0.String("con_email")}); err != nil {
-		t.Fatalf("enable connection: %v", err)
-	}
+	other := addOtherOrganization(t, dm)
 
-	issued := issueDeviceAuthorizationForOrganization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid", other.GetID())
+	issued := issueDeviceAuthorizationForOrganization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid", other)
 	approveDevice(t, ts.URL, issued, "deny")
 	allowDevicePoll(srv, issued.DeviceCode)
 	response, body := deviceTokenRequest(t, ts.URL, deviceClient, issued.DeviceCode)
@@ -1012,9 +966,8 @@ func TestDeviceAuthorizationNonMemberMayDeny(t *testing.T) {
 	}
 }
 
-// The device flow writes tenant logs as Auth0 does: a sign-in on approval,
-// recorded when its tokens are issued, fdecc for a refusal, f for a wrong
-// code, and fdeac for a user code that names no request.
+// Device sign-ins log as Auth0's do: s at the token exchange, fdecc for a
+// refusal, f for a wrong code, fdeac for an unknown user code.
 func TestDeviceSignInsReachLogStreams(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
@@ -1031,17 +984,9 @@ func TestDeviceSignInsReachLogStreams(t *testing.T) {
 	denied := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
 	approveDevice(t, ts.URL, denied, "deny")
 	wrong := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
-	for _, form := range []url.Values{
-		{"user_code": {wrong.UserCode}, "confirm_user_code": {wrong.UserCode}, "identifier": {"test@example.test"}, "code": {"000000"}, "decision": {"approve"}},
-		{"user_code": {"BCDF-GHJK"}, "confirm_user_code": {"BCDF-GHJK"}, "identifier": {"test@example.test"}, "code": {"123456"}, "decision": {"approve"}},
-	} {
-		response, err := http.PostForm(ts.URL+"/device", form)
-		if err != nil {
-			t.Fatalf("device form: %v", err)
-		}
-		_ = response.Body.Close()
-		if response.StatusCode != http.StatusBadRequest {
-			t.Fatalf("device form %v = %d", form, response.StatusCode)
+	for userCode, code := range map[string]string{wrong.UserCode: "000000", "BCDF-GHJK": "123456"} {
+		if status, _ := postDevice(t, ts.URL, userCode, "test@example.test", code, "approve"); status != http.StatusBadRequest {
+			t.Fatalf("device post %s/%s = %d", userCode, code, status)
 		}
 	}
 	srv.logDeliveries.Wait()
@@ -1058,9 +1003,8 @@ func TestDeviceSignInsReachLogStreams(t *testing.T) {
 	}
 }
 
-// A device page post that cannot sign anyone in creates no one: a malformed
-// identifier, an expired request, and one already decided are refused before
-// the sign-in provisions a user.
+// A malformed identifier, an expired request and a decided one are refused
+// before the sign-in can provision a user.
 func TestDeviceVerificationRefusesBeforeProvisioning(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
@@ -1088,16 +1032,8 @@ func TestDeviceVerificationRefusesBeforeProvisioning(t *testing.T) {
 		{"expired request", expired, "new.person@example.test", http.StatusBadRequest},
 		{"decided request", decided, "new.person@example.test", http.StatusConflict},
 	} {
-		response, err := http.PostForm(ts.URL+"/device", url.Values{
-			"user_code": {tc.issued.UserCode}, "confirm_user_code": {tc.issued.UserCode},
-			"identifier": {tc.identifier}, "code": {"123456"}, "decision": {"approve"},
-		})
-		if err != nil {
-			t.Fatalf("%s: %v", tc.name, err)
-		}
-		_ = response.Body.Close()
-		if response.StatusCode != tc.want {
-			t.Fatalf("%s = %d, want %d", tc.name, response.StatusCode, tc.want)
+		if status, _ := postDevice(t, ts.URL, tc.issued.UserCode, tc.identifier, "123456", "approve"); status != tc.want {
+			t.Fatalf("%s = %d, want %d", tc.name, status, tc.want)
 		}
 	}
 	for _, email := range []string{"new.person@example.test", "abc5551234567"} {
@@ -1151,16 +1087,7 @@ func TestConcurrentDeviceApprovalsProvisionOnce(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			response, err := http.PostForm(ts.URL+"/device", url.Values{
-				"user_code": {issued.UserCode}, "confirm_user_code": {issued.UserCode},
-				"identifier": {fmt.Sprintf("racer%d@example.test", i)}, "code": {"123456"}, "decision": {"approve"},
-			})
-			if err != nil {
-				t.Errorf("post %d: %v", i, err)
-				return
-			}
-			_ = response.Body.Close()
-			statuses[i] = response.StatusCode
+			statuses[i], _ = postDevice(t, ts.URL, issued.UserCode, fmt.Sprintf("racer%d@example.test", i), "123456", "approve")
 		}()
 	}
 	close(start)
@@ -1218,16 +1145,8 @@ func TestDeviceVerificationInProgressRefusesAnother(t *testing.T) {
 	srv.deviceCodes[issued.DeviceCode].Verifying = true
 	srv.mu.Unlock()
 
-	response, err := http.PostForm(ts.URL+"/device", url.Values{
-		"user_code": {issued.UserCode}, "confirm_user_code": {issued.UserCode},
-		"identifier": {"second@example.test"}, "code": {"123456"}, "decision": {"approve"},
-	})
-	if err != nil {
-		t.Fatalf("post: %v", err)
-	}
-	_ = response.Body.Close()
-	if response.StatusCode != http.StatusConflict {
-		t.Fatalf("post during a verification = %d, want 409", response.StatusCode)
+	if status, _ := postDevice(t, ts.URL, issued.UserCode, "second@example.test", "123456", "approve"); status != http.StatusConflict {
+		t.Fatalf("post during a verification = %d, want 409", status)
 	}
 	if found, err := dm.User.ListByEmail(context.Background(), "second@example.test"); err != nil || len(found) != 0 {
 		t.Fatalf("the refused post provisioned %d users (%v)", len(found), err)

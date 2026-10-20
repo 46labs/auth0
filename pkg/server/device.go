@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/mail"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -333,56 +334,12 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 		userCopy = latest
 	}
 
-	ns := strings.TrimSuffix(s.cfg.Issuer, "/") + "/"
 	idClaims := jwt.MapClaims{}
 	if hasDeviceScope(scope, "openid") {
-		idClaims = jwt.MapClaims{
-			"sub":            userCopy.ID,
-			"email":          userCopy.Email,
-			"email_verified": userCopy.EmailVerified,
-			"name":           userCopy.Name,
-			"iss":            s.cfg.Issuer,
-			"aud":            clientID,
-			"exp":            now.Add(time.Hour).Unix(),
-			"iat":            now.Unix(),
-			"auth_time":      now.Unix(),
-		}
-		if userCopy.Phone != "" {
-			idClaims["phone_number"] = userCopy.Phone
-			idClaims["phone_number_verified"] = true
-		}
-		if userCopy.Picture != "" {
-			idClaims["picture"] = userCopy.Picture
-		}
-		nameParts := strings.Split(userCopy.Name, " ")
-		if len(nameParts) > 0 {
-			idClaims["given_name"] = nameParts[0]
-		}
-		if len(nameParts) > 1 {
-			idClaims["family_name"] = nameParts[1]
-		}
-		if orgID != "" {
-			idClaims["org_id"] = orgID
-		}
-		if role := roleForOrg(userCopy, orgID); role != "" {
-			idClaims[ns+"role"] = role
-		}
+		idClaims = s.idTokenClaims(userCopy, clientID, orgID, now)
+		idClaims["auth_time"] = now.Unix()
 	}
-
-	accessClaims := jwt.MapClaims{
-		"sub":   userCopy.ID,
-		"iss":   s.cfg.Issuer,
-		"aud":   transaction.Audience,
-		"exp":   now.Add(time.Hour).Unix(),
-		"iat":   now.Unix(),
-		"scope": grantedScope(scope),
-	}
-	if orgID != "" {
-		accessClaims["org_id"] = orgID
-	}
-	if role := roleForOrg(userCopy, orgID); role != "" {
-		accessClaims[ns+"role"] = role
-	}
+	accessClaims := s.accessTokenClaims(userCopy, transaction.Audience, scope, orgID, now)
 	// The approval is a login, so it starts a session that every token
 	// refreshed from it keeps, as with the authorization code flow.
 	sessionID := "sess_" + s.generateID()
@@ -395,9 +352,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 		return
 	}
 
-	accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
-	accessToken.Header["kid"] = "key-1"
-	accessTokenString, err := accessToken.SignedString(s.privateKey)
+	accessTokenString, err := s.SignToken(accessClaims)
 	if err != nil {
 		http.Error(w, "Token generation failed", http.StatusInternalServerError)
 		return
@@ -410,9 +365,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 		"scope":        grantedScope(scope),
 	}
 	if hasDeviceScope(scope, "openid") {
-		idToken := jwt.NewWithClaims(jwt.SigningMethodRS256, idClaims)
-		idToken.Header["kid"] = "key-1"
-		idTokenString, err := idToken.SignedString(s.privateKey)
+		idTokenString, err := s.SignToken(idClaims)
 		if err != nil {
 			http.Error(w, "Token generation failed", http.StatusInternalServerError)
 			return
@@ -420,7 +373,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 		response["id_token"] = idTokenString
 	}
 	if hasDeviceScope(scope, "offline_access") {
-		refreshToken := "rt_" + s.generateID()
+		refreshToken := s.newRefreshToken()
 		s.mu.Lock()
 		s.refreshTokens[refreshToken] = &refreshTokenState{
 			UserID:         userCopy.ID,
@@ -443,12 +396,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 }
 
 func hasDeviceScope(scope, wanted string) bool {
-	for _, candidate := range strings.Fields(scope) {
-		if candidate == wanted {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Fields(scope), wanted)
 }
 
 func (s *Server) renderDeviceVerification(w http.ResponseWriter, r *http.Request) {
@@ -536,12 +484,7 @@ func (s *Server) deviceScope(clientID, requested, audience string) (string, erro
 }
 
 func hasGrantType(client *config.Client, grantType string) bool {
-	for _, candidate := range client.GrantTypes {
-		if candidate == grantType {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(client.GrantTypes, grantType)
 }
 
 func writeDeviceError(w http.ResponseWriter, status int, code, description string) {

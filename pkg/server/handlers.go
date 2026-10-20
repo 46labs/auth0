@@ -388,10 +388,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		// the grant cannot enter an organization context.
 		s.applyCredentialsExchange(client, accessClaims)
 
-		accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
-		accessToken.Header["kid"] = "key-1"
-
-		accessTokenString, err := accessToken.SignedString(s.privateKey)
+		accessTokenString, err := s.SignToken(accessClaims)
 		if err != nil {
 			http.Error(w, "Token generation failed", 500)
 			return
@@ -439,61 +436,10 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		}
 
 		now := time.Now()
-		ns := strings.TrimSuffix(s.cfg.Issuer, "/") + "/"
 
 		// Generate new access token
-		accessClaims := jwt.MapClaims{
-			"sub":   user.ID,
-			"iss":   s.cfg.Issuer,
-			"aud":   s.cfg.Audience,
-			"exp":   now.Add(time.Hour).Unix(),
-			"iat":   now.Unix(),
-			"scope": grantedScope(issued.Scope),
-		}
-
-		if orgID != "" {
-			accessClaims["org_id"] = orgID
-		}
-		if role := roleForOrg(user, orgID); role != "" {
-			accessClaims[ns+"role"] = role
-		}
-
-		idClaims := jwt.MapClaims{
-			"sub":            user.ID,
-			"email":          user.Email,
-			"email_verified": user.EmailVerified,
-			"name":           user.Name,
-			"iss":            s.cfg.Issuer,
-			"aud":            clientID,
-			"exp":            now.Add(time.Hour).Unix(),
-			"iat":            now.Unix(),
-		}
-
-		if user.Phone != "" {
-			idClaims["phone_number"] = user.Phone
-			idClaims["phone_number_verified"] = true
-		}
-
-		if user.Picture != "" {
-			idClaims["picture"] = user.Picture
-		}
-
-		nameParts := strings.Split(user.Name, " ")
-		if len(nameParts) > 0 {
-			idClaims["given_name"] = nameParts[0]
-		}
-		if len(nameParts) > 1 {
-			idClaims["family_name"] = nameParts[1]
-		}
-
-		// org_id is a top-level claim (matches production Auth0 Organizations)
-		if orgID != "" {
-			idClaims["org_id"] = orgID
-		}
-		// role remains namespaced (requires Auth0 Action in production)
-		if role := roleForOrg(user, orgID); role != "" {
-			idClaims[ns+"role"] = role
-		}
+		accessClaims := s.accessTokenClaims(user, s.cfg.Audience, issued.Scope, orgID, now)
+		idClaims := s.idTokenClaims(user, clientID, orgID, now)
 
 		if issued.SessionID != "" {
 			idClaims["sid"] = issued.SessionID
@@ -502,10 +448,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
-		accessToken.Header["kid"] = "key-1"
-
-		accessTokenString, err := accessToken.SignedString(s.privateKey)
+		accessTokenString, err := s.SignToken(accessClaims)
 		if err != nil {
 			http.Error(w, "Token generation failed", 500)
 			return
@@ -524,9 +467,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if issued.IncludeIDToken {
-			idToken := jwt.NewWithClaims(jwt.SigningMethodRS256, idClaims)
-			idToken.Header["kid"] = "key-1"
-			idTokenString, err := idToken.SignedString(s.privateKey)
+			idTokenString, err := s.SignToken(idClaims)
 			if err != nil {
 				http.Error(w, "Token generation failed", 500)
 				return
@@ -595,68 +536,14 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
-	ns := strings.TrimSuffix(s.cfg.Issuer, "/") + "/"
 
-	idClaims := jwt.MapClaims{
-		"sub":            user.ID,
-		"email":          user.Email,
-		"email_verified": user.EmailVerified,
-		"name":           user.Name,
-		"iss":            s.cfg.Issuer,
-		"aud":            clientID,
-		"exp":            now.Add(time.Hour).Unix(),
-		"iat":            now.Unix(),
-		"auth_time":      now.Unix(),
-	}
-
-	if user.Phone != "" {
-		idClaims["phone_number"] = user.Phone
-		idClaims["phone_number_verified"] = true
-	}
-
-	if user.Picture != "" {
-		idClaims["picture"] = user.Picture
-	}
-
+	idClaims := s.idTokenClaims(&user, clientID, orgID, now)
+	idClaims["auth_time"] = now.Unix()
 	if hasNonce {
 		idClaims["nonce"] = nonce
 	}
 
-	nameParts := strings.Split(user.Name, " ")
-	if len(nameParts) > 0 {
-		idClaims["given_name"] = nameParts[0]
-	}
-	if len(nameParts) > 1 {
-		idClaims["family_name"] = nameParts[1]
-	}
-
-	if orgID != "" {
-		idClaims["org_id"] = orgID
-	}
-	if role := roleForOrg(&user, orgID); role != "" {
-		idClaims[ns+"role"] = role
-	}
-
-	idToken := jwt.NewWithClaims(jwt.SigningMethodRS256, idClaims)
-	idToken.Header["kid"] = "key-1"
-
-	accessClaims := jwt.MapClaims{
-		"sub":   user.ID,
-		"iss":   s.cfg.Issuer,
-		"aud":   s.cfg.Audience,
-		"exp":   now.Add(time.Hour).Unix(),
-		"iat":   now.Unix(),
-		"scope": grantedScope(requestedScope),
-	}
-
-	// org_id is a top-level claim (matches production Auth0 Organizations)
-	if orgID != "" {
-		accessClaims["org_id"] = orgID
-	}
-	// role remains namespaced (requires Auth0 Action in production)
-	if role := roleForOrg(&user, orgID); role != "" {
-		accessClaims[ns+"role"] = role
-	}
+	accessClaims := s.accessTokenClaims(&user, s.cfg.Audience, requestedScope, orgID, now)
 
 	if claimed.SessionID != "" {
 		idClaims["sid"] = claimed.SessionID
@@ -667,16 +554,13 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
-	accessToken.Header["kid"] = "key-1"
-
-	idTokenString, err := idToken.SignedString(s.privateKey)
+	idTokenString, err := s.SignToken(idClaims)
 	if err != nil {
 		http.Error(w, "Token generation failed", 500)
 		return
 	}
 
-	accessTokenString, err := accessToken.SignedString(s.privateKey)
+	accessTokenString, err := s.SignToken(accessClaims)
 	if err != nil {
 		http.Error(w, "Token generation failed", 500)
 		return
@@ -685,7 +569,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	// The scope was captured when the code was claimed above.
 	var refreshToken string
 	if strings.Contains(requestedScope, "offline_access") {
-		refreshToken = "rt_" + base64.RawURLEncoding.EncodeToString([]byte(s.generateID()))
+		refreshToken = s.newRefreshToken()
 		s.mu.Lock()
 		s.refreshTokens[refreshToken] = &refreshTokenState{
 			UserID:         user.ID,
@@ -770,4 +654,57 @@ func grantedScope(requested string) string {
 		}
 	}
 	return strings.Join(out, " ")
+}
+
+// idTokenClaims are the ID token claims for user signed in to clientID.
+func (s *Server) idTokenClaims(user *config.User, clientID, orgID string, now time.Time) jwt.MapClaims {
+	claims := jwt.MapClaims{
+		"sub":            user.ID,
+		"email":          user.Email,
+		"email_verified": user.EmailVerified,
+		"name":           user.Name,
+		"iss":            s.cfg.Issuer,
+		"aud":            clientID,
+		"exp":            now.Add(time.Hour).Unix(),
+		"iat":            now.Unix(),
+	}
+	if user.Phone != "" {
+		claims["phone_number"] = user.Phone
+		claims["phone_number_verified"] = true
+	}
+	if user.Picture != "" {
+		claims["picture"] = user.Picture
+	}
+	nameParts := strings.Split(user.Name, " ")
+	claims["given_name"] = nameParts[0]
+	if len(nameParts) > 1 {
+		claims["family_name"] = nameParts[1]
+	}
+	s.addOrgClaims(claims, user, orgID)
+	return claims
+}
+
+// accessTokenClaims are the claims of user's access token for audience.
+func (s *Server) accessTokenClaims(user *config.User, audience, scope, orgID string, now time.Time) jwt.MapClaims {
+	claims := jwt.MapClaims{
+		"sub":   user.ID,
+		"iss":   s.cfg.Issuer,
+		"aud":   audience,
+		"exp":   now.Add(time.Hour).Unix(),
+		"iat":   now.Unix(),
+		"scope": grantedScope(scope),
+	}
+	s.addOrgClaims(claims, user, orgID)
+	return claims
+}
+
+// addOrgClaims adds the top-level org_id, as Auth0 Organizations does, and
+// the namespaced role an Action adds in production.
+func (s *Server) addOrgClaims(claims jwt.MapClaims, user *config.User, orgID string) {
+	if orgID != "" {
+		claims["org_id"] = orgID
+	}
+	if role := roleForOrg(user, orgID); role != "" {
+		claims[strings.TrimSuffix(s.cfg.Issuer, "/")+"/role"] = role
+	}
 }

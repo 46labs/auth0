@@ -2,6 +2,7 @@ package templates
 
 import (
 	"html/template"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -110,10 +111,10 @@ func parseFile(path string) (*template.Template, error) {
 	return template.New(filepath.Base(path)).Funcs(templateFuncs).ParseFiles(path)
 }
 
-func (l *Loader) Execute(w interface{ Write([]byte) (int, error) }, data interface{}) error {
+func (l *Loader) Execute(w io.Writer, data any) error {
 	return l.tmpl.Execute(w, data)
 }
 
-func (l *Loader) ExecuteDevice(w interface{ Write([]byte) (int, error) }, data interface{}) error {
+func (l *Loader) ExecuteDevice(w io.Writer, data any) error {
 	return l.device.Execute(w, data)
 }
