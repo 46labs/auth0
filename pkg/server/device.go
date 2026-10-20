@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/46labs/auth0/pkg/config"
+	"github.com/46labs/auth0/pkg/contact"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -138,48 +140,99 @@ func (s *Server) handleDeviceVerification(w http.ResponseWriter, r *http.Request
 		http.Error(w, "The displayed user code must be confirmed", http.StatusBadRequest)
 		return
 	}
-	if r.FormValue("code") != "123456" {
-		s.reportDeviceVerificationFailure(userCode, time.Now())
-		http.Error(w, "Invalid code", http.StatusBadRequest)
-		return
-	}
-
-	user := s.findUser(r.FormValue("identifier"))
-	if user == nil {
-		s.reportDeviceVerificationFailure(userCode, time.Now())
-		http.Error(w, "Unknown user", http.StatusBadRequest)
-		return
-	}
-
+	identifier := r.FormValue("identifier")
 	now := time.Now()
 	s.mu.Lock()
 	s.pruneDeviceCodesLocked(now)
 	transaction := s.deviceTransactionByUserCodeLocked(userCode)
-	if transaction == nil {
-		s.mu.Unlock()
+	var clientID, orgID string
+	expired, busy := false, false
+	if transaction != nil {
+		clientID, orgID = transaction.ClientID, transaction.OrgID
+		expired = !now.Before(transaction.ExpiresAt)
+		busy = transaction.Status != deviceTransactionPending || transaction.Verifying
+		// Reserved until this post decides, so a concurrent one is refused
+		// before it can sign anyone in.
+		if !expired && !busy {
+			transaction.Verifying = true
+		}
+	}
+	s.mu.Unlock()
+	params := url.Values{"client_id": {clientID}}
+	if orgID != "" {
+		params.Set("organization", orgID)
+	}
+	// The request's state is settled before anything signs in, so a stale or
+	// spent user code provisions no one.
+	switch {
+	case transaction == nil:
+		s.emitLoginLog(r, params, "fdeac", "Invalid or expired user code", nil, identifier, "")
 		http.Error(w, "Invalid or expired user code", http.StatusBadRequest)
 		return
-	}
-	if !now.Before(transaction.ExpiresAt) {
-		transaction.Status = deviceTransactionExpired
-		s.mu.Unlock()
+	case expired:
+		s.emitLoginLog(r, params, "fdeac", "This device authorization has expired", nil, identifier, orgID)
 		http.Error(w, "This device authorization has expired", http.StatusBadRequest)
 		return
-	}
-	if transaction.Status != deviceTransactionPending {
-		s.mu.Unlock()
+	case busy:
 		http.Error(w, "This device authorization is no longer pending", http.StatusConflict)
 		return
 	}
-	if transaction.OrgID != "" {
-		if err := s.authorizeOrgLoginLocked(user, transaction.OrgID, ""); err != nil {
-			s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		transaction.Verifying = false
+		s.mu.Unlock()
+	}()
+	if !validIdentifier(identifier) {
+		s.reportDeviceVerificationFailure(userCode, now)
+		s.emitLoginLog(r, params, "f", "Invalid email or phone number.", nil, identifier, orgID)
+		http.Error(w, "Invalid email or phone number", http.StatusBadRequest)
+		return
+	}
+
+	if r.FormValue("code") != "123456" {
+		s.reportDeviceVerificationFailure(userCode, now)
+		s.emitLoginLog(r, params, "f", "Wrong email or verification code.", s.findUser(identifier), identifier, orgID)
+		http.Error(w, "Invalid code", http.StatusBadRequest)
+		return
+	}
+	user, connection, err := s.loginUser(identifier, "", clientID, orgID)
+	if err != nil {
+		s.reportDeviceVerificationFailure(userCode, now)
+		s.emitLoginLog(r, params, "f", err.Error(), nil, identifier, orgID)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	params = withConnection(params, connection)
+	// Only approval needs membership: anyone shown the request may refuse it.
+	if decision == "approve" && orgID != "" {
+		if err := s.authorizeOrgLogin(user, orgID, ""); err != nil {
+			s.emitLoginLog(r, params, "f", err.Error(), user, identifier, orgID)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	}
+	// The success record is held until the token exchange, where the
+	// post-login Action decides it, as the authorization code flow does.
+	var loginLog map[string]any
 	if decision == "approve" {
+		loginLog = s.loginLog(r, params, "s", "Successful login", user, identifier, orgID)
+	}
+
+	s.mu.Lock()
+	// Signing in took time: the request may have expired meanwhile, and a
+	// poll may have marked it so.
+	if !time.Now().Before(transaction.ExpiresAt) || transaction.Status != deviceTransactionPending {
+		transaction.Status = deviceTransactionExpired
+		s.mu.Unlock()
+		s.emitLoginLog(r, params, "fdeac", "This device authorization has expired", user, identifier, orgID)
+		http.Error(w, "This device authorization has expired", http.StatusBadRequest)
+		return
+	}
+	if decision == "approve" {
+		s.recordLoginLocked(user.ID, identifier, connection)
 		transaction.ApprovedBy = user.ID
+		transaction.Connection = connection
+		transaction.LoginLog = loginLog
 		transaction.Status = deviceTransactionApproved
 	} else {
 		transaction.Status = deviceTransactionDenied
@@ -188,11 +241,12 @@ func (s *Server) handleDeviceVerification(w http.ResponseWriter, r *http.Request
 	transaction.BlockedUntil = time.Time{}
 	s.mu.Unlock()
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	message := "Device authorization denied."
-	if decision == "approve" {
-		message = "Device authorization approved. You can return to the device."
+	message := "Device authorization approved. You can return to the device."
+	if decision != "approve" {
+		s.emitLoginLog(r, params, "fdecc", "User did not confirm device", user, identifier, orgID)
+		message = "Device authorization denied."
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = s.templates.ExecuteDevice(w, map[string]any{
 		"Branding": s.cfg.Branding,
 		"Message":  message,
@@ -269,6 +323,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 		orgID = userCopy.AppMetadata.TenantID()
 	}
 	scope := transaction.Scope
+	connection, loginLog := transaction.Connection, transaction.LoginLog
 	transaction.Status = deviceTransactionConsumed
 	s.mu.Unlock()
 
@@ -334,7 +389,9 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 	if hasDeviceScope(scope, "openid") {
 		idClaims["sid"] = sessionID
 	}
-	if !s.postLogin(w, r, userCopy, clientID, orgID, "", "oauth2-device-code", sessionID, "", strings.Fields(scope), idClaims, accessClaims) {
+	allowed := s.postLogin(w, r, userCopy, clientID, orgID, "", "oauth2-device-code", sessionID, connection, strings.Fields(scope), idClaims, accessClaims)
+	s.emitPendingLogin(loginLog, allowed)
+	if !allowed {
 		return
 	}
 
@@ -372,6 +429,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 			IncludeIDToken: hasDeviceScope(scope, "openid"),
 			Scope:          scope,
 			SessionID:      sessionID,
+			Connection:     connection,
 			Family:         refreshToken,
 		}
 		s.mu.Unlock()
@@ -563,6 +621,18 @@ func (s *Server) reportDeviceVerificationFailure(userCode string, now time.Time)
 		}
 	}
 	s.mu.Unlock()
+}
+
+// validIdentifier reports whether identifier is an email address or a phone
+// number, the two a passwordless sign-in takes.
+func validIdentifier(identifier string) bool {
+	// Classified as loginUser classifies it.
+	if contact.IsEmail(identifier) {
+		addr, err := mail.ParseAddress(identifier)
+		return err == nil && addr.Address == identifier
+	}
+	_, err := contact.NormalizePhoneToE164(identifier)
+	return err == nil
 }
 
 func normalizeDeviceUserCode(value string) string {

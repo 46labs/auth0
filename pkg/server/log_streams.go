@@ -100,6 +100,10 @@ var logCategory = map[string]string{
 	"f":     "auth.login.fail",
 	"secte": "auth.token_exchange.success",
 	"fecte": "auth.token_exchange.fail",
+	// Device flow. Auth0's filter catalog lists fdecc under User/Behavioral
+	// failures and fdeac under none, which leaves it in Other.
+	"fdecc": "user.fail",
+	"fdeac": "other",
 }
 
 var (

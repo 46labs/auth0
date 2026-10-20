@@ -82,18 +82,25 @@ const (
 // deviceTransaction carries one RFC 8628 authorization request from issuance
 // through browser approval and its one-time token exchange.
 type deviceTransaction struct {
-	DeviceCode     string
-	UserCode       string
-	ClientID       string
-	Audience       string
-	Scope          string
-	OrgID          string
-	CreatedAt      time.Time
-	ExpiresAt      time.Time
-	Interval       time.Duration
-	NextPollAt     time.Time
-	Status         string
-	ApprovedBy     string
+	DeviceCode string
+	UserCode   string
+	ClientID   string
+	Audience   string
+	Scope      string
+	OrgID      string
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	Interval   time.Duration
+	NextPollAt time.Time
+	Status     string
+	ApprovedBy string
+	// Verifying reserves a pending request while one device page post signs
+	// in, so a concurrent post cannot provision a user it then discards.
+	Verifying bool
+	// Connection is the one the approver signed in through.
+	Connection string
+	// LoginLog is the approval's success record, emitted at the exchange.
+	LoginLog       map[string]any
 	FailedAttempts int
 	BlockedUntil   time.Time
 }

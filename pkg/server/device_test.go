@@ -3,10 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -29,26 +32,41 @@ type deviceAuthorizationResponse struct {
 	Interval                int    `json:"interval"`
 }
 
-func addDeviceClient(s *Server, clientID string) {
-	s.mu.Lock()
-	s.clients[clientID] = &config.Client{
-		ClientID:   clientID,
-		Name:       "Device Test Client",
-		AppType:    "native",
-		GrantTypes: []string{deviceCodeGrantType},
+// addNativeClient creates a native application with grantTypes and returns
+// its generated client id.
+func addNativeClient(t *testing.T, m *management.Management, name string, grantTypes ...string) string {
+	t.Helper()
+	client := &management.Client{Name: auth0.String(name), AppType: auth0.String("native"), GrantTypes: &grantTypes}
+	if err := m.Client.Create(context.Background(), client); err != nil {
+		t.Fatalf("create client %s: %v", name, err)
 	}
-	s.mu.Unlock()
+	return client.GetClientID()
 }
 
-func addDeviceClientGrant(s *Server, clientID string, scopes ...string) {
-	s.mu.Lock()
-	s.clientGrants["grant_"+clientID] = &clientGrant{
-		ID:       "grant_" + clientID,
-		ClientID: clientID,
-		Audience: s.cfg.Audience,
-		Scope:    scopes,
+// addDeviceClient creates a native application allowed the device grant.
+func addDeviceClient(t *testing.T, m *management.Management, name string) string {
+	t.Helper()
+	return addNativeClient(t, m, name, deviceCodeGrantType)
+}
+
+func addDeviceClientGrant(t *testing.T, m *management.Management, clientID, audience string, scopes ...string) {
+	t.Helper()
+	grant := &management.ClientGrant{ClientID: auth0.String(clientID), Audience: auth0.String(audience), Scope: &scopes}
+	if err := m.ClientGrant.Create(context.Background(), grant); err != nil {
+		t.Fatalf("create client grant: %v", err)
 	}
-	s.mu.Unlock()
+}
+
+// setRefreshTokenRotation switches a client to rotating refresh tokens with
+// leeway seconds of reuse interval.
+func setRefreshTokenRotation(t *testing.T, m *management.Management, clientID string, leeway int) {
+	t.Helper()
+	update := &management.Client{RefreshToken: &management.ClientRefreshToken{
+		RotationType: auth0.String("rotating"), ExpirationType: auth0.String("expiring"), Leeway: auth0.Int(leeway),
+	}}
+	if err := m.Client.Update(context.Background(), clientID, update); err != nil {
+		t.Fatalf("enable refresh token rotation: %v", err)
+	}
 }
 
 func issueDeviceAuthorization(t *testing.T, baseURL, clientID, audience, scope string) deviceAuthorizationResponse {
@@ -68,6 +86,9 @@ func issueDeviceAuthorizationForOrganization(t *testing.T, baseURL, clientID, au
 	})
 }
 
+// The device flow's endpoints are OAuth, not Management API: the SDK has no
+// call for /oauth/device/code, and /oauth/token and /device are the OIDC and
+// browser flows AGENTS.md leaves to raw HTTP.
 func issueDeviceAuthorizationRequest(t *testing.T, baseURL string, values url.Values) deviceAuthorizationResponse {
 	t.Helper()
 	resp, err := http.PostForm(baseURL+"/oauth/device/code", values)
@@ -160,7 +181,8 @@ func allowDevicePoll(s *Server, deviceCode string) {
 func TestDeviceAuthorizationDiscoveryAndApproval(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	addDeviceClient(srv, "device_client")
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
 
 	resp, err := http.Get(ts.URL + "/.well-known/openid-configuration")
 	if err != nil {
@@ -175,12 +197,12 @@ func TestDeviceAuthorizationDiscoveryAndApproval(t *testing.T) {
 		t.Fatalf("device endpoint = %v", got)
 	}
 
-	issued := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "openid profile email offline_access")
+	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid profile email offline_access")
 	if issued.ExpiresIn != 900 || issued.Interval != 5 {
 		t.Fatalf("device lifetime/interval = %d/%d, want 900/5", issued.ExpiresIn, issued.Interval)
 	}
 	issueResponse, err := http.PostForm(ts.URL+"/oauth/device/code", url.Values{
-		"client_id": {"device_client"},
+		"client_id": {deviceClient},
 	})
 	if err != nil {
 		t.Fatalf("device response headers: %v", err)
@@ -218,7 +240,7 @@ func TestDeviceAuthorizationDiscoveryAndApproval(t *testing.T) {
 
 	approveDevice(t, ts.URL, issued, "approve")
 	allowDevicePoll(srv, issued.DeviceCode)
-	response, tokens := deviceTokenRequest(t, ts.URL, "device_client", issued.DeviceCode)
+	response, tokens := deviceTokenRequest(t, ts.URL, deviceClient, issued.DeviceCode)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("approved device poll status = %d: %#v", response.StatusCode, tokens)
 	}
@@ -259,7 +281,7 @@ func TestDeviceAuthorizationDiscoveryAndApproval(t *testing.T) {
 	if verifiedAccessToken.Subject != "test_user_1" {
 		t.Fatalf("verified device access token subject = %q", verifiedAccessToken.Subject)
 	}
-	verifiedIDToken, err := provider.Verifier(&oidc.Config{ClientID: "device_client"}).Verify(ctx, tokens["id_token"].(string))
+	verifiedIDToken, err := provider.Verifier(&oidc.Config{ClientID: deviceClient}).Verify(ctx, tokens["id_token"].(string))
 	if err != nil {
 		t.Fatalf("device ID token JWKS verification: %v", err)
 	}
@@ -267,7 +289,7 @@ func TestDeviceAuthorizationDiscoveryAndApproval(t *testing.T) {
 		t.Fatalf("verified device ID token subject = %q", verifiedIDToken.Subject)
 	}
 
-	replay, replayBody := deviceTokenRequest(t, ts.URL, "device_client", issued.DeviceCode)
+	replay, replayBody := deviceTokenRequest(t, ts.URL, deviceClient, issued.DeviceCode)
 	if replay.StatusCode != http.StatusBadRequest || replayBody["error"] != "invalid_grant" {
 		t.Fatalf("device replay = %d %#v", replay.StatusCode, replayBody)
 	}
@@ -276,18 +298,19 @@ func TestDeviceAuthorizationDiscoveryAndApproval(t *testing.T) {
 func TestDeviceAuthorizationScopesAndAudience(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	addDeviceClient(srv, "device_client")
-	addDeviceClientGrant(srv, "device_client", "read:things")
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	addDeviceClientGrant(t, dm, deviceClient, srv.cfg.Audience, "read:things")
 
-	withoutAudience := issueDeviceAuthorization(t, ts.URL, "device_client", "", "openid")
+	withoutAudience := issueDeviceAuthorization(t, ts.URL, deviceClient, "", "openid")
 	approveDevice(t, ts.URL, withoutAudience, "approve")
 	allowDevicePoll(srv, withoutAudience.DeviceCode)
-	withoutAudienceResponse, withoutAudienceBody := deviceTokenRequest(t, ts.URL, "device_client", withoutAudience.DeviceCode)
+	withoutAudienceResponse, withoutAudienceBody := deviceTokenRequest(t, ts.URL, deviceClient, withoutAudience.DeviceCode)
 	if withoutAudienceResponse.StatusCode != http.StatusOK || withoutAudienceBody["access_token"] == nil {
 		t.Fatalf("device authorization without audience = %d %#v", withoutAudienceResponse.StatusCode, withoutAudienceBody)
 	}
 
-	issued := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "openid read:things read:things")
+	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid read:things read:things")
 	if issued.UserCode == "" {
 		t.Fatal("client-grant scope request did not issue a code")
 	}
@@ -300,19 +323,19 @@ func TestDeviceAuthorizationScopesAndAudience(t *testing.T) {
 	}{
 		{
 			name:   "unknown scope",
-			values: url.Values{"client_id": {"device_client"}, "audience": {srv.cfg.Audience}, "scope": {"openid write:things"}},
+			values: url.Values{"client_id": {deviceClient}, "audience": {srv.cfg.Audience}, "scope": {"openid write:things"}},
 			status: http.StatusBadRequest,
 			err:    "invalid_scope",
 		},
 		{
 			name:   "wrong audience",
-			values: url.Values{"client_id": {"device_client"}, "audience": {"https://other.example"}},
+			values: url.Values{"client_id": {deviceClient}, "audience": {"https://other.example"}},
 			status: http.StatusBadRequest,
 			err:    "invalid_request",
 		},
 		{
 			name:   "disagreeing resource",
-			values: url.Values{"client_id": {"device_client"}, "audience": {srv.cfg.Audience}, "resource": {"https://other.example"}},
+			values: url.Values{"client_id": {deviceClient}, "audience": {srv.cfg.Audience}, "resource": {"https://other.example"}},
 			status: http.StatusBadRequest,
 			err:    "invalid_request",
 		},
@@ -336,14 +359,10 @@ func TestDeviceAuthorizationScopesAndAudience(t *testing.T) {
 func TestDeviceAuthorizationClientBinding(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	addDeviceClient(srv, "device_client")
-	addDeviceClient(srv, "other_device_client")
-	srv.mu.Lock()
-	srv.clients["native_without_device_grant"] = &config.Client{
-		ClientID: "native_without_device_grant",
-		AppType:  "native",
-	}
-	srv.mu.Unlock()
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	otherDeviceClient := addDeviceClient(t, dm, "other_device_client")
+	withoutDeviceGrant := addNativeClient(t, dm, "native_without_device_grant")
 
 	unknown, err := http.PostForm(ts.URL+"/oauth/device/code", url.Values{
 		"client_id": {"unknown_client"},
@@ -359,7 +378,7 @@ func TestDeviceAuthorizationClientBinding(t *testing.T) {
 	}
 
 	withoutGrant, err := http.PostForm(ts.URL+"/oauth/device/code", url.Values{
-		"client_id": {"native_without_device_grant"},
+		"client_id": {withoutDeviceGrant},
 	})
 	if err != nil {
 		t.Fatalf("native client without grant request: %v", err)
@@ -371,8 +390,8 @@ func TestDeviceAuthorizationClientBinding(t *testing.T) {
 		t.Fatalf("native client without grant response = %d %#v", withoutGrant.StatusCode, withoutGrantBody)
 	}
 
-	issued := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "openid")
-	mismatch, mismatchBody := deviceTokenRequest(t, ts.URL, "other_device_client", issued.DeviceCode)
+	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
+	mismatch, mismatchBody := deviceTokenRequest(t, ts.URL, otherDeviceClient, issued.DeviceCode)
 	if mismatch.StatusCode != http.StatusBadRequest || mismatchBody["error"] != "invalid_grant" {
 		t.Fatalf("client mismatch response = %d %#v", mismatch.StatusCode, mismatchBody)
 	}
@@ -391,13 +410,14 @@ func TestDeviceAuthorizationClientBinding(t *testing.T) {
 func TestDeviceRefreshTokenRoundTrip(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	addDeviceClient(srv, "device_client")
-	addDeviceClient(srv, "other_device_client")
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	otherDeviceClient := addDeviceClient(t, dm, "other_device_client")
 
-	issued := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "openid offline_access")
+	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid offline_access")
 	approveDevice(t, ts.URL, issued, "approve")
 	allowDevicePoll(srv, issued.DeviceCode)
-	initialResponse, initialTokens := deviceTokenRequest(t, ts.URL, "device_client", issued.DeviceCode)
+	initialResponse, initialTokens := deviceTokenRequest(t, ts.URL, deviceClient, issued.DeviceCode)
 	if initialResponse.StatusCode != http.StatusOK {
 		t.Fatalf("initial device exchange = %d %#v", initialResponse.StatusCode, initialTokens)
 	}
@@ -406,7 +426,7 @@ func TestDeviceRefreshTokenRoundTrip(t *testing.T) {
 		t.Fatalf("initial device exchange omitted refresh token: %#v", initialTokens)
 	}
 
-	refreshResponse, refreshedTokens := refreshTokenRequest(t, ts.URL, "device_client", refreshToken)
+	refreshResponse, refreshedTokens := refreshTokenRequest(t, ts.URL, deviceClient, refreshToken)
 	if refreshResponse.StatusCode != http.StatusOK {
 		t.Fatalf("device refresh exchange = %d %#v", refreshResponse.StatusCode, refreshedTokens)
 	}
@@ -434,12 +454,12 @@ func TestDeviceRefreshTokenRoundTrip(t *testing.T) {
 		t.Fatalf("refreshed device access claims = %#v", claims)
 	}
 
-	wrongClient, wrongClientBody := refreshTokenRequest(t, ts.URL, "other_device_client", refreshToken)
+	wrongClient, wrongClientBody := refreshTokenRequest(t, ts.URL, otherDeviceClient, refreshToken)
 	if wrongClient.StatusCode != http.StatusBadRequest || wrongClientBody["error"] != "invalid_grant" {
 		t.Fatalf("refresh with a different client = %d %#v", wrongClient.StatusCode, wrongClientBody)
 	}
 
-	again, againTokens := refreshTokenRequest(t, ts.URL, "device_client", refreshToken)
+	again, againTokens := refreshTokenRequest(t, ts.URL, deviceClient, refreshToken)
 	if again.StatusCode != http.StatusOK {
 		t.Fatalf("second non-rotating refresh = %d %#v", again.StatusCode, againTokens)
 	}
@@ -448,38 +468,37 @@ func TestDeviceRefreshTokenRoundTrip(t *testing.T) {
 func TestDeviceRefreshTokenRotation(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	addDeviceClient(srv, "device_client")
-	srv.mu.Lock()
-	srv.clients["device_client"].RefreshToken = &config.RefreshTokenConfig{RotationType: config.RefreshTokenRotating}
-	srv.mu.Unlock()
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	setRefreshTokenRotation(t, dm, deviceClient, 0)
 
-	issued := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "openid offline_access")
+	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid offline_access")
 	approveDevice(t, ts.URL, issued, "approve")
 	allowDevicePoll(srv, issued.DeviceCode)
-	_, initialTokens := deviceTokenRequest(t, ts.URL, "device_client", issued.DeviceCode)
+	_, initialTokens := deviceTokenRequest(t, ts.URL, deviceClient, issued.DeviceCode)
 	first, _ := initialTokens["refresh_token"].(string)
 	if first == "" {
 		t.Fatalf("initial device exchange omitted refresh token: %#v", initialTokens)
 	}
 
-	refreshed, refreshedTokens := refreshTokenRequest(t, ts.URL, "device_client", first)
+	refreshed, refreshedTokens := refreshTokenRequest(t, ts.URL, deviceClient, first)
 	second, _ := refreshedTokens["refresh_token"].(string)
 	if refreshed.StatusCode != http.StatusOK || second == "" || second == first {
 		t.Fatalf("rotating refresh = %d, refresh token %q after %q", refreshed.StatusCode, second, first)
 	}
 
-	next, nextTokens := refreshTokenRequest(t, ts.URL, "device_client", second)
+	next, nextTokens := refreshTokenRequest(t, ts.URL, deviceClient, second)
 	third, _ := nextTokens["refresh_token"].(string)
 	if next.StatusCode != http.StatusOK || third == "" {
 		t.Fatalf("refresh with the rotated token = %d %#v", next.StatusCode, nextTokens)
 	}
 
 	// Without a leeway, reuse is a breach: the token and its whole family are revoked.
-	reused, reusedBody := refreshTokenRequest(t, ts.URL, "device_client", first)
+	reused, reusedBody := refreshTokenRequest(t, ts.URL, deviceClient, first)
 	if reused.StatusCode != http.StatusForbidden || reusedBody["error"] != "invalid_grant" {
 		t.Fatalf("reusing a rotated refresh token = %d %#v", reused.StatusCode, reusedBody)
 	}
-	revoked, revokedBody := refreshTokenRequest(t, ts.URL, "device_client", third)
+	revoked, revokedBody := refreshTokenRequest(t, ts.URL, deviceClient, third)
 	if revoked.StatusCode != http.StatusForbidden || revokedBody["error"] != "invalid_grant" {
 		t.Fatalf("newest refresh token after a reuse = %d %#v", revoked.StatusCode, revokedBody)
 	}
@@ -488,36 +507,35 @@ func TestDeviceRefreshTokenRotation(t *testing.T) {
 func TestDeviceRefreshTokenLeeway(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	addDeviceClient(srv, "device_client")
-	srv.mu.Lock()
-	srv.clients["device_client"].RefreshToken = &config.RefreshTokenConfig{RotationType: config.RefreshTokenRotating, Leeway: 120}
-	srv.mu.Unlock()
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	setRefreshTokenRotation(t, dm, deviceClient, 120)
 
-	issued := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "openid offline_access")
+	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid offline_access")
 	approveDevice(t, ts.URL, issued, "approve")
 	allowDevicePoll(srv, issued.DeviceCode)
-	_, initialTokens := deviceTokenRequest(t, ts.URL, "device_client", issued.DeviceCode)
+	_, initialTokens := deviceTokenRequest(t, ts.URL, deviceClient, issued.DeviceCode)
 	first, _ := initialTokens["refresh_token"].(string)
-	_, refreshedTokens := refreshTokenRequest(t, ts.URL, "device_client", first)
+	_, refreshedTokens := refreshTokenRequest(t, ts.URL, deviceClient, first)
 	second, _ := refreshedTokens["refresh_token"].(string)
 
 	// Within the leeway the token just retired is exchanged, as a concurrent refresh would present it.
-	reused, reusedTokens := refreshTokenRequest(t, ts.URL, "device_client", first)
+	reused, reusedTokens := refreshTokenRequest(t, ts.URL, deviceClient, first)
 	if reused.StatusCode != http.StatusOK || reusedTokens["refresh_token"] == nil {
 		t.Fatalf("reuse within the leeway = %d %#v", reused.StatusCode, reusedTokens)
 	}
-	next, nextTokens := refreshTokenRequest(t, ts.URL, "device_client", second)
+	next, nextTokens := refreshTokenRequest(t, ts.URL, deviceClient, second)
 	third, _ := nextTokens["refresh_token"].(string)
 	if next.StatusCode != http.StatusOK || third == "" {
 		t.Fatalf("refresh after a reuse within the leeway = %d %#v", next.StatusCode, nextTokens)
 	}
 
 	// The leeway covers only the latest retired token: first is older than second now.
-	stale, staleBody := refreshTokenRequest(t, ts.URL, "device_client", first)
+	stale, staleBody := refreshTokenRequest(t, ts.URL, deviceClient, first)
 	if stale.StatusCode != http.StatusForbidden || staleBody["error"] != "invalid_grant" {
 		t.Fatalf("reuse of an older retired token = %d %#v", stale.StatusCode, staleBody)
 	}
-	revoked, _ := refreshTokenRequest(t, ts.URL, "device_client", third)
+	revoked, _ := refreshTokenRequest(t, ts.URL, deviceClient, third)
 	if revoked.StatusCode != http.StatusForbidden {
 		t.Fatalf("newest refresh token after a breach = %d", revoked.StatusCode)
 	}
@@ -548,12 +566,13 @@ func TestRefreshTokenLeewayExpires(t *testing.T) {
 func TestDeviceAuthorizationOrganizationScope(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	addDeviceClient(srv, "device_client")
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
 
-	issued := issueDeviceAuthorizationForOrganization(t, ts.URL, "device_client", srv.cfg.Audience, "openid", "org_test")
+	issued := issueDeviceAuthorizationForOrganization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid", "org_test")
 	approveDevice(t, ts.URL, issued, "approve")
 	allowDevicePoll(srv, issued.DeviceCode)
-	response, tokens := deviceTokenRequest(t, ts.URL, "device_client", issued.DeviceCode)
+	response, tokens := deviceTokenRequest(t, ts.URL, deviceClient, issued.DeviceCode)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("organization device exchange = %d %#v", response.StatusCode, tokens)
 	}
@@ -577,12 +596,19 @@ func TestDeviceAuthorizationOrganizationScope(t *testing.T) {
 func TestDeviceAuthorizationRejectsNonMemberOrganization(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	addDeviceClient(srv, "device_client")
-	srv.mu.Lock()
-	srv.organizations["org_other"] = &config.Organization{ID: "org_other", Name: "other-org"}
-	srv.mu.Unlock()
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	// An organization the user could sign in to but is not a member of.
+	other := &management.Organization{Name: auth0.String("other-org")}
+	if err := dm.Organization.Create(context.Background(), other); err != nil {
+		t.Fatalf("create organization: %v", err)
+	}
+	if err := dm.Organization.AddConnection(context.Background(), other.GetID(),
+		&management.OrganizationConnection{ConnectionID: auth0.String("con_email")}); err != nil {
+		t.Fatalf("enable connection: %v", err)
+	}
 
-	issued := issueDeviceAuthorizationForOrganization(t, ts.URL, "device_client", srv.cfg.Audience, "openid", "org_other")
+	issued := issueDeviceAuthorizationForOrganization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid", other.GetID())
 	response, err := http.PostForm(ts.URL+"/device", url.Values{
 		"user_code":         {issued.UserCode},
 		"confirm_user_code": {issued.UserCode},
@@ -603,13 +629,14 @@ func TestDeviceAuthorizationRejectsNonMemberOrganization(t *testing.T) {
 func TestDeviceAuthorizationAudienceMutationInvalidatesCode(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	addDeviceClient(srv, "device_client")
-	issued := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "openid")
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
 	srv.mu.Lock()
 	srv.deviceCodes[issued.DeviceCode].Audience = "https://mutated.example"
 	srv.mu.Unlock()
 
-	response, body := deviceTokenRequest(t, ts.URL, "device_client", issued.DeviceCode)
+	response, body := deviceTokenRequest(t, ts.URL, deviceClient, issued.DeviceCode)
 	if response.StatusCode != http.StatusBadRequest || body["error"] != "invalid_grant" {
 		t.Fatalf("mutated audience response = %d %#v", response.StatusCode, body)
 	}
@@ -618,8 +645,9 @@ func TestDeviceAuthorizationAudienceMutationInvalidatesCode(t *testing.T) {
 func TestDeviceVerificationRateLimit(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	addDeviceClient(srv, "device_client")
-	issued := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "openid")
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
 
 	for attempt := 0; attempt < 5; attempt++ {
 		response, err := http.PostForm(ts.URL+"/device", url.Values{
@@ -657,7 +685,8 @@ func TestDeviceVerificationRateLimit(t *testing.T) {
 func TestDevicePostLoginActionUsesDeviceProtocol(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	addDeviceClient(srv, "device_client")
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
 	m := mgmt{t: t, url: ts.URL}
 	m.deployBound("device-protocol", `
 		exports.onExecutePostLogin = async (event, api) => {
@@ -665,10 +694,10 @@ func TestDevicePostLoginActionUsesDeviceProtocol(t *testing.T) {
 			  api.accessToken.setCustomClaim("https://mock/scopes", event.transaction.requested_scopes.join(" "));
 		};`)
 
-	issued := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "openid")
+	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
 	approveDevice(t, ts.URL, issued, "approve")
 	allowDevicePoll(srv, issued.DeviceCode)
-	response, tokens := deviceTokenRequest(t, ts.URL, "device_client", issued.DeviceCode)
+	response, tokens := deviceTokenRequest(t, ts.URL, deviceClient, issued.DeviceCode)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("device token status = %d: %#v", response.StatusCode, tokens)
 	}
@@ -689,7 +718,8 @@ func TestDevicePostLoginActionUsesDeviceProtocol(t *testing.T) {
 func TestDeviceLoginIsASessionKeptAcrossRefresh(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	addDeviceClient(srv, "device_client")
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
 	m := mgmt{t: t, url: ts.URL}
 	m.deployBound("device-session", `
 		exports.onExecutePostLogin = async (event, api) => {
@@ -698,10 +728,10 @@ func TestDeviceLoginIsASessionKeptAcrossRefresh(t *testing.T) {
 
 	login := func() map[string]any {
 		t.Helper()
-		issued := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "openid offline_access")
+		issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid offline_access")
 		approveDevice(t, ts.URL, issued, "approve")
 		allowDevicePoll(srv, issued.DeviceCode)
-		response, tokens := deviceTokenRequest(t, ts.URL, "device_client", issued.DeviceCode)
+		response, tokens := deviceTokenRequest(t, ts.URL, deviceClient, issued.DeviceCode)
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("device token status = %d: %#v", response.StatusCode, tokens)
 		}
@@ -717,7 +747,7 @@ func TestDeviceLoginIsASessionKeptAcrossRefresh(t *testing.T) {
 		t.Fatalf("id token sid = %v, want %s", got, sid)
 	}
 
-	refreshResponse, refreshed := refreshTokenRequest(t, ts.URL, "device_client", tokens["refresh_token"].(string))
+	refreshResponse, refreshed := refreshTokenRequest(t, ts.URL, deviceClient, tokens["refresh_token"].(string))
 	if refreshResponse.StatusCode != http.StatusOK {
 		t.Fatalf("device refresh = %d %#v", refreshResponse.StatusCode, refreshed)
 	}
@@ -736,14 +766,15 @@ func TestDeviceLoginIsASessionKeptAcrossRefresh(t *testing.T) {
 func TestDevicePollingStatusesAndConditionalTokens(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	addDeviceClient(srv, "device_client")
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
 
-	issued := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "profile")
-	pending, pendingBody := deviceTokenRequest(t, ts.URL, "device_client", issued.DeviceCode)
+	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "profile")
+	pending, pendingBody := deviceTokenRequest(t, ts.URL, deviceClient, issued.DeviceCode)
 	if pending.StatusCode != http.StatusForbidden || pendingBody["error"] != "authorization_pending" {
 		t.Fatalf("first poll = %d %#v", pending.StatusCode, pendingBody)
 	}
-	slow, slowBody := deviceTokenRequest(t, ts.URL, "device_client", issued.DeviceCode)
+	slow, slowBody := deviceTokenRequest(t, ts.URL, deviceClient, issued.DeviceCode)
 	if slow.StatusCode != http.StatusTooManyRequests || slowBody["error"] != "slow_down" {
 		t.Fatalf("fast poll = %d %#v", slow.StatusCode, slowBody)
 	}
@@ -756,27 +787,27 @@ func TestDevicePollingStatusesAndConditionalTokens(t *testing.T) {
 
 	approveDevice(t, ts.URL, issued, "approve")
 	allowDevicePoll(srv, issued.DeviceCode)
-	approved, approvedBody := deviceTokenRequest(t, ts.URL, "device_client", issued.DeviceCode)
+	approved, approvedBody := deviceTokenRequest(t, ts.URL, deviceClient, issued.DeviceCode)
 	if approved.StatusCode != http.StatusOK || approvedBody["id_token"] != nil || approvedBody["refresh_token"] != nil {
 		t.Fatalf("profile-only device response = %d %#v", approved.StatusCode, approvedBody)
 	}
 
-	denied := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "openid")
+	denied := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
 	approveDevice(t, ts.URL, denied, "deny")
-	deniedResponse, deniedBody := deviceTokenRequest(t, ts.URL, "device_client", denied.DeviceCode)
+	deniedResponse, deniedBody := deviceTokenRequest(t, ts.URL, deviceClient, denied.DeviceCode)
 	if deniedResponse.StatusCode != http.StatusForbidden || deniedBody["error"] != "access_denied" {
 		t.Fatalf("denied device = %d %#v", deniedResponse.StatusCode, deniedBody)
 	}
 
-	expired := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "openid")
+	expired := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
 	srv.mu.Lock()
 	srv.deviceCodes[expired.DeviceCode].ExpiresAt = time.Now().Add(-time.Second)
 	srv.mu.Unlock()
-	expiredResponse, expiredBody := deviceTokenRequest(t, ts.URL, "device_client", expired.DeviceCode)
+	expiredResponse, expiredBody := deviceTokenRequest(t, ts.URL, deviceClient, expired.DeviceCode)
 	if expiredResponse.StatusCode != http.StatusForbidden || expiredBody["error"] != "expired_token" {
 		t.Fatalf("expired device = %d %#v", expiredResponse.StatusCode, expiredBody)
 	}
-	secondExpired, secondExpiredBody := deviceTokenRequest(t, ts.URL, "device_client", expired.DeviceCode)
+	secondExpired, secondExpiredBody := deviceTokenRequest(t, ts.URL, deviceClient, expired.DeviceCode)
 	if secondExpired.StatusCode != http.StatusBadRequest || secondExpiredBody["error"] != "invalid_grant" {
 		t.Fatalf("expired replay = %d %#v", secondExpired.StatusCode, secondExpiredBody)
 	}
@@ -785,10 +816,11 @@ func TestDevicePollingStatusesAndConditionalTokens(t *testing.T) {
 func TestConfiguredDeviceCodeLifetime(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	addDeviceClient(srv, "device_client")
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
 	srv.cfg.DeviceCodeLifetime = 2 * time.Second
 
-	issued := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "openid")
+	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
 	if issued.ExpiresIn != 2 {
 		t.Fatalf("expires_in = %d, want 2", issued.ExpiresIn)
 	}
@@ -803,8 +835,9 @@ func TestConfiguredDeviceCodeLifetime(t *testing.T) {
 func TestConcurrentDeviceExchangeYieldsExactlyOneToken(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	addDeviceClient(srv, "device_client")
-	issued := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "openid")
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
 	approveDevice(t, ts.URL, issued, "approve")
 	allowDevicePoll(srv, issued.DeviceCode)
 
@@ -818,7 +851,7 @@ func TestConcurrentDeviceExchangeYieldsExactlyOneToken(t *testing.T) {
 			defer wg.Done()
 			resp, err := http.PostForm(ts.URL+"/oauth/token", url.Values{
 				"grant_type":  {deviceCodeGrantType},
-				"client_id":   {"device_client"},
+				"client_id":   {deviceClient},
 				"device_code": {issued.DeviceCode},
 			})
 			if err != nil {
@@ -842,16 +875,17 @@ func TestConcurrentDeviceExchangeYieldsExactlyOneToken(t *testing.T) {
 func TestDeviceTokenHandlesDeletedApprover(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	addDeviceClient(srv, "device_client")
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
 
-	issued := issueDeviceAuthorization(t, ts.URL, "device_client", srv.cfg.Audience, "profile")
+	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "profile")
 	approveDevice(t, ts.URL, issued, "approve")
-	srv.mu.Lock()
-	delete(srv.users, "test_user_1")
-	srv.mu.Unlock()
+	if err := dm.User.Delete(context.Background(), "test_user_1"); err != nil {
+		t.Fatalf("delete approver: %v", err)
+	}
 	allowDevicePoll(srv, issued.DeviceCode)
 
-	response, body := deviceTokenRequest(t, ts.URL, "device_client", issued.DeviceCode)
+	response, body := deviceTokenRequest(t, ts.URL, deviceClient, issued.DeviceCode)
 	if response.StatusCode != http.StatusBadRequest || body["error"] != "invalid_grant" {
 		t.Fatalf("deleted approver response = %d %#v", response.StatusCode, body)
 	}
@@ -953,6 +987,126 @@ func TestClientRefreshTokenThroughSDK(t *testing.T) {
 	}
 }
 
+// Anyone shown an organization's request may refuse it: a non-member's deny
+// ends the authorization, which the device then sees as access_denied.
+func TestDeviceAuthorizationNonMemberMayDeny(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	other := &management.Organization{Name: auth0.String("other-org")}
+	if err := dm.Organization.Create(context.Background(), other); err != nil {
+		t.Fatalf("create organization: %v", err)
+	}
+	if err := dm.Organization.AddConnection(context.Background(), other.GetID(),
+		&management.OrganizationConnection{ConnectionID: auth0.String("con_email")}); err != nil {
+		t.Fatalf("enable connection: %v", err)
+	}
+
+	issued := issueDeviceAuthorizationForOrganization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid", other.GetID())
+	approveDevice(t, ts.URL, issued, "deny")
+	allowDevicePoll(srv, issued.DeviceCode)
+	response, body := deviceTokenRequest(t, ts.URL, deviceClient, issued.DeviceCode)
+	if response.StatusCode != http.StatusForbidden || body["error"] != "access_denied" {
+		t.Fatalf("poll after a non-member's deny = %d %#v", response.StatusCode, body)
+	}
+}
+
+// The device flow writes tenant logs as Auth0 does: a sign-in on approval,
+// recorded when its tokens are issued, fdecc for a refusal, f for a wrong
+// code, and fdeac for a user code that names no request.
+func TestDeviceSignInsReachLogStreams(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	rcv := streamTo(t, srv, ts.URL, "JSONLINES")
+
+	approved := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
+	approveDevice(t, ts.URL, approved, "approve")
+	allowDevicePoll(srv, approved.DeviceCode)
+	if response, body := deviceTokenRequest(t, ts.URL, deviceClient, approved.DeviceCode); response.StatusCode != http.StatusOK {
+		t.Fatalf("exchange = %d %#v", response.StatusCode, body)
+	}
+	denied := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
+	approveDevice(t, ts.URL, denied, "deny")
+	wrong := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
+	for _, form := range []url.Values{
+		{"user_code": {wrong.UserCode}, "confirm_user_code": {wrong.UserCode}, "identifier": {"test@example.test"}, "code": {"000000"}, "decision": {"approve"}},
+		{"user_code": {"BCDF-GHJK"}, "confirm_user_code": {"BCDF-GHJK"}, "identifier": {"test@example.test"}, "code": {"123456"}, "decision": {"approve"}},
+	} {
+		response, err := http.PostForm(ts.URL+"/device", form)
+		if err != nil {
+			t.Fatalf("device form: %v", err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("device form %v = %d", form, response.StatusCode)
+		}
+	}
+	srv.logDeliveries.Wait()
+
+	byType := map[string]logRecord{}
+	for _, r := range rcv.records(t, "JSONLINES") {
+		byType[r.Data["type"].(string)] = r
+	}
+	if got := slices.Sorted(maps.Keys(byType)); !slices.Equal(got, []string{"f", "fdeac", "fdecc", "s"}) {
+		t.Fatalf("log types = %v", got)
+	}
+	if s := byType["s"].Data; s["client_id"] != deviceClient || s["connection"] == "" || s["user_id"] != "test_user_1" {
+		t.Fatalf("sign-in record = %#v", s)
+	}
+}
+
+// A device page post that cannot sign anyone in creates no one: a malformed
+// identifier, an expired request, and one already decided are refused before
+// the sign-in provisions a user.
+func TestDeviceVerificationRefusesBeforeProvisioning(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	ctx := context.Background()
+
+	malformed := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
+	expired := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
+	srv.mu.Lock()
+	srv.deviceCodes[expired.DeviceCode].ExpiresAt = time.Now().Add(-time.Second)
+	srv.mu.Unlock()
+	decided := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
+	approveDevice(t, ts.URL, decided, "deny")
+
+	for _, tc := range []struct {
+		name       string
+		issued     deviceAuthorizationResponse
+		identifier string
+		want       int
+	}{
+		{"empty identifier", malformed, "", http.StatusBadRequest},
+		{"malformed email", malformed, "no@", http.StatusBadRequest},
+		{"letters before digits", malformed, "abc5551234567", http.StatusBadRequest},
+		{"expired request", expired, "new.person@example.test", http.StatusBadRequest},
+		{"decided request", decided, "new.person@example.test", http.StatusConflict},
+	} {
+		response, err := http.PostForm(ts.URL+"/device", url.Values{
+			"user_code": {tc.issued.UserCode}, "confirm_user_code": {tc.issued.UserCode},
+			"identifier": {tc.identifier}, "code": {"123456"}, "decision": {"approve"},
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != tc.want {
+			t.Fatalf("%s = %d, want %d", tc.name, response.StatusCode, tc.want)
+		}
+	}
+	for _, email := range []string{"new.person@example.test", "abc5551234567"} {
+		if found, err := dm.User.ListByEmail(ctx, email); err != nil || len(found) != 0 {
+			t.Fatalf("a refused post provisioned %s: %d users (%v)", email, len(found), err)
+		}
+	}
+}
+
 // A refresh_token block seeded from configuration reads back with Auth0's
 // defaults filled in around what it sets.
 func TestSeededClientRefreshTokenReadsComplete(t *testing.T) {
@@ -976,5 +1130,106 @@ func TestSeededClientRefreshTokenReadsComplete(t *testing.T) {
 	if rt.GetRotationType() != "rotating" || rt.GetLeeway() != 30 || rt.GetExpirationType() != "non-expiring" ||
 		rt.GetTokenLifetime() != 2592000 || rt.GetIdleTokenLifetime() != 1296000 || !rt.GetInfiniteTokenLifetime() {
 		t.Fatalf("seeded refresh_token = %+v", rt)
+	}
+}
+
+// Posts racing to approve one request with different new identifiers leave one
+// approval and one provisioned user: the losers are refused before signing in.
+func TestConcurrentDeviceApprovalsProvisionOnce(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
+
+	const posts = 32
+	statuses := make([]int, posts)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range posts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			response, err := http.PostForm(ts.URL+"/device", url.Values{
+				"user_code": {issued.UserCode}, "confirm_user_code": {issued.UserCode},
+				"identifier": {fmt.Sprintf("racer%d@example.test", i)}, "code": {"123456"}, "decision": {"approve"},
+			})
+			if err != nil {
+				t.Errorf("post %d: %v", i, err)
+				return
+			}
+			_ = response.Body.Close()
+			statuses[i] = response.StatusCode
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	approved, provisioned := 0, 0
+	for i, status := range statuses {
+		if status == http.StatusOK {
+			approved++
+		} else if status != http.StatusConflict {
+			t.Fatalf("post %d = %d, want 200 or 409", i, status)
+		}
+		found, err := dm.User.ListByEmail(context.Background(), fmt.Sprintf("racer%d@example.test", i))
+		if err != nil {
+			t.Fatalf("look up racer %d: %v", i, err)
+		}
+		provisioned += len(found)
+	}
+	if approved != 1 || provisioned != 1 {
+		t.Fatalf("approved %d, provisioned %d; want one of each", approved, provisioned)
+	}
+}
+
+// An approval is a sign-in, so it counts on the user as one does.
+func TestDeviceApprovalRecordsTheLogin(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	ctx := context.Background()
+	before, err := dm.User.Read(ctx, "test_user_1")
+	if err != nil {
+		t.Fatalf("read user: %v", err)
+	}
+
+	approveDevice(t, ts.URL, issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid"), "approve")
+	after, err := dm.User.Read(ctx, "test_user_1")
+	if err != nil {
+		t.Fatalf("read user: %v", err)
+	}
+	if after.GetLoginsCount() != before.GetLoginsCount()+1 || after.LastLogin == nil {
+		t.Fatalf("logins_count %d -> %d, last_login %v", before.GetLoginsCount(), after.GetLoginsCount(), after.LastLogin)
+	}
+}
+
+// A request another post is signing in through refuses a second post before
+// it provisions anyone.
+func TestDeviceVerificationInProgressRefusesAnother(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
+	srv.mu.Lock()
+	srv.deviceCodes[issued.DeviceCode].Verifying = true
+	srv.mu.Unlock()
+
+	response, err := http.PostForm(ts.URL+"/device", url.Values{
+		"user_code": {issued.UserCode}, "confirm_user_code": {issued.UserCode},
+		"identifier": {"second@example.test"}, "code": {"123456"}, "decision": {"approve"},
+	})
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("post during a verification = %d, want 409", response.StatusCode)
+	}
+	if found, err := dm.User.ListByEmail(context.Background(), "second@example.test"); err != nil || len(found) != 0 {
+		t.Fatalf("the refused post provisioned %d users (%v)", len(found), err)
 	}
 }
