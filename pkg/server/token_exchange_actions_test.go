@@ -67,6 +67,8 @@ func actionExchangeServer(t *testing.T) (*Server, *httptest.Server) {
 		Users: []config.User{
 			{ID: "email|admin", Email: "admin@example.test", Identities: []config.UserIdentity{{Connection: "email", Provider: "email", UserID: "admin"}}},
 			{ID: "email|member", Email: "member@example.test", Identities: []config.UserIdentity{{Connection: "email", Provider: "email", UserID: "member"}}},
+			{ID: "email|bare", Email: "bare@example.test"},
+			{ID: "gone|user", Email: "gone@example.test", Identities: []config.UserIdentity{{Connection: "gone", Provider: "oidc", UserID: "user"}}},
 		},
 		Members: []config.OrganizationMember{{UserID: "email|member", OrgID: "org_1"}},
 	}
@@ -180,6 +182,8 @@ func TestExchangeAction_Refusals(t *testing.T) {
 		{"target not a member", admin, url.Values{"target_user": {"email|member"}, "target_org": {"org_2"}}, "invalid_request", "user does not belong to the organization"},
 		{"unknown organization", admin, url.Values{"target_user": {"email|member"}, "target_org": {"org_x"}}, "invalid_request", "Organization not found"},
 		{"unknown user", admin, url.Values{"target_user": {"email|nobody"}}, "invalid_request", "user not found"},
+		{"user without an identity", admin, url.Values{"target_user": {"email|bare"}}, "invalid_request", "user has no identity"},
+		{"identity on a missing connection", admin, url.Values{"target_user": {"gone|user"}}, "invalid_request", "Unknown connection (gone) for client spa_app."},
 	}
 	t.Run("unknown client", func(t *testing.T) {
 		st, out := actionExchange(t, srv, ts, admin, url.Values{"client_id": {"nobody_app"}})

@@ -139,12 +139,14 @@ func (s *Server) exchangeSubjectLocked(clientID string, out exchangeOutcome) (*c
 		return nil, "", errors.New("user not found")
 	}
 	user := u.Clone()
-	var conn *config.Connection
-	if len(user.Identities) > 0 {
-		conn = s.connectionByNameLocked(user.Identities[0].Connection)
+	// Every Auth0 user has an identity; one the mock cannot place is refused.
+	if len(user.Identities) == 0 {
+		return nil, "", errors.New("user has no identity")
 	}
-	if conn != nil && !slices.Contains(conn.EnabledClients, "*") && !slices.Contains(conn.EnabledClients, clientID) {
-		return nil, "", fmt.Errorf("Unknown connection (%s) for client %s.", conn.Name, clientID) //nolint:staticcheck // Auth0's message
+	name := user.Identities[0].Connection
+	conn := s.connectionByNameLocked(name)
+	if conn == nil || !slices.Contains(conn.EnabledClients, "*") && !slices.Contains(conn.EnabledClients, clientID) {
+		return nil, "", fmt.Errorf("Unknown connection (%s) for client %s.", name, clientID) //nolint:staticcheck // Auth0's message
 	}
 	if out.org == "" {
 		return user, "", nil
@@ -163,7 +165,7 @@ func (s *Server) exchangeSubjectLocked(clientID string, out exchangeOutcome) (*c
 	if !slices.ContainsFunc(s.members[orgID], func(m config.OrganizationMember) bool { return m.UserID == user.ID }) {
 		return nil, "", errors.New("client requires organization membership, but user does not belong to the organization")
 	}
-	if conn != nil && !s.isConnectionEnabled(orgID, conn.ID) {
+	if !s.isConnectionEnabled(orgID, conn.ID) {
 		return nil, "", errors.New("connection not enabled for this organization")
 	}
 	return user, orgID, nil
