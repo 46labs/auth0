@@ -619,9 +619,9 @@ func (s *Server) emitPendingLogin(pending map[string]any, allowed bool) {
 	s.emitLog(pending)
 }
 
-// emitExchangeLog records a Custom Token Exchange outcome. sub is the subject
-// token's subject once verified, and the actor on success.
-func (s *Server) emitExchangeLog(r *http.Request, eventType, description, sub, orgID string) {
+// emitExchangeLog records a Custom Token Exchange outcome. sub is the user the
+// exchange resolved to, and actor the delegation recorded on success.
+func (s *Server) emitExchangeLog(r *http.Request, eventType, description, sub, orgID, audience string, actor map[string]any) {
 	clientID := clientIDFromRequest(r)
 	details := map[string]any{"subject_token_type": r.FormValue("subject_token_type")}
 	data := map[string]any{
@@ -630,16 +630,16 @@ func (s *Server) emitExchangeLog(r *http.Request, eventType, description, sub, o
 		"client_id":   clientID,
 		"ip":          clientIP(r),
 		"user_agent":  r.UserAgent(),
-		"audience":    s.cfg.Audience,
+		"audience":    audience,
 		"hostname":    r.Host,
 		"client_name": "",
 		"details":     details,
 	}
 	if sub != "" {
 		data["user_id"] = sub
-		if eventType == "secte" && s.cfg.Actions.TokenExchange.Actor {
-			details["actor"] = map[string]any{"sub": sub}
-		}
+	}
+	if eventType == "secte" && actor != nil {
+		details["actor"] = actor
 	}
 
 	s.mu.RLock()

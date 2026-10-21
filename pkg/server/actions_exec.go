@@ -49,17 +49,23 @@ type postLoginRequest struct {
 	SessionID string
 	// Connection is the one signed in through.
 	Connection string
+	// Actor and Metadata are a token exchange's, as its Action set them.
+	Actor    map[string]any
+	Metadata map[string]any
 }
 
 // postLogin runs the declarative claims block and then every deployed
 // post-login Action. It answers the token request itself when an Action
 // denies or fails, and reports whether the caller may go on to issue tokens.
-func (s *Server) postLogin(w http.ResponseWriter, r *http.Request, user *config.User, clientID, orgID, authorizeQuery, protocol, sessionID, connection string, requestedScopes []string, idClaims, accessClaims jwt.MapClaims) bool {
+func (s *Server) postLogin(w http.ResponseWriter, r *http.Request, user *config.User, clientID, orgID, authorizeQuery, protocol, sessionID, connection string, requestedScopes []string, idClaims, accessClaims jwt.MapClaims, with ...func(*postLoginRequest)) bool {
 	client := s.lookupClient(clientID)
-	s.applyPostLogin(user, client, orgID, idClaims, accessClaims)
+	s.applyPostLoginExact(user, client, loginOrg(user, orgID, protocol), idClaims, accessClaims)
 	req := requestFromToken(r, authorizeQuery, protocol, requestedScopes)
 	req.SessionID = sessionID
 	req.Connection = connection
+	for _, f := range with {
+		f(&req)
+	}
 	for _, b := range s.actions.listBindings(TriggerPostLogin) {
 		if b.Action.DeployedVersion == nil {
 			continue // bound but not deployed: Auth0 skips it too
@@ -80,18 +86,37 @@ func (s *Server) postLogin(w http.ResponseWriter, r *http.Request, user *config.
 	return true
 }
 
-// runPostLoginAction runs one Action's deployed code to completion, awaiting
-// an async handler, within actionTimeout. It returns *errAccessDenied when the
-// code called api.access.deny.
+// runPostLoginAction runs one post-login Action. It returns *errAccessDenied
+// when the code called api.access.deny.
 func (s *Server) runPostLoginAction(b *ActionBinding, user *config.User, client *config.Client, orgID string, req postLoginRequest, idClaims, accessClaims jwt.MapClaims) error {
-	a := b.Action
+	var denied *errAccessDenied
+	err := s.runAction(b.Action, b, "onExecutePostLogin", func(vm *goja.Runtime) (goja.Value, goja.Value) {
+		api := s.newActionAPI(vm, user, orgID, idClaims, accessClaims, func(reason string) {
+			if denied == nil {
+				denied = &errAccessDenied{reason: reason}
+			}
+		})
+		return vm.ToValue(s.buildEvent(b.Action, b, user, client, orgID, req)), api
+	})
+	if err != nil {
+		return err
+	}
+	if denied != nil {
+		return denied
+	}
+	return nil
+}
+
+// runAction runs one Action's deployed code to completion, awaiting an async
+// handler, within actionTimeout. setup builds the handler's event and api.
+func (s *Server) runAction(a *Action, b *ActionBinding, export string, setup func(*goja.Runtime) (event, api goja.Value)) error {
 	registry := require.NewRegistry()
 	registry.RegisterNativeModule(console.ModuleName, console.RequireWithPrinter(actionPrinter{a.Name}))
+	s.registerNPMModules(registry, a.DeployedVersion.Dependencies)
 	loop := eventloop.NewEventLoop(eventloop.WithRegistry(registry), eventloop.EnableConsole(false))
 
 	var (
 		runErr error
-		denied *errAccessDenied
 		vm     *goja.Runtime
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
@@ -112,18 +137,14 @@ func (s *Server) runPostLoginAction(b *ActionBinding, user *config.User, client 
 		buffer.Enable(vm)
 		s.installRequire(vm)
 		installFetch(ctx, vm, loop)
-		_ = vm.Set("event", vm.ToValue(s.buildEvent(a, b, user, client, orgID, req)))
-		api := s.newActionAPI(vm, user, orgID, idClaims, accessClaims, func(reason string) {
-			if denied == nil {
-				denied = &errAccessDenied{reason: reason}
-			}
-		})
-		handler, err := loadPostLoginHandler(vm, a)
+		event, api := setup(vm)
+		_ = vm.Set("event", event)
+		handler, err := loadHandler(vm, a, export)
 		if err != nil {
 			runErr = err
 			return
 		}
-		result, err := handler(goja.Undefined(), vm.Get("event"), api)
+		result, err := handler(goja.Undefined(), event, api)
 		if err != nil {
 			runErr = fmt.Errorf("run: %w", err)
 			return
@@ -135,18 +156,12 @@ func (s *Server) runPostLoginAction(b *ActionBinding, user *config.User, client 
 			runErr = fmt.Errorf("await: %w", err)
 		}
 	})
-	if runErr != nil {
-		return runErr
-	}
-	if denied != nil {
-		return denied
-	}
-	return nil
+	return runErr
 }
 
-// loadPostLoginHandler evaluates the Action as a CommonJS module and returns
-// its onExecutePostLogin export.
-func loadPostLoginHandler(vm *goja.Runtime, a *Action) (goja.Callable, error) {
+// loadHandler evaluates the Action as a CommonJS module and returns the named
+// export.
+func loadHandler(vm *goja.Runtime, a *Action, export string) (goja.Callable, error) {
 	wrapped := "(function(exports, module, require) {\n" + a.DeployedVersion.Code + "\n})"
 	fnVal, err := vm.RunString(wrapped)
 	if err != nil {
@@ -163,9 +178,9 @@ func loadPostLoginHandler(vm *goja.Runtime, a *Action) (goja.Callable, error) {
 	if me, ok := module.Get("exports").(*goja.Object); ok {
 		target = me
 	}
-	handler, ok := goja.AssertFunction(target.Get("onExecutePostLogin"))
+	handler, ok := goja.AssertFunction(target.Get(export))
 	if !ok {
-		return nil, fmt.Errorf("action %q does not export onExecutePostLogin", a.Name)
+		return nil, fmt.Errorf("action %q does not export %s", a.Name, export)
 	}
 	return handler, nil
 }
@@ -354,6 +369,7 @@ func fetchResponse(vm *goja.Runtime, resp *http.Response, data []byte) *goja.Obj
 // authorization, and client context the declarative block sees, plus what
 // only code can use (request, transaction, secrets, organization).
 func (s *Server) buildEvent(a *Action, b *ActionBinding, user *config.User, client *config.Client, orgID string, req postLoginRequest) map[string]any {
+	orgID = loginOrg(user, orgID, req.Protocol)
 	ev := s.buildPostLoginContext(user, client, orgID)
 	u := ev["user"].(map[string]any)
 	u["email_verified"] = user.EmailVerified
@@ -390,10 +406,17 @@ func (s *Server) buildEvent(a *Action, b *ActionBinding, user *config.User, clie
 		"method": req.Method, "ip": req.IP, "hostname": req.Host, "user_agent": req.UA,
 		"query": req.Query, "body": req.Body, "geoip": map[string]any{},
 	}
-	ev["transaction"] = map[string]any{
+	tx := map[string]any{
 		"protocol": req.Protocol, "requested_scopes": req.Scopes, "redirect_uri": req.RedirectURI,
 		"login_hint": req.LoginHint, "ui_locales": []any{}, "locale": "en",
 	}
+	if req.Actor != nil {
+		tx["actor"] = req.Actor
+	}
+	if req.Metadata != nil {
+		tx["metadata"] = req.Metadata
+	}
+	ev["transaction"] = tx
 	if req.SessionID != "" {
 		ev["session"] = map[string]any{"id": req.SessionID}
 	}
@@ -401,9 +424,6 @@ func (s *Server) buildEvent(a *Action, b *ActionBinding, user *config.User, clie
 	ev["secrets"] = secretValues(a, b)
 	ev["stats"] = map[string]any{"logins_count": 1}
 	ev["authentication"] = map[string]any{"methods": []any{map[string]any{"name": "passwordless", "timestamp": time.Now().UTC().Format(time.RFC3339)}}}
-	if orgID == "" {
-		orgID = user.AppMetadata.TenantID()
-	}
 	if orgID != "" {
 		s.mu.RLock()
 		org := s.organizations[orgID]
@@ -450,7 +470,7 @@ func (s *Server) setUserMetadata(user *config.User, key string, value any) {
 }
 
 // secretBodyFields never reach an Action's event.
-var secretBodyFields = map[string]bool{"code": true, "code_verifier": true, "client_secret": true, "refresh_token": true}
+var secretBodyFields = map[string]bool{"code": true, "code_verifier": true, "client_secret": true, "refresh_token": true, "subject_token": true, "actor_token": true}
 
 // requestFromToken is the post-login request for a token exchange: the
 // original /authorize query when there was one, else only the token form.
