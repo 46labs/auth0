@@ -20,10 +20,14 @@ Full-featured OIDC provider mock with Auth0-compatible API for local development
 - Organization enabled connections (`/api/v2/organizations/:id/enabled_connections`)
 - Roles registry (`/api/v2/roles`), including `name_filter` for read-or-create by name
 - Connections management (`/api/v2/connections`)
-- Clients CRUD (`/api/v2/clients`), including `initiate_login_uri`
+- Clients CRUD (`/api/v2/clients`), including `initiate_login_uri` and `client_metadata`
 - User metadata updates (`/api/v2/users/:id`)
+- Passwordless user creation (`POST /api/v2/users`), lookup by email (`/api/v2/users-by-email`) and
+  identity linking (`POST /api/v2/users/:id/identities`)
 - Organization membership and member roles
+- Token exchange profiles (`/api/v2/token-exchange-profiles`), checkpoint-paginated; `include_totals` is refused as Auth0 refuses it
 - Log streams (`/api/v2/log-streams`), with delivery of sign-in and token exchange events to `http` streams
+- Self-Service SSO profiles and tickets (`/api/v2/self-service-profiles`), with a setup page
 - Page-based pagination (`page`, `per_page`) on every list endpoint
 
 ### Organization login
@@ -494,6 +498,35 @@ three times. To deliver to a
 receiver behind a locally issued certificate, set `logStreamCAFile` in config, or
 `logStreamCA.secretName` in the chart. The file is read on each delivery, so it may appear or
 rotate after the mock starts; until it can be read, deliveries fail and are retried.
+
+### Users
+
+```bash
+POST /api/v2/users
+GET /api/v2/users-by-email?email=...
+POST /api/v2/users/:id/identities
+```
+
+Users are created on passwordless connections only, as `email|...` or `sms|...`. A sign-in through an
+enterprise connection (the `connection` authorize parameter) finds or provisions that connection's
+user, as `<strategy>|<connection>|...`. A passwordless sign-in prefers the user holding a
+passwordless identity for the address, so after a link it lands on the primary. Linking deletes the
+secondary user and its memberships. `link_with` is not implemented.
+
+### Self-Service SSO
+
+```bash
+GET|POST /api/v2/self-service-profiles
+GET|PATCH|DELETE /api/v2/self-service-profiles/:id
+POST /api/v2/self-service-profiles/:id/sso-ticket
+POST /api/v2/self-service-profiles/:id/sso-ticket/:ticket/revoke
+GET|POST /self-service/connections-flow?ticket=...
+```
+
+A ticket names either `connection_config` (create a connection) or `connection_id` (edit one). Its
+link opens a form for the strategy, display name and email domains. Finishing it creates or edits
+the connection, enables it for the ticket's clients and organizations, and spends the ticket. Every
+domain is treated as verified. Ticket fields the mock cannot apply are refused with 400.
 
 ## OIDC Endpoints
 

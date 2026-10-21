@@ -48,6 +48,8 @@ type UserIdentity struct {
 	Provider   string `json:"provider" yaml:"provider" mapstructure:"provider"`
 	UserID     string `json:"user_id" yaml:"user_id" mapstructure:"user_id"`
 	IsSocial   bool   `json:"isSocial" yaml:"isSocial" mapstructure:"isSocial"`
+	// ProfileData is the linked user's profile, on a secondary identity only.
+	ProfileData map[string]any `json:"profileData,omitempty" yaml:"-" mapstructure:"-"`
 }
 
 type User struct {
@@ -56,12 +58,16 @@ type User struct {
 	Email         string                 `json:"email" yaml:"email" mapstructure:"email"`
 	Name          string                 `json:"name" yaml:"name" mapstructure:"name"`
 	EmailVerified bool                   `json:"email_verified" yaml:"email_verified" mapstructure:"email_verified"`
+	PhoneVerified *bool                  `json:"phone_verified,omitempty" yaml:"phone_verified,omitempty" mapstructure:"phone_verified"`
 	Blocked       *bool                  `json:"blocked,omitempty" yaml:"blocked,omitempty" mapstructure:"blocked"`          // True if user is blocked from the application
 	Identities    []UserIdentity         `json:"identities,omitempty" yaml:"identities,omitempty" mapstructure:"identities"` // Auth0 identities array
 	AppMetadata   AppMetadata            `json:"app_metadata,omitempty" yaml:"app_metadata,omitempty" mapstructure:"app_metadata"`
 	UserMetadata  map[string]interface{} `json:"user_metadata,omitempty" yaml:"user_metadata,omitempty" mapstructure:"user_metadata"`
 	Picture       string                 `json:"picture,omitempty" yaml:"picture,omitempty" mapstructure:"picture"`
 	LastLogin     *string                `json:"last_login,omitempty" yaml:"last_login,omitempty" mapstructure:"last_login"`
+	LoginsCount   int                    `json:"logins_count,omitempty" yaml:"logins_count,omitempty" mapstructure:"logins_count"`
+	CreatedAt     string                 `json:"created_at,omitempty" yaml:"-" mapstructure:"-"`
+	UpdatedAt     string                 `json:"updated_at,omitempty" yaml:"-" mapstructure:"-"`
 	Organizations []string               `json:"organizations,omitempty" yaml:"organizations,omitempty" mapstructure:"organizations"` // Organization IDs
 }
 

@@ -351,3 +351,52 @@ func TestActions_SessionIDIsStableAcrossRefresh(t *testing.T) {
 		t.Fatal("a new login reused the session id")
 	}
 }
+
+// api.roles.getUserEffectiveRolesByNames answers the roles among the names
+// the user holds in the login's organization, as a Promise of {roles}. PEE's
+// post-login Action resolves an invited or elected admin's role from it.
+func TestActions_GetUserEffectiveRolesByNames(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+	m := mgmt{t, ts.URL}
+	m.deployBound("roles", `
+		exports.onExecutePostLogin = async (event, api) => {
+		  const asked = (event.request.query.ask || "").split(",").filter(Boolean);
+		  const { roles } = await api.roles.getUserEffectiveRolesByNames(asked);
+		  api.accessToken.setCustomClaim("https://mock/roles", roles.map((r) => r.name).join(","));
+		  api.accessToken.setCustomClaim("https://mock/shapes", roles.map((r) => [typeof r.id, r.id !== "", r.type].join(":")).join(","));
+		};`)
+
+	for _, tc := range []struct {
+		name, query, want string
+	}{
+		{"held role in the organization", "&organization=org_test&ask=superadmin,admin,user", "admin"},
+		{"a role not asked for", "&organization=org_test&ask=user", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, tok := login(t, ts, tc.query)
+			if st != 200 {
+				t.Fatalf("token: %d %v", st, tok)
+			}
+			ac := claims(t, tok["access_token"])
+			if got := ac["https://mock/roles"]; got != tc.want {
+				t.Fatalf("roles = %q, want %q", got, tc.want)
+			}
+			// Auth0's Role: {id, name, type}, id never empty.
+			if tc.want != "" && ac["https://mock/shapes"] != "string:true:direct" {
+				t.Fatalf("role shape = %v", ac["https://mock/shapes"])
+			}
+		})
+	}
+	// A login this mock leaves without an organization holds no roles: it
+	// models roles only through organization membership. Unreachable through
+	// /authorize for a single-organization user, which the mock scopes to it.
+	if got := srv.effectiveRolesByNames("test_user_1", "", []string{"admin"}); len(got) != 0 {
+		t.Fatalf("roles without an organization = %v", got)
+	}
+	// More names than Auth0 takes rejects the call, failing the login.
+	many := strings.TrimSuffix(strings.Repeat("r,", maxRoleNames+1), ",")
+	if st, tok := login(t, ts, "&organization=org_test&ask="+many); st == 200 {
+		t.Fatalf("%d names accepted: %v", maxRoleNames+1, tok)
+	}
+}

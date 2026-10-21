@@ -123,8 +123,12 @@ func (s *Server) authorizeOrgLoginLocked(user *config.User, orgID, connectionNam
 
 // Org-scoped login failures.
 var (
-	errOrgNotFound  = errors.New("the organization does not exist")
-	errOrgNotMember = errors.New("the user is not a member of the organization")
+	errConnectionUnknown         = errors.New("the connection does not exist")
+	errConnectionWrongIdentifier = errors.New("the connection does not send codes to this identifier")
+	errConnectionNotForClient    = errors.New("the connection is not enabled for this client")
+	errConnectionNotInOrg        = errors.New("the connection is not enabled for the organization")
+	errOrgNotFound               = errors.New("the organization does not exist")
+	errOrgNotMember              = errors.New("the user is not a member of the organization")
 )
 
 // authorizeOrgLogin is authorizeOrgLoginLocked with the lock taken.
@@ -137,10 +141,8 @@ func (s *Server) authorizeOrgLogin(user *config.User, orgID, connectionName stri
 // connectionIDByName resolves the `connection` authorize parameter, which
 // Auth0 expresses as a name, to the stored id. Caller holds the lock.
 func (s *Server) connectionIDByName(name string) string {
-	for _, c := range s.connections {
-		if c.Name == name {
-			return c.ID
-		}
+	if c := s.connectionByNameLocked(name); c != nil {
+		return c.ID
 	}
 	return ""
 }
@@ -180,18 +182,18 @@ func (s *Server) invitationConnectionName(t invitationTicket) string {
 // redeemInvitation consumes a pending invitation, creating the user when the
 // email is unknown. One-time: the removal shares the lock with the read, so a
 // replay or a concurrent second attempt finds nothing.
-func (s *Server) redeemInvitation(t invitationTicket, identifier string, now time.Time) (*config.User, error) {
+func (s *Server) redeemInvitation(t invitationTicket, identifier string, now time.Time) (*config.User, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	inv, err := s.lookupInvitation(t, now)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	// The ticket is bound to the invited address, compared case insensitively.
 	if !strings.EqualFold(strings.TrimSpace(identifier), inv.InviteeEmail) {
-		return nil, errInvitationWrongInvitee
+		return nil, "", errInvitationWrongInvitee
 	}
 
 	// Resolve the role before touching the user store: a role deleted between
@@ -201,18 +203,42 @@ func (s *Server) redeemInvitation(t invitationTicket, identifier string, now tim
 	if len(inv.Roles) > 0 {
 		role = s.roleNameByID(inv.Roles[0])
 		if role == "" {
-			return nil, errInvitationRoleGone
+			return nil, "", errInvitationRoleGone
 		}
 	}
 
-	user := s.findUserLocked(inv.InviteeEmail)
-	if user == nil {
-		user = s.autoCreateUserLocked(inv.InviteeEmail)
+	var user *config.User
+	connID := inv.ConnectionID
+	if connID == "" && t.ConnectionName != "" {
+		if connID = s.connectionIDByName(t.ConnectionName); connID == "" {
+			return nil, "", errConnectionUnknown
+		}
+	}
+	// Checked here, under the lock that spends the ticket.
+	allow := s.connectionAllowedLocked(t.ClientID, t.OrgID)
+	var via string
+	conn, ok := s.connections[connID]
+	if ok && !conn.IsPasswordless() {
+		if err := allow(conn); err != nil {
+			return nil, "", err
+		}
+		user, via = s.enterpriseUserLocked(conn, inv.InviteeEmail), conn.Name
+	} else {
+		var named *config.Connection
+		if ok {
+			named = conn
+			if err := allow(named); err != nil {
+				return nil, "", err
+			}
+		}
+		if user, via, err = s.passwordlessUserLocked(inv.InviteeEmail, named, allow); err != nil {
+			return nil, "", err
+		}
 	}
 
 	stored, ok := s.users[user.ID]
 	if !ok {
-		return nil, errInvitationNotFound
+		return nil, "", errInvitationNotFound
 	}
 
 	s.addMemberLocked(t.OrgID, stored, role)
@@ -221,7 +247,7 @@ func (s *Server) redeemInvitation(t invitationTicket, identifier string, now tim
 	s.removeInvitationLocked(t.OrgID, inv.ID)
 
 	log.Printf("Invitation %s redeemed by %s into %s (role %q)", inv.ID, inv.InviteeEmail, t.OrgID, role)
-	return stored.Clone(), nil
+	return stored.Clone(), via, nil
 }
 
 // addMemberLocked requires the caller to hold the write lock.

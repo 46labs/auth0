@@ -2,10 +2,15 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"maps"
 	"net/http"
+	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/46labs/auth0/pkg/config"
 )
@@ -642,8 +647,17 @@ func (s *Server) listConnections(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// name is a substring match and strategy may repeat, as Auth0 filters them.
+	names := r.URL.Query()["name"]
+	strategies := r.URL.Query()["strategy"]
 	all := make([]config.Connection, 0, len(s.connections))
 	for _, conn := range s.connections {
+		if len(names) > 0 && !slices.ContainsFunc(names, func(n string) bool { return strings.Contains(conn.Name, n) }) {
+			continue
+		}
+		if len(strategies) > 0 && !slices.Contains(strategies, conn.Strategy) {
+			continue
+		}
 		all = append(all, *conn.Clone())
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
@@ -672,6 +686,11 @@ func (s *Server) createConnection(w http.ResponseWriter, r *http.Request) {
 
 	stored := conn.Clone()
 	s.mu.Lock()
+	if s.connectionByNameLocked(conn.Name) != nil {
+		s.mu.Unlock()
+		writeAuth0Error(w, http.StatusConflict, "A connection with the same name already exists")
+		return
+	}
 	s.connections[stored.ID] = stored
 	s.mu.Unlock()
 
@@ -892,21 +911,20 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, userID strin
 		return
 	}
 
-	// Remove user from all organizations
-	for orgID, members := range s.members {
-		filtered := []config.OrganizationMember{}
-		for _, member := range members {
-			if member.UserID != userID {
-				filtered = append(filtered, member)
-			}
-		}
-		s.members[orgID] = filtered
-	}
+	s.removeMembershipsLocked(userID)
 
 	// Delete the user
 	delete(s.users, userID)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// removeMembershipsLocked requires the write lock. It builds new slices: a
+// reader may still range over one it took under the read lock.
+func (s *Server) removeMembershipsLocked(userID string) {
+	for orgID, members := range s.members {
+		s.members[orgID] = slices.DeleteFunc(slices.Clone(members), func(m config.OrganizationMember) bool { return m.UserID == userID })
+	}
 }
 
 func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
@@ -993,6 +1011,16 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"name_required"}`, http.StatusBadRequest)
 		return
 	}
+	if len(client.ClientMetadata) > 0 {
+		patch := make(map[string]any, len(client.ClientMetadata))
+		for k, v := range client.ClientMetadata {
+			patch[k] = v
+		}
+		if _, err := mergeClientMetadata(nil, &patch); err != nil {
+			writeAuth0Error(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	if client.InitiateLoginURI != "" {
 		if err := validateInitiateLoginURI(client.InitiateLoginURI); err != nil {
 			writeAuth0Error(w, http.StatusBadRequest, err.Error())
@@ -1058,6 +1086,7 @@ func (s *Server) updateClient(w http.ResponseWriter, r *http.Request, clientID s
 		GrantTypes       *[]string       `json:"grant_types"`
 		JWTConfig        *map[string]any `json:"jwt_configuration"`
 		InitiateLoginURI *string         `json:"initiate_login_uri"`
+		ClientMetadata   *map[string]any `json:"client_metadata"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
 		s.mu.Unlock()
@@ -1070,6 +1099,12 @@ func (s *Server) updateClient(w http.ResponseWriter, r *http.Request, clientID s
 	if updates.Name != nil && *updates.Name == "" {
 		s.mu.Unlock()
 		writeAuth0Error(w, http.StatusBadRequest, "name cannot be empty")
+		return
+	}
+	metadata, err := mergeClientMetadata(client.ClientMetadata, updates.ClientMetadata)
+	if err != nil {
+		s.mu.Unlock()
+		writeAuth0Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if updates.InitiateLoginURI != nil && *updates.InitiateLoginURI != "" {
@@ -1101,10 +1136,46 @@ func (s *Server) updateClient(w http.ResponseWriter, r *http.Request, clientID s
 	if updates.InitiateLoginURI != nil {
 		client.InitiateLoginURI = *updates.InitiateLoginURI
 	}
+	if updates.ClientMetadata != nil {
+		client.ClientMetadata = metadata
+	}
 	response := client.Clone()
 	s.mu.Unlock()
 
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+// clientMetadataKey is the key charset the SDK documents for client_metadata.
+var clientMetadataKey = regexp.MustCompile(`^[A-Za-z0-9:,\-+=_*?"/\\()<>@\t ]{1,255}$`)
+
+// mergeClientMetadata applies a client_metadata patch key by key, null
+// removing a key, and validates the result as the SDK documents it.
+func mergeClientMetadata(current map[string]string, patch *map[string]any) (map[string]string, error) {
+	if patch == nil {
+		return current, nil
+	}
+	out := maps.Clone(current)
+	if out == nil {
+		out = map[string]string{}
+	}
+	for k, v := range *patch {
+		if !clientMetadataKey.MatchString(k) {
+			return nil, errors.New("client_metadata key " + strconv.Quote(k) + " is not allowed")
+		}
+		if v == nil {
+			delete(out, k)
+			continue
+		}
+		str, ok := v.(string)
+		if !ok || utf8.RuneCountInString(str) > 255 {
+			return nil, errors.New("client_metadata." + k + " must be a string of at most 255 characters")
+		}
+		out[k] = str
+	}
+	if len(out) > 10 {
+		return nil, errors.New("client_metadata allows at most 10 properties")
+	}
+	return out, nil
 }
 
 func (s *Server) deleteClient(w http.ResponseWriter, r *http.Request, clientID string) {

@@ -334,7 +334,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 	if hasDeviceScope(scope, "openid") {
 		idClaims["sid"] = sessionID
 	}
-	if !s.postLogin(w, r, userCopy, clientID, orgID, "", "oauth2-device-code", sessionID, strings.Fields(scope), idClaims, accessClaims) {
+	if !s.postLogin(w, r, userCopy, clientID, orgID, "", "oauth2-device-code", sessionID, "", strings.Fields(scope), idClaims, accessClaims) {
 		return
 	}
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/46labs/auth0/pkg/config"
+	"github.com/auth0/go-auth0"
 	"github.com/auth0/go-auth0/management"
 )
 
@@ -66,6 +67,13 @@ func newInviteFixture(t *testing.T) (*inviteFixture, func()) {
 	if err := m.Client.Create(ctx, c); err != nil {
 		ts.Close()
 		t.Fatalf("Client.Create: %v", err)
+	}
+	// Auth0 signs in through a connection only for the clients enabled on it.
+	if err := m.Connection.UpdateEnabledClients(ctx, conn.GetID(), []management.ConnectionEnabledClient{
+		{ClientID: c.ClientID, Status: auth0.Bool(true)},
+	}); err != nil {
+		ts.Close()
+		t.Fatalf("Connection.UpdateEnabledClients: %v", err)
 	}
 
 	return &inviteFixture{

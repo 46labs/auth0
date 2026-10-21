@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"maps"
 	"reflect"
 )
 
@@ -116,7 +117,10 @@ func (u *User) Clone() *User {
 
 	if u.Identities != nil {
 		out.Identities = make([]UserIdentity, len(u.Identities))
-		copy(out.Identities, u.Identities)
+		for i, id := range u.Identities {
+			id.ProfileData = cloneAnyMap(id.ProfileData)
+			out.Identities[i] = id
+		}
 	}
 	if u.Organizations != nil {
 		out.Organizations = make([]string, len(u.Organizations))
@@ -125,6 +129,10 @@ func (u *User) Clone() *User {
 	if u.Blocked != nil {
 		blocked := *u.Blocked
 		out.Blocked = &blocked
+	}
+	if u.PhoneVerified != nil {
+		v := *u.PhoneVerified
+		out.PhoneVerified = &v
 	}
 	if u.LastLogin != nil {
 		lastLogin := *u.LastLogin
@@ -180,6 +188,7 @@ func (c *Client) Clone() *Client {
 	}
 	out := *c
 	out.JWTConfig = cloneAnyMap(c.JWTConfig)
+	out.ClientMetadata = maps.Clone(c.ClientMetadata)
 
 	if c.Callbacks != nil {
 		out.Callbacks = make([]string, len(c.Callbacks))
