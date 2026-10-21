@@ -9,44 +9,76 @@ import (
 
 // unknownRefreshTokenError is Auth0's answer, with HTTP 403, to a refresh token it
 // does not know, including one a rotation retired or a breach revoked.
-const unknownRefreshTokenError = `{"error":"invalid_grant","error_description":"Unknown or invalid refresh token."}`
+const unknownRefreshTokenError = "Unknown or invalid refresh token."
 
-const wrongClientRefreshTokenError = `{"error":"invalid_grant","error_description":"the refresh token was issued to a different client"}`
+const wrongClientRefreshTokenError = "the refresh token was issued to a different client"
 
-// redeemRefreshToken claims a token for clientID, rotating it when the client
-// does; reuse outside the leeway revokes the family, as Auth0's breach detection does.
-func (s *Server) redeemRefreshToken(token, clientID string, client *config.Client, now time.Time) (*refreshTokenState, string, string, int) {
+// claimRefreshToken checks a refresh by clientID without changing a live
+// token; reuse of a retired one outside its leeway revokes the family. The
+// caller runs release when the refresh ends.
+func (s *Server) claimRefreshToken(token, clientID string, now time.Time) (state *refreshTokenState, release func(), errDescription string, status int) {
+	release = func() {}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	state, live := s.refreshTokens[token]
+	retired, wasRetired := s.retiredRefreshTokens[token]
+	if !live && !wasRetired {
+		return nil, release, unknownRefreshTokenError, http.StatusForbidden
+	}
 	if !live {
-		retired, ok := s.retiredRefreshTokens[token]
-		if !ok {
-			return nil, "", unknownRefreshTokenError, http.StatusForbidden
-		}
-		if !s.reusableWithinLeeway(token, retired, client, now) {
-			s.revokeRefreshTokenFamily(retired.State.Family)
-			return nil, "", unknownRefreshTokenError, http.StatusForbidden
-		}
 		state = retired.State
 	}
-	// The token belongs to the client the login was authorized for;
-	// otherwise the audience and action client context could be swapped.
+	// Checked first: another client presenting the token changes nothing.
 	if state.ClientID != "" && clientID != state.ClientID {
-		return nil, "", wrongClientRefreshTokenError, http.StatusBadRequest
+		return nil, release, wrongClientRefreshTokenError, http.StatusBadRequest
 	}
-	if !client.RotatesRefreshTokens() {
-		return state, "", "", 0
+	client := s.clients[state.ClientID]
+	if !live && !s.reusableWithinLeeway(token, retired, client, now) {
+		s.revokeRefreshTokenFamily(state.Family)
+		return nil, release, unknownRefreshTokenError, http.StatusForbidden
 	}
+	// Without a leeway a concurrent use is reuse: refused before its Action
+	// runs, and a breach once the refresh in flight rotates.
+	if live && client.RotatesRefreshTokens() && client.RefreshTokenLeeway() <= 0 {
+		if _, inFlight := s.refreshInFlight[token]; inFlight {
+			s.refreshInFlight[token] = true
+			return nil, release, unknownRefreshTokenError, http.StatusForbidden
+		}
+		s.refreshInFlight[token] = false
+		release = func() {
+			s.mu.Lock()
+			delete(s.refreshInFlight, token)
+			s.mu.Unlock()
+		}
+	}
+	return state, release, "", 0
+}
 
-	rotated := s.newRefreshToken()
-	if live {
-		delete(s.refreshTokens, token)
-		s.retiredRefreshTokens[token] = &retiredRefreshToken{State: state, RetiredAt: now}
+// rotateRefreshToken replaces token once its claimed refresh has succeeded, for
+// a client that rotates; it fails if the family was revoked or reused meanwhile.
+func (s *Server) rotateRefreshToken(token string, state *refreshTokenState) (string, string, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	client := s.clients[state.ClientID]
+	if !client.RotatesRefreshTokens() {
+		return "", "", 0
 	}
+	if s.refreshInFlight[token] {
+		s.revokeRefreshTokenFamily(state.Family)
+		return "", unknownRefreshTokenError, http.StatusForbidden
+	}
+	if _, live := s.refreshTokens[token]; live {
+		delete(s.refreshTokens, token)
+		s.retiredRefreshTokens[token] = &retiredRefreshToken{State: state, RetiredAt: time.Now()}
+	} else if _, ok := s.retiredRefreshTokens[token]; !ok {
+		s.revokeRefreshTokenFamily(state.Family)
+		return "", unknownRefreshTokenError, http.StatusForbidden
+	}
+	rotated := s.newRefreshToken()
 	s.refreshTokens[rotated] = state
-	return state, rotated, "", 0
+	return rotated, "", 0
 }
 
 // reusableWithinLeeway reports whether a retired token is its family's latest

@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -408,20 +409,31 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if grantType == "refresh_token" {
 		refreshToken := r.FormValue("refresh_token")
 		if refreshToken == "" {
-			http.Error(w, `{"error":"invalid_request","error_description":"refresh_token is required"}`, 400)
+			writeOAuthError(w, http.StatusBadRequest, "invalid_request", "refresh_token is required")
 			return
 		}
 
-		issued, rotated, errBody, errStatus := s.redeemRefreshToken(refreshToken, clientID, s.lookupClient(clientID), time.Now())
+		issued, release, errDescription, errStatus := s.claimRefreshToken(refreshToken, clientID, time.Now())
+		defer release()
 		if issued == nil {
-			http.Error(w, errBody, errStatus)
+			writeOAuthError(w, errStatus, "invalid_grant", errDescription)
 			return
+		}
+		// A refresh may narrow the scope it was granted, never widen it.
+		scope := issued.Scope
+		// A blank scope is an absent one, never the default scopes.
+		if requested := strings.Fields(r.FormValue("scope")); len(requested) > 0 {
+			if !scopeWithin(requested, issued.Scope) {
+				writeOAuthError(w, http.StatusBadRequest, "invalid_scope", "the scope exceeds the one granted")
+				return
+			}
+			scope = strings.Join(requested, " ")
 		}
 
 		// Load first: the account can be deleted while its refresh token lives.
 		user := s.getUserByID(issued.UserID)
 		if user == nil {
-			http.Error(w, `{"error":"invalid_grant","error_description":"User not found"}`, 400)
+			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "User not found")
 			return
 		}
 
@@ -438,13 +450,13 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
 
 		// Generate new access token
-		accessClaims := s.accessTokenClaims(user, s.cfg.Audience, issued.Scope, orgID, now)
+		accessClaims := s.accessTokenClaims(user, s.cfg.Audience, scope, orgID, now)
 		idClaims := s.idTokenClaims(user, clientID, orgID, now)
 
 		if issued.SessionID != "" {
 			idClaims["sid"] = issued.SessionID
 		}
-		if !s.postLogin(w, r, user, clientID, orgID, "", "oauth2-refresh-token", issued.SessionID, issued.Connection, nil, idClaims, accessClaims) {
+		if !s.postLogin(w, r, user, clientID, orgID, "", "oauth2-refresh-token", issued.SessionID, issued.Connection, strings.Fields(scope), idClaims, accessClaims) {
 			return
 		}
 
@@ -453,12 +465,18 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Token generation failed", 500)
 			return
 		}
+		// Rotated only now, so a refused refresh leaves the client its token.
+		rotated, errDescription, errStatus := s.rotateRefreshToken(refreshToken, issued)
+		if errDescription != "" {
+			writeOAuthError(w, errStatus, "invalid_grant", errDescription)
+			return
+		}
 
 		response := map[string]interface{}{
 			"access_token": accessTokenString,
 			"token_type":   "Bearer",
 			"expires_in":   3600,
-			"scope":        grantedScope(issued.Scope),
+			"scope":        grantedScope(scope),
 		}
 		// Auth0 returns a refresh token on a refresh only with rotation.
 		// Without it the response has none and the redeemed token stays valid.
@@ -466,7 +484,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			response["refresh_token"] = rotated
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if issued.IncludeIDToken {
+		if issued.IncludeIDToken && slices.Contains(strings.Fields(scope), "openid") {
 			idTokenString, err := s.SignToken(idClaims)
 			if err != nil {
 				http.Error(w, "Token generation failed", 500)
@@ -707,4 +725,15 @@ func (s *Server) addOrgClaims(claims jwt.MapClaims, user *config.User, orgID str
 	if role := roleForOrg(user, orgID); role != "" {
 		claims[strings.TrimSuffix(s.cfg.Issuer, "/")+"/role"] = role
 	}
+}
+
+// scopeWithin reports whether every scope in requested is in granted.
+func scopeWithin(requested []string, granted string) bool {
+	have := strings.Fields(granted)
+	for _, scope := range requested {
+		if !slices.Contains(have, scope) {
+			return false
+		}
+	}
+	return true
 }

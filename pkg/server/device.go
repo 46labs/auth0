@@ -28,25 +28,25 @@ func (s *Server) handleDeviceAuthorization(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if r.Method != http.MethodPost {
-		writeDeviceError(w, http.StatusMethodNotAllowed, "invalid_request", "method must be POST")
+		writeOAuthError(w, http.StatusMethodNotAllowed, "invalid_request", "method must be POST")
 		return
 	}
 
 	if err := r.ParseForm(); err != nil {
-		writeDeviceError(w, http.StatusBadRequest, "invalid_request", "invalid request body")
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid request body")
 		return
 	}
 	clientID := clientIDFromRequest(r)
 	client := s.lookupClient(clientID)
-	if client == nil || client.AppType != "native" || !hasGrantType(client, deviceCodeGrantType) {
-		writeDeviceError(w, http.StatusUnauthorized, "invalid_client", "client is not eligible for device authorization")
+	if !deviceEligible(client) {
+		writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "client is not eligible for device authorization")
 		return
 	}
 
 	audience := r.FormValue("audience")
 	resource := r.FormValue("resource")
 	if audience != "" && resource != "" && audience != resource {
-		writeDeviceError(w, http.StatusBadRequest, "invalid_request", "audience and resource must match")
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "audience and resource must match")
 		return
 	}
 	if audience == "" {
@@ -56,7 +56,7 @@ func (s *Server) handleDeviceAuthorization(w http.ResponseWriter, r *http.Reques
 		audience = s.cfg.Audience
 	}
 	if audience != s.cfg.Audience {
-		writeDeviceError(w, http.StatusBadRequest, "invalid_request", "audience is not supported")
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "audience is not supported")
 		return
 	}
 	orgID := r.FormValue("organization")
@@ -65,14 +65,14 @@ func (s *Server) handleDeviceAuthorization(w http.ResponseWriter, r *http.Reques
 		_, knownOrganization := s.organizations[orgID]
 		s.mu.RUnlock()
 		if !knownOrganization {
-			writeDeviceError(w, http.StatusBadRequest, "invalid_request", "organization not found")
+			writeOAuthError(w, http.StatusBadRequest, "invalid_request", "organization not found")
 			return
 		}
 	}
 
 	scope, err := s.deviceScope(clientID, r.FormValue("scope"), audience)
 	if err != nil {
-		writeDeviceError(w, http.StatusBadRequest, "invalid_scope", err.Error())
+		writeOAuthError(w, http.StatusBadRequest, "invalid_scope", err.Error())
 		return
 	}
 
@@ -83,7 +83,7 @@ func (s *Server) handleDeviceAuthorization(w http.ResponseWriter, r *http.Reques
 	userCode, err := s.newDeviceUserCodeLocked()
 	if err != nil {
 		s.mu.Unlock()
-		writeDeviceError(w, http.StatusInternalServerError, "server_error", "could not create device authorization")
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not create device authorization")
 		return
 	}
 	s.deviceCodes[deviceCode] = &deviceTransaction{
@@ -121,7 +121,7 @@ func (s *Server) handleDeviceVerification(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if r.Method != http.MethodPost {
-		writeDeviceError(w, http.StatusMethodNotAllowed, "invalid_request", "method must be GET or POST")
+		writeOAuthError(w, http.StatusMethodNotAllowed, "invalid_request", "method must be GET or POST")
 		return
 	}
 
@@ -147,14 +147,15 @@ func (s *Server) handleDeviceVerification(w http.ResponseWriter, r *http.Request
 	s.pruneDeviceCodesLocked(now)
 	transaction := s.deviceTransactionByUserCodeLocked(userCode)
 	var clientID, orgID string
-	expired, busy := false, false
+	expired, busy, eligible := false, false, false
 	if transaction != nil {
 		clientID, orgID = transaction.ClientID, transaction.OrgID
 		expired = !now.Before(transaction.ExpiresAt)
 		busy = transaction.Status != deviceTransactionPending || transaction.Verifying
+		eligible = deviceEligible(s.clients[clientID])
 		// Reserved until this post decides, so a concurrent one is refused
 		// before it can sign anyone in.
-		if !expired && !busy {
+		if !expired && !busy && eligible {
 			transaction.Verifying = true
 		}
 	}
@@ -176,6 +177,10 @@ func (s *Server) handleDeviceVerification(w http.ResponseWriter, r *http.Request
 		return
 	case busy:
 		http.Error(w, "This device authorization is no longer pending", http.StatusConflict)
+		return
+	case !eligible:
+		s.emitLoginLog(r, params, "fdeac", "The application can no longer authorize devices", nil, identifier, orgID)
+		http.Error(w, "The application can no longer authorize devices", http.StatusBadRequest)
 		return
 	}
 	defer func() {
@@ -257,13 +262,13 @@ func (s *Server) handleDeviceVerification(w http.ResponseWriter, r *http.Request
 func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clientID string) {
 	deviceCode := r.FormValue("device_code")
 	if deviceCode == "" || clientID == "" {
-		writeDeviceError(w, http.StatusBadRequest, "invalid_request", "device_code and client_id are required")
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "device_code and client_id are required")
 		return
 	}
 
 	client := s.lookupClient(clientID)
-	if client == nil || client.AppType != "native" || !hasGrantType(client, deviceCodeGrantType) {
-		writeDeviceError(w, http.StatusUnauthorized, "invalid_client", "client is not eligible for device authorization")
+	if !deviceEligible(client) {
+		writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "client is not eligible for device authorization")
 		return
 	}
 
@@ -273,41 +278,41 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 	transaction, exists := s.deviceCodes[deviceCode]
 	if !exists || transaction.ClientID != clientID {
 		s.mu.Unlock()
-		writeDeviceError(w, http.StatusBadRequest, "invalid_grant", "invalid device code")
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "invalid device code")
 		return
 	}
 	if transaction.Status == deviceTransactionConsumed || transaction.Status == deviceTransactionExpired {
 		s.mu.Unlock()
-		writeDeviceError(w, http.StatusBadRequest, "invalid_grant", "invalid device code")
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "invalid device code")
 		return
 	}
 	if transaction.Audience != s.cfg.Audience {
 		s.mu.Unlock()
-		writeDeviceError(w, http.StatusBadRequest, "invalid_grant", "device code is no longer valid")
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "device code is no longer valid")
 		return
 	}
 	if !now.Before(transaction.ExpiresAt) {
 		transaction.Status = deviceTransactionExpired
 		s.mu.Unlock()
-		writeDeviceError(w, http.StatusForbidden, "expired_token", "device code has expired")
+		writeOAuthError(w, http.StatusForbidden, "expired_token", "device code has expired")
 		return
 	}
 	if transaction.Status == deviceTransactionDenied {
 		s.mu.Unlock()
-		writeDeviceError(w, http.StatusForbidden, "access_denied", "the user denied the request")
+		writeOAuthError(w, http.StatusForbidden, "access_denied", "the user denied the request")
 		return
 	}
 	if !transaction.NextPollAt.IsZero() && now.Before(transaction.NextPollAt) {
 		transaction.Interval += 5 * time.Second
 		transaction.NextPollAt = now.Add(transaction.Interval)
 		s.mu.Unlock()
-		writeDeviceError(w, http.StatusTooManyRequests, "slow_down", "polling too frequently")
+		writeOAuthError(w, http.StatusTooManyRequests, "slow_down", "polling too frequently")
 		return
 	}
 	if transaction.Status == deviceTransactionPending {
 		transaction.NextPollAt = now.Add(transaction.Interval)
 		s.mu.Unlock()
-		writeDeviceError(w, http.StatusForbidden, "authorization_pending", "authorization is pending")
+		writeOAuthError(w, http.StatusForbidden, "authorization_pending", "authorization is pending")
 		return
 	}
 
@@ -315,7 +320,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 	if user == nil {
 		transaction.Status = deviceTransactionConsumed
 		s.mu.Unlock()
-		writeDeviceError(w, http.StatusBadRequest, "invalid_grant", "user no longer exists")
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "user no longer exists")
 		return
 	}
 	userCopy := user.Clone()
@@ -483,11 +488,13 @@ func (s *Server) deviceScope(clientID, requested, audience string) (string, erro
 	return strings.Join(normalized, " "), nil
 }
 
-func hasGrantType(client *config.Client, grantType string) bool {
-	return slices.Contains(client.GrantTypes, grantType)
+// deviceEligible reports whether client may use the device flow: a native
+// application allowed the grant.
+func deviceEligible(client *config.Client) bool {
+	return client != nil && client.AppType == "native" && slices.Contains(client.GrantTypes, deviceCodeGrantType)
 }
 
-func writeDeviceError(w http.ResponseWriter, status int, code, description string) {
+func writeOAuthError(w http.ResponseWriter, status int, code, description string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")

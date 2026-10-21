@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -21,6 +22,7 @@ import (
 	"github.com/46labs/auth0/pkg/config"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/oauth2"
 )
 
 type deviceAuthorizationResponse struct {
@@ -133,6 +135,38 @@ func postToken(t *testing.T, baseURL string, values url.Values) (*http.Response,
 		t.Fatalf("decode token response: %v (%s)", err, body)
 	}
 	return resp, decoded
+}
+
+// deviceTokens runs the device flow for clientID through to its tokens.
+func deviceTokens(t *testing.T, srv *Server, baseURL, clientID, scope string) map[string]any {
+	t.Helper()
+	issued := issueDeviceAuthorization(t, baseURL, clientID, srv.cfg.Audience, scope)
+	approveDevice(t, baseURL, issued, "approve")
+	allowDevicePoll(srv, issued.DeviceCode)
+	response, tokens := deviceTokenRequest(t, baseURL, clientID, issued.DeviceCode)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("device exchange = %d %#v", response.StatusCode, tokens)
+	}
+	return tokens
+}
+
+// bindPostLoginAction creates, deploys and binds a post-login Action through
+// the Management API.
+func bindPostLoginAction(t *testing.T, m *management.Management, name, code string) {
+	t.Helper()
+	ctx := context.Background()
+	action := &management.Action{Name: auth0.String(name), Code: auth0.String(code),
+		SupportedTriggers: []management.ActionTrigger{{ID: auth0.String("post-login"), Version: auth0.String("v3")}}}
+	if err := m.Action.Create(ctx, action); err != nil {
+		t.Fatalf("create action: %v", err)
+	}
+	if _, err := m.Action.Deploy(ctx, action.GetID()); err != nil {
+		t.Fatalf("deploy action: %v", err)
+	}
+	binding := []*management.ActionBinding{{Ref: &management.ActionBindingReference{Type: auth0.String("action_id"), Value: action.ID}, DisplayName: auth0.String(name)}}
+	if err := m.Action.UpdateBindings(ctx, "post-login", binding); err != nil {
+		t.Fatalf("bind action: %v", err)
+	}
 }
 
 // postDevice submits the device page as identifier and returns the status and
@@ -548,16 +582,23 @@ func TestDeviceRefreshTokenLeeway(t *testing.T) {
 func TestRefreshTokenLeewayExpires(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
-	client := &config.Client{ClientID: "rotating", RefreshToken: &config.RefreshTokenConfig{RotationType: config.RefreshTokenRotating, Leeway: 120}}
+	dm := newMgmt(t, ts.URL)
+	client := addDeviceClient(t, dm, "rotating")
+	setRefreshTokenRotation(t, dm, client, 120)
 	srv.mu.Lock()
-	srv.refreshTokens["rt_first"] = &refreshTokenState{ClientID: "rotating", Family: "rt_first"}
+	srv.refreshTokens["rt_first"] = &refreshTokenState{ClientID: client, Family: "rt_first"}
 	srv.mu.Unlock()
 
 	start := time.Now()
-	if state, rotated, _, _ := srv.redeemRefreshToken("rt_first", "rotating", client, start); state == nil || rotated == "" {
-		t.Fatalf("rotating refresh = %v %q", state, rotated)
+	state, release, _, _ := srv.claimRefreshToken("rt_first", client, start)
+	release()
+	if state == nil {
+		t.Fatal("first refresh refused")
 	}
-	if state, _, _, status := srv.redeemRefreshToken("rt_first", "rotating", client, start.Add(121*time.Second)); state != nil || status != http.StatusForbidden {
+	if rotated, _, _ := srv.rotateRefreshToken("rt_first", state); rotated == "" {
+		t.Fatal("rotating client did not rotate")
+	}
+	if state, _, _, status := srv.claimRefreshToken("rt_first", client, start.Add(121*time.Second)); state != nil || status != http.StatusForbidden {
 		t.Fatalf("reuse after the leeway = %v %d", state, status)
 	}
 	srv.mu.RLock()
@@ -1150,5 +1191,195 @@ func TestDeviceVerificationInProgressRefusesAnother(t *testing.T) {
 	}
 	if found, err := dm.User.ListByEmail(context.Background(), "second@example.test"); err != nil || len(found) != 0 {
 		t.Fatalf("the refused post provisioned %d users (%v)", len(found), err)
+	}
+}
+
+// A refresh may ask for fewer scopes than it was granted, and gets exactly
+// those; asking for more is refused.
+func TestRefreshNarrowsScope(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	addDeviceClientGrant(t, dm, deviceClient, srv.cfg.Audience, "read:things", "write:things")
+	tokens := deviceTokens(t, srv, ts.URL, deviceClient, "openid offline_access read:things write:things")
+
+	bindPostLoginAction(t, dm, "stamp-scopes", `exports.onExecutePostLogin = async (event, api) => {
+		api.accessToken.setCustomClaim("https://mock/requested", event.transaction.requested_scopes.join(" "));
+	};`)
+	narrowed := url.Values{"grant_type": {"refresh_token"}, "client_id": {deviceClient},
+		"refresh_token": {tokens["refresh_token"].(string)}, "scope": {"openid read:things"}}
+	response, body := postToken(t, ts.URL, narrowed)
+	if response.StatusCode != http.StatusOK || body["scope"] != "openid read:things" || claims(t, body["access_token"])["scope"] != "openid read:things" ||
+		claims(t, body["access_token"])["https://mock/requested"] != "openid read:things" {
+		t.Fatalf("narrowed refresh = %d %#v", response.StatusCode, body)
+	}
+	narrowed.Set("scope", "   ")
+	if response, body := postToken(t, ts.URL, narrowed); response.StatusCode != http.StatusOK || body["scope"] != "openid offline_access read:things write:things" {
+		t.Fatalf("blank-scope refresh = %d %#v", response.StatusCode, body)
+	}
+	narrowed.Set("scope", "openid admin:all")
+	if response, body := postToken(t, ts.URL, narrowed); response.StatusCode != http.StatusBadRequest || body["error"] != "invalid_scope" {
+		t.Fatalf("widened refresh = %d %#v", response.StatusCode, body)
+	}
+}
+
+// A refresh the post-login Action refuses leaves a rotating client's token
+// as it was, so the next refresh still works instead of reading as reuse.
+func TestRefusedRefreshDoesNotRotate(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+	dm := newMgmt(t, ts.URL)
+	ctx := context.Background()
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	setRefreshTokenRotation(t, dm, deviceClient, 0)
+	refreshToken := deviceTokens(t, srv, ts.URL, deviceClient, "openid offline_access")["refresh_token"].(string)
+
+	bindPostLoginAction(t, dm, "refuse-refresh", `exports.onExecutePostLogin = async (event, api) => { api.access.deny("refused"); };`)
+	if response, body := refreshTokenRequest(t, ts.URL, deviceClient, refreshToken); response.StatusCode == http.StatusOK {
+		t.Fatalf("refused refresh = %d %#v", response.StatusCode, body)
+	}
+	if err := dm.Action.UpdateBindings(ctx, "post-login", []*management.ActionBinding{}); err != nil {
+		t.Fatalf("unbind: %v", err)
+	}
+	if response, body := refreshTokenRequest(t, ts.URL, deviceClient, refreshToken); response.StatusCode != http.StatusOK || body["refresh_token"] == nil {
+		t.Fatalf("refresh after a refusal = %d %#v", response.StatusCode, body)
+	}
+}
+
+// A retired token presented by another client is refused without revoking the
+// family it belongs to.
+func TestWrongClientRefreshLeavesFamily(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	otherDeviceClient := addDeviceClient(t, dm, "other_device_client")
+	setRefreshTokenRotation(t, dm, deviceClient, 0)
+	first := deviceTokens(t, srv, ts.URL, deviceClient, "openid offline_access")["refresh_token"].(string)
+	_, rotated := refreshTokenRequest(t, ts.URL, deviceClient, first)
+	second, _ := rotated["refresh_token"].(string)
+	if second == "" {
+		t.Fatalf("no rotation: %#v", rotated)
+	}
+
+	for _, client := range []string{otherDeviceClient, ""} {
+		if response, body := refreshTokenRequest(t, ts.URL, client, first); response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("retired token from client %q = %d %#v", client, response.StatusCode, body)
+		}
+	}
+	if response, body := refreshTokenRequest(t, ts.URL, deviceClient, second); response.StatusCode != http.StatusOK {
+		t.Fatalf("family revoked by another client's attempt: %d %#v", response.StatusCode, body)
+	}
+}
+
+// A request whose application was deleted after the code was issued signs
+// no one in on the device page.
+func TestDeviceVerificationRefusesIneligibleClient(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+	dm := newMgmt(t, ts.URL)
+	ctx := context.Background()
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid")
+	if err := dm.Client.Delete(ctx, deviceClient); err != nil {
+		t.Fatalf("delete client: %v", err)
+	}
+
+	if status, body := postDevice(t, ts.URL, issued.UserCode, "late@example.test", "123456", "approve"); status != http.StatusBadRequest {
+		t.Fatalf("post for a deleted client = %d %s", status, body)
+	}
+	if found, err := dm.User.ListByEmail(ctx, "late@example.test"); err != nil || len(found) != 0 {
+		t.Fatalf("provisioned %d users (%v)", len(found), err)
+	}
+}
+
+// With zero leeway a use of a token whose refresh is still running is reuse:
+// refused before its Action runs, and a breach once that refresh succeeds.
+func TestConcurrentZeroLeewayRefreshIsReuse(t *testing.T) {
+	for _, tc := range []struct {
+		name, decision string
+		firstStatus    int
+		familySurvives bool
+	}{
+		{"refresh succeeds", "allow", http.StatusForbidden, false},
+		{"refresh refused", "deny", http.StatusForbidden, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, ts := setupTestServer(t)
+			defer ts.Close()
+			dm := newMgmt(t, ts.URL)
+			deviceClient := addDeviceClient(t, dm, "device_client")
+			setRefreshTokenRotation(t, dm, deviceClient, 0)
+			refreshToken := deviceTokens(t, srv, ts.URL, deviceClient, "openid offline_access")["refresh_token"].(string)
+
+			entered := make(chan struct{}, 2)
+			proceed := make(chan struct{})
+			gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				entered <- struct{}{}
+				<-proceed
+				_, _ = io.WriteString(w, tc.decision)
+			}))
+			defer gate.Close()
+			bindPostLoginAction(t, dm, "gate", fmt.Sprintf(`exports.onExecutePostLogin = async (event, api) => {
+				const response = await fetch(%q);
+				if ((await response.text()) === "deny") { api.access.deny("refused"); }
+			};`, gate.URL))
+
+			refresh := func() <-chan int {
+				done := make(chan int, 1)
+				go func() {
+					response, _ := refreshTokenRequest(t, ts.URL, deviceClient, refreshToken)
+					done <- response.StatusCode
+				}()
+				return done
+			}
+			first := refresh()
+			<-entered
+			second := refresh()
+			select {
+			case status := <-second:
+				if status != http.StatusForbidden {
+					t.Fatalf("concurrent refresh = %d", status)
+				}
+			case <-entered:
+				close(proceed)
+				t.Fatal("concurrent refresh ran its Action")
+			}
+			close(proceed)
+			if status := <-first; status != tc.firstStatus {
+				t.Fatalf("first refresh = %d", status)
+			}
+
+			if err := dm.Action.UpdateBindings(context.Background(), "post-login", []*management.ActionBinding{}); err != nil {
+				t.Fatalf("unbind: %v", err)
+			}
+			response, body := refreshTokenRequest(t, ts.URL, deviceClient, refreshToken)
+			if survives := response.StatusCode == http.StatusOK; survives != tc.familySurvives {
+				t.Fatalf("original token after the overlap = %d %#v", response.StatusCode, body)
+			}
+		})
+	}
+}
+
+// Refresh errors are JSON OAuth errors, so an OAuth client reads their code.
+func TestRefreshErrorsAreOAuthJSON(t *testing.T) {
+	srv, ts := setupTestServer(t)
+	defer ts.Close()
+	dm := newMgmt(t, ts.URL)
+	deviceClient := addDeviceClient(t, dm, "device_client")
+	refreshToken := deviceTokens(t, srv, ts.URL, deviceClient, "openid offline_access")["refresh_token"].(string)
+
+	config := oauth2.Config{ClientID: deviceClient, Endpoint: oauth2.Endpoint{TokenURL: ts.URL + "/oauth/token", AuthStyle: oauth2.AuthStyleInParams}}
+	_, err := config.TokenSource(context.Background(), &oauth2.Token{RefreshToken: "rt_unknown"}).Token()
+	var retrieve *oauth2.RetrieveError
+	if !errors.As(err, &retrieve) || retrieve.ErrorCode != "invalid_grant" {
+		t.Fatalf("unknown refresh token through oauth2 = %v", err)
+	}
+
+	response, body := postToken(t, ts.URL, url.Values{"grant_type": {"refresh_token"}, "client_id": {deviceClient},
+		"refresh_token": {refreshToken}, "scope": {"openid write:things"}})
+	if response.Header.Get("Content-Type") != "application/json" || body["error"] != "invalid_scope" {
+		t.Fatalf("widened scope = %q %#v", response.Header.Get("Content-Type"), body)
 	}
 }

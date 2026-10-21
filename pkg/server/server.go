@@ -115,7 +115,10 @@ type Server struct {
 	refreshTokens map[string]*refreshTokenState
 	// retiredRefreshTokens are the tokens rotations replaced, for reuse detection.
 	retiredRefreshTokens map[string]*retiredRefreshToken
-	deviceCodes          map[string]*deviceTransaction
+	// refreshInFlight holds zero-leeway rotating tokens a refresh is using,
+	// true once another request reused one meanwhile.
+	refreshInFlight map[string]bool
+	deviceCodes     map[string]*deviceTransaction
 
 	actions *actionStore
 	teps    *tokenExchangeProfiles
@@ -203,6 +206,7 @@ func New(cfg *config.Config) (*Server, error) {
 		teps:                 &tokenExchangeProfiles{profiles: map[string]*tokenExchangeProfile{}},
 		refreshTokens:        make(map[string]*refreshTokenState),
 		retiredRefreshTokens: make(map[string]*retiredRefreshToken),
+		refreshInFlight:      make(map[string]bool),
 		deviceCodes:          make(map[string]*deviceTransaction),
 		users:                users,
 		organizations:        organizations,
