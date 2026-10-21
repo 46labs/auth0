@@ -154,12 +154,16 @@ func TestConnectionEnabledClientsIsADelta(t *testing.T) {
 	ctx := context.Background()
 
 	conn := &management.Connection{
-		Name:           auth0.String("enterprise-delta"),
-		Strategy:       auth0.String("oidc"),
-		EnabledClients: &[]string{"mgmt_client_dev"},
+		Name:     auth0.String("enterprise-delta"),
+		Strategy: auth0.String("oidc"),
 	}
 	if err := m.Connection.Create(ctx, conn); err != nil {
 		t.Fatalf("Create: %v", err)
+	}
+	if err := m.Connection.UpdateEnabledClients(ctx, conn.GetID(), []management.ConnectionEnabledClient{
+		{ClientID: auth0.String("mgmt_client_dev"), Status: auth0.Bool(true)},
+	}); err != nil {
+		t.Fatalf("seed enabled clients: %v", err)
 	}
 
 	if err := m.Connection.UpdateEnabledClients(ctx, conn.GetID(), []management.ConnectionEnabledClient{
