@@ -2,7 +2,6 @@ package server
 
 import (
 	"crypto/rand"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/mail"
@@ -19,6 +18,9 @@ import (
 const deviceCodeGrantType = "urn:ietf:params:oauth:grant-type:device_code"
 
 const deviceUserCodeAlphabet = "BCDFGHJKLMNPQRSTVWXZ"
+
+// passwordlessCode is the one verification code the mock accepts.
+const passwordlessCode = "123456"
 
 func (s *Server) handleDeviceAuthorization(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w, r)
@@ -101,14 +103,12 @@ func (s *Server) handleDeviceAuthorization(w http.ResponseWriter, r *http.Reques
 	s.mu.Unlock()
 
 	verificationURI := strings.TrimSuffix(s.cfg.Issuer, "/") + "/device"
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Pragma", "no-cache")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	displayed := formatDeviceUserCode(userCode)
+	writeOAuthJSON(w, http.StatusOK, map[string]any{
 		"device_code":               deviceCode,
-		"user_code":                 formatDeviceUserCode(userCode),
+		"user_code":                 displayed,
 		"verification_uri":          verificationURI,
-		"verification_uri_complete": verificationURI + "?user_code=" + url.QueryEscape(formatDeviceUserCode(userCode)),
+		"verification_uri_complete": verificationURI + "?user_code=" + url.QueryEscape(displayed),
 		"expires_in":                int(s.deviceCodeLifetime() / time.Second),
 		"interval":                  int(devicePollInterval / time.Second),
 	})
@@ -195,7 +195,7 @@ func (s *Server) handleDeviceVerification(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if r.FormValue("code") != "123456" {
+	if r.FormValue("code") != passwordlessCode {
 		s.reportDeviceVerificationFailure(userCode, now)
 		s.emitLoginLog(r, params, "f", "Wrong email or verification code.", s.findUser(identifier), identifier, orgID)
 		http.Error(w, "Invalid code", http.StatusBadRequest)
@@ -340,7 +340,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 	}
 
 	idClaims := jwt.MapClaims{}
-	if hasDeviceScope(scope, "openid") {
+	if hasScope(scope, "openid") {
 		idClaims = s.idTokenClaims(userCopy, clientID, orgID, now)
 		idClaims["auth_time"] = now.Unix()
 	}
@@ -348,7 +348,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 	// The approval is a login, so it starts a session that every token
 	// refreshed from it keeps, as with the authorization code flow.
 	sessionID := "sess_" + s.generateID()
-	if hasDeviceScope(scope, "openid") {
+	if hasScope(scope, "openid") {
 		idClaims["sid"] = sessionID
 	}
 	allowed := s.postLogin(w, r, userCopy, clientID, orgID, "", "oauth2-device-code", sessionID, connection, strings.Fields(scope), idClaims, accessClaims)
@@ -369,7 +369,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 		"expires_in":   3600,
 		"scope":        grantedScope(scope),
 	}
-	if hasDeviceScope(scope, "openid") {
+	if hasScope(scope, "openid") {
 		idTokenString, err := s.SignToken(idClaims)
 		if err != nil {
 			http.Error(w, "Token generation failed", http.StatusInternalServerError)
@@ -377,14 +377,14 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 		}
 		response["id_token"] = idTokenString
 	}
-	if hasDeviceScope(scope, "offline_access") {
+	if hasScope(scope, "offline_access") {
 		refreshToken := s.newRefreshToken()
 		s.mu.Lock()
 		s.refreshTokens[refreshToken] = &refreshTokenState{
 			UserID:         userCopy.ID,
 			OrgID:          orgID,
 			ClientID:       clientID,
-			IncludeIDToken: hasDeviceScope(scope, "openid"),
+			IncludeIDToken: hasScope(scope, "openid"),
 			Scope:          scope,
 			SessionID:      sessionID,
 			Connection:     connection,
@@ -394,14 +394,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 		response["refresh_token"] = refreshToken
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Pragma", "no-cache")
-	_ = json.NewEncoder(w).Encode(response)
-}
-
-func hasDeviceScope(scope, wanted string) bool {
-	return slices.Contains(strings.Fields(scope), wanted)
+	writeOAuthJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) renderDeviceVerification(w http.ResponseWriter, r *http.Request) {
@@ -492,17 +485,6 @@ func (s *Server) deviceScope(clientID, requested, audience string) (string, erro
 // application allowed the grant.
 func deviceEligible(client *config.Client) bool {
 	return client != nil && client.AppType == "native" && slices.Contains(client.GrantTypes, deviceCodeGrantType)
-}
-
-func writeOAuthError(w http.ResponseWriter, status int, code, description string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Pragma", "no-cache")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"error":             code,
-		"error_description": description,
-	})
 }
 
 func (s *Server) newDeviceUserCodeLocked() (string, error) {

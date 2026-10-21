@@ -239,7 +239,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			if code != "123456" {
+			if code != passwordlessCode {
 				s.emitLoginLog(r, logParams, "f", "Wrong email or verification code.", s.findUser(identifier), identifier, params.Get("organization"))
 				http.Error(w, "Invalid code", 400)
 				return
@@ -483,8 +483,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		if rotated != "" {
 			response["refresh_token"] = rotated
 		}
-		w.Header().Set("Content-Type", "application/json")
-		if issued.IncludeIDToken && slices.Contains(strings.Fields(scope), "openid") {
+		if issued.IncludeIDToken && hasScope(scope, "openid") {
 			idTokenString, err := s.SignToken(idClaims)
 			if err != nil {
 				http.Error(w, "Token generation failed", 500)
@@ -492,7 +491,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			}
 			response["id_token"] = idTokenString
 		}
-		_ = json.NewEncoder(w).Encode(response)
+		writeOAuthJSON(w, http.StatusOK, response)
 		return
 	}
 
@@ -586,7 +585,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 
 	// The scope was captured when the code was claimed above.
 	var refreshToken string
-	if strings.Contains(requestedScope, "offline_access") {
+	if hasScope(requestedScope, "offline_access") {
 		refreshToken = s.newRefreshToken()
 		s.mu.Lock()
 		s.refreshTokens[refreshToken] = &refreshTokenState{
@@ -736,4 +735,22 @@ func scopeWithin(requested []string, granted string) bool {
 		}
 	}
 	return true
+}
+
+// hasScope reports whether the space-separated scope holds wanted.
+func hasScope(scope, wanted string) bool {
+	return slices.Contains(strings.Fields(scope), wanted)
+}
+
+// writeOAuthJSON writes an OAuth token endpoint body, which must not be cached.
+func writeOAuthJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func writeOAuthError(w http.ResponseWriter, status int, code, description string) {
+	writeOAuthJSON(w, status, map[string]string{"error": code, "error_description": description})
 }

@@ -1,9 +1,6 @@
 package config
 
-import (
-	"slices"
-	"time"
-)
+import "time"
 
 // AppMetadata mirrors Auth0's user.app_metadata — an open map, not a typed
 // struct. Two keys have first-class meaning to the mock's JWT wiring
@@ -304,37 +301,6 @@ func (c *RefreshTokenConfig) WithDefaults() *RefreshTokenConfig {
 		out.InfiniteIdleTokenLifetime = &v
 	}
 	return out
-}
-
-// Clone copies the configuration, its pointers and policies included.
-func (c *RefreshTokenConfig) Clone() *RefreshTokenConfig {
-	if c == nil {
-		return nil
-	}
-	out := *c
-	if c.TokenLifetime != nil {
-		v := *c.TokenLifetime
-		out.TokenLifetime = &v
-	}
-	if c.InfiniteTokenLifetime != nil {
-		v := *c.InfiniteTokenLifetime
-		out.InfiniteTokenLifetime = &v
-	}
-	if c.IdleTokenLifetime != nil {
-		v := *c.IdleTokenLifetime
-		out.IdleTokenLifetime = &v
-	}
-	if c.InfiniteIdleTokenLifetime != nil {
-		v := *c.InfiniteIdleTokenLifetime
-		out.InfiniteIdleTokenLifetime = &v
-	}
-	if c.Policies != nil {
-		out.Policies = make([]RefreshTokenPolicy, len(c.Policies))
-		for i, p := range c.Policies {
-			out.Policies[i] = RefreshTokenPolicy{Audience: p.Audience, Scope: slices.Clone(p.Scope)}
-		}
-	}
-	return &out
 }
 
 // RefreshTokenLeeway is the client's reuse interval.

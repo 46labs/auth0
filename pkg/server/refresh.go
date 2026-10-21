@@ -13,9 +13,8 @@ const unknownRefreshTokenError = "Unknown or invalid refresh token."
 
 const wrongClientRefreshTokenError = "the refresh token was issued to a different client"
 
-// claimRefreshToken checks a refresh by clientID without changing a live
-// token; reuse of a retired one outside its leeway revokes the family. The
-// caller runs release when the refresh ends.
+// claimRefreshToken checks a refresh by clientID; reuse outside the leeway
+// revokes the family. The caller runs release when the refresh ends.
 func (s *Server) claimRefreshToken(token, clientID string, now time.Time) (state *refreshTokenState, release func(), errDescription string, status int) {
 	release = func() {}
 	s.mu.Lock()

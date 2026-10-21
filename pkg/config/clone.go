@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"maps"
 	"reflect"
+	"slices"
 )
 
 // Handlers serialize stored records outside the storage lock while update
@@ -200,4 +201,32 @@ func (c *Client) Clone() *Client {
 	}
 	out.RefreshToken = c.RefreshToken.Clone()
 	return &out
+}
+
+// Clone copies the configuration, its pointers and policies included.
+func (c *RefreshTokenConfig) Clone() *RefreshTokenConfig {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	out.TokenLifetime = clonePtr(c.TokenLifetime)
+	out.InfiniteTokenLifetime = clonePtr(c.InfiniteTokenLifetime)
+	out.IdleTokenLifetime = clonePtr(c.IdleTokenLifetime)
+	out.InfiniteIdleTokenLifetime = clonePtr(c.InfiniteIdleTokenLifetime)
+	if c.Policies != nil {
+		out.Policies = make([]RefreshTokenPolicy, len(c.Policies))
+		for i, p := range c.Policies {
+			out.Policies[i] = RefreshTokenPolicy{Audience: p.Audience, Scope: slices.Clone(p.Scope)}
+		}
+	}
+	return &out
+}
+
+// clonePtr copies the value p points to; nil stays nil.
+func clonePtr[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }

@@ -472,7 +472,7 @@ func requestFromToken(r *http.Request, authorizeQuery, protocol string, requeste
 		req.LoginHint = q.Get("login_hint")
 	}
 	if requestedScopes != nil {
-		req.Scopes = append([]string(nil), requestedScopes...)
+		req.Scopes = slices.Clone(requestedScopes)
 	}
 	return req
 }
