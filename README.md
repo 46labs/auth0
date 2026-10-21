@@ -255,8 +255,8 @@ configured local user. The mock uses verification code
 `deviceCodeLifetime` (a duration such as `5s`) to shorten that when testing
 `expired_token`. Clients
 should poll `/oauth/token` no faster than the returned five-second `interval`.
-For a user-info-only token, omit `audience`; custom API requests must name the
-configured audience.
+An omitted `audience` is the configured one, as Auth0 treats a tenant's
+default audience; any other audience is refused.
 
 ```bash
 curl -sS -X POST http://localhost:4646/oauth/token \

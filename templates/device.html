@@ -49,6 +49,13 @@
             box-shadow: 0 4px 14px rgba(102, 126, 234, 0.25);
         }
 
+        .logo img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            border-radius: 8px;
+        }
+
         .welcome-text {
             font-size: 24px;
             font-weight: 600;
@@ -230,7 +237,7 @@
 <body>
     <div class="auth-container">
         <div class="brand-header">
-            <div class="logo">{{if .Branding.LogoURL}}{{else}}{{substr 0 1 .Branding.ServiceName}}{{end}}</div>
+            <div class="logo">{{if .Branding.LogoURL}}<img src="{{.Branding.LogoURL}}" alt="{{.Branding.ServiceName}}">{{else}}{{substr 0 1 .Branding.ServiceName}}{{end}}</div>
             <div class="welcome-text">{{.Branding.Title}}</div>
             <div class="subtitle">{{.Branding.Subtitle}}</div>
         </div>

@@ -247,3 +247,24 @@ func TestSubstr(t *testing.T) {
 		})
 	}
 }
+
+// A configured logo is rendered as an image on both shipped pages.
+func TestShippedTemplatesRenderTheLogo(t *testing.T) {
+	loader, err := newWithPaths([]string{"../../templates/default.html"}, []string{"../../templates/device.html"})
+	if err != nil {
+		t.Fatalf("parse shipped templates: %v", err)
+	}
+	data := map[string]any{"Branding": config.Branding{ServiceName: "Nextel", LogoURL: "https://example.test/logo.png"}}
+	for name, execute := range map[string]func(*strings.Builder) error{
+		"login":  func(out *strings.Builder) error { return loader.Execute(out, data) },
+		"device": func(out *strings.Builder) error { return loader.ExecuteDevice(out, data) },
+	} {
+		var out strings.Builder
+		if err := execute(&out); err != nil {
+			t.Fatalf("%s: render: %v", name, err)
+		}
+		if !strings.Contains(out.String(), `<img src="https://example.test/logo.png" alt="Nextel">`) {
+			t.Errorf("%s page did not render the configured logo", name)
+		}
+	}
+}
