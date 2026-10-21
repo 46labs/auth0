@@ -388,11 +388,30 @@ What the code gets: `event` (`user` with `app_metadata`/`user_metadata`,
 `body`, `transaction`, `organization`, `secrets`), `api.idToken.setCustomClaim`,
 `api.accessToken.setCustomClaim`, `api.access.deny(reason)`,
 `api.user.setAppMetadata`/`setUserMetadata`, `console`, and a global `fetch`
-(Promise API; `ok`, `status`, `headers.get`, `json()`, `text()`). `require` is
-not available: npm dependencies are not installed here. A denied login answers
+(Promise API; `ok`, `status`, `headers.get`, `json()`, `text()`). npm
+dependencies are not installed. `require('jsonwebtoken')` (`verify`, `decode`) and
+`require('jwks-rsa')` (`getSigningKey`) are provided in Go to an Action that
+declares them, enough to verify a token this tenant issued: the key set is the
+tenant's own and the key RS256.
+`event.transaction` carries `actor` and `metadata` after a token exchange. A
+denied login answers
 the token request with `403 {"error":"access_denied","error_description":...}`;
 a throwing Action does the same with the error. Runs are bounded at 20 seconds.
 Bound but undeployed Actions do not run. Engine: [goja](https://github.com/dop251/goja).
+
+A token exchange whose `subject_token_type` matches a token exchange profile
+runs the profile's deployed `custom-token-exchange` Action (`onExecuteCustomTokenExchange`)
+with `event.client`, `event.request.body`, `event.resource_server.identifier`
+and `event.transaction.subject_token`. Its api: `access.deny(code, reason)` and
+`access.rejectInvalidSubjectToken(reason)` answer `400 {"error": code}`;
+`authentication.setUserById`, `setOrganization`, `setActor`, and
+`transaction.setMetadata`. The mock then refuses, with Auth0's wording, a user
+whose connection is not enabled for the client, and an organization the user is
+not a member of or whose connection it has not enabled. Post-login Actions run
+next as that user, with protocol `oauth2-token-exchange`. Without a matching
+profile the configured `actions.token_exchange` stand-in answers. Not enforced:
+the application's own Custom Token Exchange setting (`token_exchange`), and the
+API's application access policy.
 
 ## Management API
 
@@ -640,7 +659,8 @@ For issues, feature requests, or questions:
 - [ ] SAML connection support
 - [x] Actions: declarative `post_login` trigger (custom claim shaping)
 - [x] Actions: scripted `post-login` Actions through the Management API (create, deploy, bind; `fetch`, `deny`, metadata)
-- [ ] Actions: run code at `credentials-exchange`, `post-user-registration`, `custom-token-exchange`
+- [x] Actions: run code at `custom-token-exchange`
+- [ ] Actions: run code at `credentials-exchange`, `post-user-registration`
 - [ ] Persistent storage option
 - [ ] WebAuthn/Passkey support
 - [ ] Social connection mocks

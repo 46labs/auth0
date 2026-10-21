@@ -22,6 +22,12 @@ const (
 // org_id to the target, and carries a delegated `act` claim for audit. All
 // consumer-specific claim names come from config; this code stays generic.
 func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
+	// A profile for the subject token type routes the exchange to its Action,
+	// as in Auth0; the configured stand-in serves tenants without one.
+	if a := s.profileAction(r.FormValue("subject_token_type")); a != nil {
+		s.exchangeThroughAction(w, r, a)
+		return
+	}
 	ex := s.cfg.Actions.TokenExchange
 	if ex == nil {
 		http.Error(w, `{"error":"unsupported_grant_type","error_description":"token exchange not configured"}`, http.StatusBadRequest)
@@ -32,7 +38,7 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 	// which Auth0 logs as secte or fecte.
 	var sub string
 	fail := func(status int, body, description string) {
-		s.emitExchangeLog(r, "fecte", description, sub, "")
+		s.emitExchangeLog(r, "fecte", description, sub, "", s.cfg.Audience, nil)
 		http.Error(w, body, status)
 	}
 
@@ -136,7 +142,11 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 	if orgClaim == "org_id" {
 		nativeOrg = organization
 	}
-	s.emitExchangeLog(r, "secte", "Successful token exchange", sub, nativeOrg)
+	var actor map[string]any
+	if ex.Actor {
+		actor = map[string]any{"sub": sub}
+	}
+	s.emitExchangeLog(r, "secte", "Successful token exchange", sub, nativeOrg, s.cfg.Audience, actor)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{

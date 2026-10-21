@@ -91,9 +91,6 @@ func (s *Server) buildPostLoginContext(user *config.User, client *config.Client,
 	}
 
 	auth := map[string]any{}
-	if orgID == "" {
-		orgID = user.AppMetadata.TenantID()
-	}
 	if orgID != "" {
 		auth["org_id"] = orgID
 		// Prod parity: derive the org-scoped role from app_metadata.org_roles[org]
@@ -134,8 +131,24 @@ func (s *Server) buildPostLoginContext(user *config.User, client *config.Client,
 
 // applyPostLogin merges configured post_login claims into idClaims and
 // accessClaims. Namespaced claims are prefixed with the issuer; raw claims
+// loginOrg is the organization a login without one is scoped to: the user's
+// legacy tenant. A token exchange is scoped only to what its Action set.
+func loginOrg(user *config.User, orgID, protocol string) string {
+	if orgID == "" && protocol != "oauth2-token-exchange" {
+		return user.AppMetadata.TenantID()
+	}
+	return orgID
+}
+
 // land at the top level. Templates resolving to an empty value are dropped.
 func (s *Server) applyPostLogin(
+	user *config.User, client *config.Client, orgID string, idClaims, accessClaims jwt.MapClaims,
+) {
+	s.applyPostLoginExact(user, client, loginOrg(user, orgID, ""), idClaims, accessClaims)
+}
+
+// applyPostLoginExact is applyPostLogin scoped to orgID as given, none included.
+func (s *Server) applyPostLoginExact(
 	user *config.User, client *config.Client, orgID string, idClaims, accessClaims jwt.MapClaims,
 ) {
 	pl := s.cfg.Actions.PostLogin
