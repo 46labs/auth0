@@ -2,6 +2,7 @@ package templates
 
 import (
 	"html/template"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -9,7 +10,8 @@ import (
 )
 
 type Loader struct {
-	tmpl *template.Template
+	tmpl   *template.Template
+	device *template.Template
 }
 
 // templateFuncs are the helpers the shipped login templates expect; a missing
@@ -41,31 +43,78 @@ const defaultTemplate = `<!DOCTYPE html>
 <input name="code" placeholder="Code">
 <button type="submit">Sign In</button></form></body></html>`
 
+const defaultDeviceTemplate = `<!DOCTYPE html>
+<html><head><title>{{.Branding.ServiceName}}</title></head>
+<body>{{if .Message}}<p>{{.Message}}</p>{{else if .UserCode}}<form method="POST" action="/device">
+<p>{{.UserCode}} {{.ClientName}} {{.Audience}} {{.Scope}}</p>
+<input type="hidden" name="user_code" value="{{.UserCode}}">
+<input name="confirm_user_code" placeholder="Code shown on device">
+<input name="identifier" placeholder="Email or SMS">
+<input name="code" placeholder="Code">
+<button type="submit" name="decision" value="approve">Approve</button>
+<button type="submit" name="decision" value="deny">Deny</button></form>{{else}}<form method="GET" action="/device">
+<input name="user_code" placeholder="User code">
+<button type="submit">Continue</button></form>{{end}}</body></html>`
+
+// Each template resolves on its own: overriding the login page must not pin the
+// device page to its fallback, or the reverse.
+var (
+	loginCandidates  = []string{"/config/login.html", "templates/default.html"}
+	deviceCandidates = []string{"/config/device.html", "templates/device.html"}
+)
+
 func New(cfg *config.Config) (*Loader, error) {
-	for _, path := range []string{"/config/login.html", "templates/default.html"} {
+	return newWithPaths(loginCandidates, deviceCandidates)
+}
+
+func newWithPaths(login, device []string) (*Loader, error) {
+	loginTmpl, err := loadTemplate("default", login, defaultTemplate)
+	if err != nil {
+		return nil, err
+	}
+	deviceTmpl, err := loadTemplate("device", device, defaultDeviceTemplate)
+	if err != nil {
+		return nil, err
+	}
+	return &Loader{tmpl: loginTmpl, device: deviceTmpl}, nil
+}
+
+// NewFromFile parses a login template from disk, failing if it is missing; the
+// device template resolves as it does in New.
+func NewFromFile(path string) (*Loader, error) {
+	loginTmpl, err := parseFile(path)
+	if err != nil {
+		return nil, err
+	}
+	deviceTmpl, err := loadTemplate("device", deviceCandidates, defaultDeviceTemplate)
+	if err != nil {
+		return nil, err
+	}
+	return &Loader{tmpl: loginTmpl, device: deviceTmpl}, nil
+}
+
+// loadTemplate parses the first candidate file that exists, else the inline
+// fallback.
+func loadTemplate(name string, candidates []string, inline string) (*template.Template, error) {
+	for _, path := range candidates {
 		if _, err := os.Stat(path); err != nil {
 			continue
 		}
-		return NewFromFile(path)
+		return parseFile(path)
 	}
-
-	tmpl, err := template.New("default").Funcs(templateFuncs).Parse(defaultTemplate)
-	if err != nil {
-		return nil, err
-	}
-	return &Loader{tmpl: tmpl}, nil
+	return template.New(name).Funcs(templateFuncs).Parse(inline)
 }
 
-// NewFromFile parses a login template from disk, named after the file because
-// ParseFiles associates by base name and Execute resolves the created name.
-func NewFromFile(path string) (*Loader, error) {
-	tmpl, err := template.New(filepath.Base(path)).Funcs(templateFuncs).ParseFiles(path)
-	if err != nil {
-		return nil, err
-	}
-	return &Loader{tmpl: tmpl}, nil
+// parseFile names the template after the file because ParseFiles associates by
+// base name and Execute resolves the created name.
+func parseFile(path string) (*template.Template, error) {
+	return template.New(filepath.Base(path)).Funcs(templateFuncs).ParseFiles(path)
 }
 
-func (l *Loader) Execute(w interface{ Write([]byte) (int, error) }, data interface{}) error {
+func (l *Loader) Execute(w io.Writer, data any) error {
 	return l.tmpl.Execute(w, data)
+}
+
+func (l *Loader) ExecuteDevice(w io.Writer, data any) error {
+	return l.device.Execute(w, data)
 }

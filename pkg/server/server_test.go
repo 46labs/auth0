@@ -1051,8 +1051,10 @@ func TestRefreshTokenFlow(t *testing.T) {
 	if refreshResp["id_token"] == nil {
 		t.Fatal("Missing id_token in refresh response")
 	}
-	if refreshResp["refresh_token"] == nil {
-		t.Fatal("Missing refresh_token in refresh response")
+	// The client is non-rotating, Auth0's default: the refresh response has no
+	// refresh token, and the one it redeemed stays valid.
+	if refreshResp["refresh_token"] != nil {
+		t.Fatal("Non-rotating refresh response included a refresh_token")
 	}
 
 	t.Log("Step 5: Validate new ID token")
@@ -1166,8 +1168,9 @@ func TestInvalidRefreshToken(t *testing.T) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode == 200 {
-		t.Fatal("Expected error for invalid refresh token")
+	// Auth0 answers an unknown refresh token with 403, not 400.
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("Expected 403 for invalid refresh token, got %d", resp.StatusCode)
 	}
 
 	var errorResp map[string]interface{}
@@ -1565,12 +1568,12 @@ func TestClientsFromConfig(t *testing.T) {
 		},
 		Clients: []config.Client{
 			{
-				ClientID:     "preconfigured_spa",
-				Name:         "Preconfigured SPA",
-				Description:  "SPA app from config",
-				AppType:      "spa",
-				Callbacks:    []string{"http://localhost:3000/callback"},
-				GrantTypes:   []string{"authorization_code"},
+				ClientID:    "preconfigured_spa",
+				Name:        "Preconfigured SPA",
+				Description: "SPA app from config",
+				AppType:     "spa",
+				Callbacks:   []string{"http://localhost:3000/callback"},
+				GrantTypes:  []string{"authorization_code"},
 			},
 			{
 				ClientID:     "preconfigured_m2m",

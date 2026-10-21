@@ -125,9 +125,7 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 		minted["act"] = map[string]interface{}{"sub": sub}
 	}
 
-	at := jwt.NewWithClaims(jwt.SigningMethodRS256, minted)
-	at.Header["kid"] = "key-1"
-	signed, err := at.SignedString(s.privateKey)
+	signed, err := s.SignToken(minted)
 	if err != nil {
 		fail(http.StatusInternalServerError, "Token generation failed", "Token generation failed")
 		return

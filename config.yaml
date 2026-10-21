@@ -155,6 +155,15 @@ clients:
     grant_types:
       - "client_credentials"
 
+  # Device authorization is for native/public clients. No client secret is
+  # required for this grant.
+  - client_id: "dev_device_client"
+    name: "Dev Device Client"
+    description: "Development native client for device authorization"
+    app_type: "native"
+    grant_types:
+      - "urn:ietf:params:oauth:grant-type:device_code"
+
 actions:
   post_login:
     id_token_claims:

@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -90,11 +91,12 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 		"issuer":                                s.cfg.Issuer,
 		"authorization_endpoint":                s.cfg.Issuer + "authorize",
 		"token_endpoint":                        s.cfg.Issuer + "oauth/token",
+		"device_authorization_endpoint":         s.cfg.Issuer + "oauth/device/code",
 		"userinfo_endpoint":                     s.cfg.Issuer + "userinfo",
 		"jwks_uri":                              s.cfg.Issuer + ".well-known/jwks.json",
 		"end_session_endpoint":                  s.cfg.Issuer + "v2/logout",
 		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code", "client_credentials", "refresh_token"},
+		"grant_types_supported":                 []string{"authorization_code", "client_credentials", "refresh_token", deviceCodeGrantType},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      []string{"openid", "profile", "email", "offline_access"},
@@ -237,7 +239,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			if code != "123456" {
+			if code != passwordlessCode {
 				s.emitLoginLog(r, logParams, "f", "Wrong email or verification code.", s.findUser(identifier), identifier, params.Get("organization"))
 				http.Error(w, "Invalid code", 400)
 				return
@@ -387,10 +389,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		// the grant cannot enter an organization context.
 		s.applyCredentialsExchange(client, accessClaims)
 
-		accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
-		accessToken.Header["kid"] = "key-1"
-
-		accessTokenString, err := accessToken.SignedString(s.privateKey)
+		accessTokenString, err := s.SignToken(accessClaims)
 		if err != nil {
 			http.Error(w, "Token generation failed", 500)
 			return
@@ -410,31 +409,31 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if grantType == "refresh_token" {
 		refreshToken := r.FormValue("refresh_token")
 		if refreshToken == "" {
-			http.Error(w, `{"error":"invalid_request","error_description":"refresh_token is required"}`, 400)
+			writeOAuthError(w, http.StatusBadRequest, "invalid_request", "refresh_token is required")
 			return
 		}
 
-		s.mu.RLock()
-		issued, exists := s.refreshTokens[refreshToken]
-		s.mu.RUnlock()
-
-		if !exists {
-			http.Error(w, `{"error":"invalid_grant","error_description":"Invalid refresh token"}`, 400)
+		issued, release, errDescription, errStatus := s.claimRefreshToken(refreshToken, clientID, time.Now())
+		defer release()
+		if issued == nil {
+			writeOAuthError(w, errStatus, "invalid_grant", errDescription)
 			return
 		}
-		// The token belongs to the client the login was authorized for;
-		// otherwise the audience and action client context could be swapped.
-		if issued.ClientID != "" && clientID != issued.ClientID {
-			http.Error(w,
-				`{"error":"invalid_grant","error_description":"the refresh token was issued to a different client"}`,
-				http.StatusBadRequest)
-			return
+		// A refresh may narrow the scope it was granted, never widen it.
+		scope := issued.Scope
+		// A blank scope is an absent one, never the default scopes.
+		if requested := strings.Fields(r.FormValue("scope")); len(requested) > 0 {
+			if !scopeWithin(requested, issued.Scope) {
+				writeOAuthError(w, http.StatusBadRequest, "invalid_scope", "the scope exceeds the one granted")
+				return
+			}
+			scope = strings.Join(requested, " ")
 		}
 
 		// Load first: the account can be deleted while its refresh token lives.
 		user := s.getUserByID(issued.UserID)
 		if user == nil {
-			http.Error(w, `{"error":"invalid_grant","error_description":"User not found"}`, 400)
+			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "User not found")
 			return
 		}
 
@@ -449,95 +448,55 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		}
 
 		now := time.Now()
-		ns := strings.TrimSuffix(s.cfg.Issuer, "/") + "/"
 
 		// Generate new access token
-		accessClaims := jwt.MapClaims{
-			"sub":   user.ID,
-			"iss":   s.cfg.Issuer,
-			"aud":   s.cfg.Audience,
-			"exp":   now.Add(time.Hour).Unix(),
-			"iat":   now.Unix(),
-			"scope": grantedScope(issued.Scope),
-		}
-
-		if orgID != "" {
-			accessClaims["org_id"] = orgID
-		}
-		if role := roleForOrg(user, orgID); role != "" {
-			accessClaims[ns+"role"] = role
-		}
-
-		idClaims := jwt.MapClaims{
-			"sub":            user.ID,
-			"email":          user.Email,
-			"email_verified": user.EmailVerified,
-			"name":           user.Name,
-			"iss":            s.cfg.Issuer,
-			"aud":            clientID,
-			"exp":            now.Add(time.Hour).Unix(),
-			"iat":            now.Unix(),
-		}
-
-		if user.Phone != "" {
-			idClaims["phone_number"] = user.Phone
-			idClaims["phone_number_verified"] = true
-		}
-
-		if user.Picture != "" {
-			idClaims["picture"] = user.Picture
-		}
-
-		nameParts := strings.Split(user.Name, " ")
-		if len(nameParts) > 0 {
-			idClaims["given_name"] = nameParts[0]
-		}
-		if len(nameParts) > 1 {
-			idClaims["family_name"] = nameParts[1]
-		}
-
-		// org_id is a top-level claim (matches production Auth0 Organizations)
-		if orgID != "" {
-			idClaims["org_id"] = orgID
-		}
-		// role remains namespaced (requires Auth0 Action in production)
-		if role := roleForOrg(user, orgID); role != "" {
-			idClaims[ns+"role"] = role
-		}
+		accessClaims := s.accessTokenClaims(user, s.cfg.Audience, scope, orgID, now)
+		idClaims := s.idTokenClaims(user, clientID, orgID, now)
 
 		if issued.SessionID != "" {
 			idClaims["sid"] = issued.SessionID
 		}
-		if !s.postLogin(w, r, user, clientID, orgID, "", "oauth2-refresh-token", issued.SessionID, issued.Connection, idClaims, accessClaims) {
+		if !s.postLogin(w, r, user, clientID, orgID, "", "oauth2-refresh-token", issued.SessionID, issued.Connection, strings.Fields(scope), idClaims, accessClaims) {
 			return
 		}
 
-		accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
-		accessToken.Header["kid"] = "key-1"
-
-		accessTokenString, err := accessToken.SignedString(s.privateKey)
+		accessTokenString, err := s.SignToken(accessClaims)
 		if err != nil {
 			http.Error(w, "Token generation failed", 500)
 			return
 		}
-
-		idToken := jwt.NewWithClaims(jwt.SigningMethodRS256, idClaims)
-		idToken.Header["kid"] = "key-1"
-
-		idTokenString, err := idToken.SignedString(s.privateKey)
-		if err != nil {
-			http.Error(w, "Token generation failed", 500)
+		// Rotated only now, so a refused refresh leaves the client its token.
+		rotated, errDescription, errStatus := s.rotateRefreshToken(refreshToken, issued)
+		if errDescription != "" {
+			writeOAuthError(w, errStatus, "invalid_grant", errDescription)
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"access_token":  accessTokenString,
-			"id_token":      idTokenString,
-			"token_type":    "Bearer",
-			"expires_in":    3600,
-			"refresh_token": refreshToken, // Return the same refresh token
-		})
+		response := map[string]interface{}{
+			"access_token": accessTokenString,
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+			"scope":        grantedScope(scope),
+		}
+		// Auth0 returns a refresh token on a refresh only with rotation.
+		// Without it the response has none and the redeemed token stays valid.
+		if rotated != "" {
+			response["refresh_token"] = rotated
+		}
+		if issued.IncludeIDToken && hasScope(scope, "openid") {
+			idTokenString, err := s.SignToken(idClaims)
+			if err != nil {
+				http.Error(w, "Token generation failed", 500)
+				return
+			}
+			response["id_token"] = idTokenString
+		}
+		writeOAuthJSON(w, http.StatusOK, response)
+		return
+	}
+
+	if grantType == deviceCodeGrantType {
+		s.handleDeviceToken(w, r, clientID)
 		return
 	}
 
@@ -594,88 +553,31 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
-	ns := strings.TrimSuffix(s.cfg.Issuer, "/") + "/"
 
-	idClaims := jwt.MapClaims{
-		"sub":            user.ID,
-		"email":          user.Email,
-		"email_verified": user.EmailVerified,
-		"name":           user.Name,
-		"iss":            s.cfg.Issuer,
-		"aud":            clientID,
-		"exp":            now.Add(time.Hour).Unix(),
-		"iat":            now.Unix(),
-		"auth_time":      now.Unix(),
-	}
-
-	if user.Phone != "" {
-		idClaims["phone_number"] = user.Phone
-		idClaims["phone_number_verified"] = true
-	}
-
-	if user.Picture != "" {
-		idClaims["picture"] = user.Picture
-	}
-
+	idClaims := s.idTokenClaims(&user, clientID, orgID, now)
+	idClaims["auth_time"] = now.Unix()
 	if hasNonce {
 		idClaims["nonce"] = nonce
 	}
 
-	nameParts := strings.Split(user.Name, " ")
-	if len(nameParts) > 0 {
-		idClaims["given_name"] = nameParts[0]
-	}
-	if len(nameParts) > 1 {
-		idClaims["family_name"] = nameParts[1]
-	}
-
-	if orgID != "" {
-		idClaims["org_id"] = orgID
-	}
-	if role := roleForOrg(&user, orgID); role != "" {
-		idClaims[ns+"role"] = role
-	}
-
-	idToken := jwt.NewWithClaims(jwt.SigningMethodRS256, idClaims)
-	idToken.Header["kid"] = "key-1"
-
-	accessClaims := jwt.MapClaims{
-		"sub":   user.ID,
-		"iss":   s.cfg.Issuer,
-		"aud":   s.cfg.Audience,
-		"exp":   now.Add(time.Hour).Unix(),
-		"iat":   now.Unix(),
-		"scope": grantedScope(requestedScope),
-	}
-
-	// org_id is a top-level claim (matches production Auth0 Organizations)
-	if orgID != "" {
-		accessClaims["org_id"] = orgID
-	}
-	// role remains namespaced (requires Auth0 Action in production)
-	if role := roleForOrg(&user, orgID); role != "" {
-		accessClaims[ns+"role"] = role
-	}
+	accessClaims := s.accessTokenClaims(&user, s.cfg.Audience, requestedScope, orgID, now)
 
 	if claimed.SessionID != "" {
 		idClaims["sid"] = claimed.SessionID
 	}
-	allowed := s.postLogin(w, r, &user, clientID, orgID, claimed.Query, "oidc-basic-profile", claimed.SessionID, claimed.Connection, idClaims, accessClaims)
+	allowed := s.postLogin(w, r, &user, clientID, orgID, claimed.Query, "oidc-basic-profile", claimed.SessionID, claimed.Connection, nil, idClaims, accessClaims)
 	s.emitPendingLogin(claimed.LoginLog, allowed)
 	if !allowed {
 		return
 	}
 
-	accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessClaims)
-	accessToken.Header["kid"] = "key-1"
-
-	idTokenString, err := idToken.SignedString(s.privateKey)
+	idTokenString, err := s.SignToken(idClaims)
 	if err != nil {
 		http.Error(w, "Token generation failed", 500)
 		return
 	}
 
-	accessTokenString, err := accessToken.SignedString(s.privateKey)
+	accessTokenString, err := s.SignToken(accessClaims)
 	if err != nil {
 		http.Error(w, "Token generation failed", 500)
 		return
@@ -683,16 +585,18 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 
 	// The scope was captured when the code was claimed above.
 	var refreshToken string
-	if strings.Contains(requestedScope, "offline_access") {
-		refreshToken = "rt_" + base64.RawURLEncoding.EncodeToString([]byte(s.generateID()))
+	if hasScope(requestedScope, "offline_access") {
+		refreshToken = s.newRefreshToken()
 		s.mu.Lock()
 		s.refreshTokens[refreshToken] = &refreshTokenState{
-			UserID:     user.ID,
-			OrgID:      orgID,
-			ClientID:   claimed.ClientID,
-			Scope:      requestedScope,
-			SessionID:  claimed.SessionID,
-			Connection: claimed.Connection,
+			UserID:         user.ID,
+			OrgID:          orgID,
+			ClientID:       claimed.ClientID,
+			IncludeIDToken: true,
+			Scope:          requestedScope,
+			SessionID:      claimed.SessionID,
+			Connection:     claimed.Connection,
+			Family:         refreshToken,
 		}
 		s.mu.Unlock()
 	}
@@ -767,4 +671,86 @@ func grantedScope(requested string) string {
 		}
 	}
 	return strings.Join(out, " ")
+}
+
+// idTokenClaims are the ID token claims for user signed in to clientID.
+func (s *Server) idTokenClaims(user *config.User, clientID, orgID string, now time.Time) jwt.MapClaims {
+	claims := jwt.MapClaims{
+		"sub":            user.ID,
+		"email":          user.Email,
+		"email_verified": user.EmailVerified,
+		"name":           user.Name,
+		"iss":            s.cfg.Issuer,
+		"aud":            clientID,
+		"exp":            now.Add(time.Hour).Unix(),
+		"iat":            now.Unix(),
+	}
+	if user.Phone != "" {
+		claims["phone_number"] = user.Phone
+		claims["phone_number_verified"] = true
+	}
+	if user.Picture != "" {
+		claims["picture"] = user.Picture
+	}
+	nameParts := strings.Split(user.Name, " ")
+	claims["given_name"] = nameParts[0]
+	if len(nameParts) > 1 {
+		claims["family_name"] = nameParts[1]
+	}
+	s.addOrgClaims(claims, user, orgID)
+	return claims
+}
+
+// accessTokenClaims are the claims of user's access token for audience.
+func (s *Server) accessTokenClaims(user *config.User, audience, scope, orgID string, now time.Time) jwt.MapClaims {
+	claims := jwt.MapClaims{
+		"sub":   user.ID,
+		"iss":   s.cfg.Issuer,
+		"aud":   audience,
+		"exp":   now.Add(time.Hour).Unix(),
+		"iat":   now.Unix(),
+		"scope": grantedScope(scope),
+	}
+	s.addOrgClaims(claims, user, orgID)
+	return claims
+}
+
+// addOrgClaims adds the top-level org_id, as Auth0 Organizations does, and
+// the namespaced role an Action adds in production.
+func (s *Server) addOrgClaims(claims jwt.MapClaims, user *config.User, orgID string) {
+	if orgID != "" {
+		claims["org_id"] = orgID
+	}
+	if role := roleForOrg(user, orgID); role != "" {
+		claims[strings.TrimSuffix(s.cfg.Issuer, "/")+"/role"] = role
+	}
+}
+
+// scopeWithin reports whether every scope in requested is in granted.
+func scopeWithin(requested []string, granted string) bool {
+	have := strings.Fields(granted)
+	for _, scope := range requested {
+		if !slices.Contains(have, scope) {
+			return false
+		}
+	}
+	return true
+}
+
+// hasScope reports whether the space-separated scope holds wanted.
+func hasScope(scope, wanted string) bool {
+	return slices.Contains(strings.Fields(scope), wanted)
+}
+
+// writeOAuthJSON writes an OAuth token endpoint body, which must not be cached.
+func writeOAuthJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func writeOAuthError(w http.ResponseWriter, status int, code, description string) {
+	writeOAuthJSON(w, status, map[string]string{"error": code, "error_description": description})
 }

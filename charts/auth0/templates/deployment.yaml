@@ -49,6 +49,11 @@ spec:
           mountPath: /config/login.html
           subPath: login.html
         {{- end }}
+        {{- if .Values.customDevice.enabled }}
+        - name: custom-device
+          mountPath: /config/device.html
+          subPath: device.html
+        {{- end }}
         {{- if .Values.logStreamCA.secretName }}
         - name: log-stream-ca
           mountPath: /config/log-stream-ca
@@ -62,6 +67,11 @@ spec:
       - name: custom-login
         configMap:
           name: {{ include "auth0.fullname" . }}-login
+      {{- end }}
+      {{- if .Values.customDevice.enabled }}
+      - name: custom-device
+        configMap:
+          name: {{ include "auth0.fullname" . }}-device
       {{- end }}
       {{- if .Values.logStreamCA.secretName }}
       - name: log-stream-ca

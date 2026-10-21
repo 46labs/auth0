@@ -46,9 +46,10 @@ type authCode struct {
 // refreshTokenState carries the bindings of the login that issued the token,
 // so a refresh cannot re-scope it to another client or organization.
 type refreshTokenState struct {
-	UserID   string
-	OrgID    string
-	ClientID string
+	UserID         string
+	OrgID          string
+	ClientID       string
+	IncludeIDToken bool
 	// SessionID is the login session the token was issued in.
 	SessionID string
 	// Connection is the one signed in through.
@@ -56,6 +57,52 @@ type refreshTokenState struct {
 	// Scope is the scope granted at login; a refresh re-issues it, as
 	// Auth0 does when the refresh request omits scope.
 	Scope string
+	// Family is shared by a refresh token and every token rotated from it.
+	// Auth0 revokes the whole family when a retired token is used again.
+	Family string
+}
+
+// retiredRefreshToken is a refresh token that a rotation replaced.
+type retiredRefreshToken struct {
+	State     *refreshTokenState
+	RetiredAt time.Time
+}
+
+const (
+	defaultDeviceCodeLifetime = 15 * time.Minute
+	devicePollInterval        = 5 * time.Second
+
+	deviceTransactionPending  = "pending"
+	deviceTransactionApproved = "approved"
+	deviceTransactionDenied   = "denied"
+	deviceTransactionExpired  = "expired"
+	deviceTransactionConsumed = "consumed"
+)
+
+// deviceTransaction carries one RFC 8628 authorization request from issuance
+// through browser approval and its one-time token exchange.
+type deviceTransaction struct {
+	DeviceCode string
+	UserCode   string
+	ClientID   string
+	Audience   string
+	Scope      string
+	OrgID      string
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	Interval   time.Duration
+	NextPollAt time.Time
+	Status     string
+	ApprovedBy string
+	// Verifying reserves a pending request while one device page post signs
+	// in, so a concurrent post cannot provision a user it then discards.
+	Verifying bool
+	// Connection is the one the approver signed in through.
+	Connection string
+	// LoginLog is the approval's success record, emitted at the exchange.
+	LoginLog       map[string]any
+	FailedAttempts int
+	BlockedUntil   time.Time
 }
 
 type Server struct {
@@ -66,6 +113,12 @@ type Server struct {
 	pending       map[string]string
 	authCodes     map[string]*authCode
 	refreshTokens map[string]*refreshTokenState
+	// retiredRefreshTokens are the tokens rotations replaced, for reuse detection.
+	retiredRefreshTokens map[string]*retiredRefreshToken
+	// refreshInFlight holds zero-leeway rotating tokens a refresh is using,
+	// true once another request reused one meanwhile.
+	refreshInFlight map[string]bool
+	deviceCodes     map[string]*deviceTransaction
 
 	actions *actionStore
 	teps    *tokenExchangeProfiles
@@ -129,6 +182,10 @@ func New(cfg *config.Config) (*Server, error) {
 
 	clients := make(map[string]*config.Client)
 	for i := range cfg.Clients {
+		// A seeded refresh_token reads back complete, as Auth0's always does.
+		if cfg.Clients[i].RefreshToken != nil {
+			cfg.Clients[i].RefreshToken = cfg.Clients[i].RefreshToken.WithDefaults()
+		}
 		clients[cfg.Clients[i].ClientID] = &cfg.Clients[i]
 	}
 
@@ -140,23 +197,26 @@ func New(cfg *config.Config) (*Server, error) {
 	orgConnections := buildOrgConnections(cfg)
 
 	return &Server{
-		cfg:            cfg,
-		privateKey:     key,
-		templates:      tmpl,
-		pending:        make(map[string]string),
-		authCodes:      make(map[string]*authCode),
-		actions:        newActionStore(),
-		teps:           &tokenExchangeProfiles{profiles: map[string]*tokenExchangeProfile{}},
-		refreshTokens:  make(map[string]*refreshTokenState),
-		users:          users,
-		organizations:  organizations,
-		connections:    connections,
-		members:        members,
-		clients:        clients,
-		clientGrants:   map[string]*clientGrant{},
-		roles:          roles,
-		orgConnections: orgConnections,
-		invitations:    make(map[string][]config.OrganizationInvitation),
+		cfg:                  cfg,
+		privateKey:           key,
+		templates:            tmpl,
+		pending:              make(map[string]string),
+		authCodes:            make(map[string]*authCode),
+		actions:              newActionStore(),
+		teps:                 &tokenExchangeProfiles{profiles: map[string]*tokenExchangeProfile{}},
+		refreshTokens:        make(map[string]*refreshTokenState),
+		retiredRefreshTokens: make(map[string]*retiredRefreshToken),
+		refreshInFlight:      make(map[string]bool),
+		deviceCodes:          make(map[string]*deviceTransaction),
+		users:                users,
+		organizations:        organizations,
+		connections:          connections,
+		members:              members,
+		clients:              clients,
+		clientGrants:         map[string]*clientGrant{},
+		roles:                roles,
+		orgConnections:       orgConnections,
+		invitations:          make(map[string][]config.OrganizationInvitation),
 
 		selfServiceProfiles: make(map[string]*selfServiceProfile),
 		ssoTickets:          make(map[string]*ssoTicket),
@@ -212,7 +272,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/.well-known/openid-configuration", s.handleDiscovery)
 	mux.HandleFunc("/.well-known/jwks.json", s.handleJWKS)
 	mux.HandleFunc("/authorize", s.handleAuthorize)
+	mux.HandleFunc("/oauth/device/code", s.handleDeviceAuthorization)
 	mux.HandleFunc("/oauth/token", s.handleToken)
+	mux.HandleFunc("/device", s.handleDeviceVerification)
 	mux.HandleFunc("/userinfo", s.handleUserInfo)
 	mux.HandleFunc("/v2/logout", s.handleLogout)
 

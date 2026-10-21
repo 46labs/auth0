@@ -1,11 +1,14 @@
 package config_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/46labs/auth0/pkg/config"
 	"github.com/spf13/viper"
@@ -161,6 +164,62 @@ config:
 	}
 }
 
+// TestChartMountsCustomTemplates checks each custom page gets its own
+// ConfigMap and mount, and that enabling one never drags in the other.
+func TestChartMountsCustomTemplates(t *testing.T) {
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm not installed")
+	}
+	chart := filepath.Join("..", "..", "charts", "auth0")
+
+	login := []string{"mountPath: /config/login.html", "name: t-auth0-login", "LOGIN_MARKER"}
+	device := []string{"mountPath: /config/device.html", "name: t-auth0-device", "DEVICE_MARKER"}
+
+	tests := []struct {
+		name              string
+		loginOn, deviceOn bool
+	}{
+		{"neither", false, false},
+		{"login only", true, false},
+		{"device only", false, true},
+		{"both", true, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"template", "t", chart,
+				"--set", fmt.Sprintf("customLogin.enabled=%t", tc.loginOn),
+				"--set-string", "customLogin.html=<p>LOGIN_MARKER {{.SessionID}}</p>",
+				"--set", fmt.Sprintf("customDevice.enabled=%t", tc.deviceOn),
+				"--set-string", "customDevice.html=<p>DEVICE_MARKER {{.UserCode}}</p>",
+			}
+			out, err := exec.Command(helm, args...).CombinedOutput()
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
+			}
+			rendered := string(out)
+			for _, want := range login {
+				if strings.Contains(rendered, want) != tc.loginOn {
+					t.Errorf("login enabled=%t, but %q present=%t", tc.loginOn, want, !tc.loginOn)
+				}
+			}
+			for _, want := range device {
+				if strings.Contains(rendered, want) != tc.deviceOn {
+					t.Errorf("device enabled=%t, but %q present=%t", tc.deviceOn, want, !tc.deviceOn)
+				}
+			}
+		})
+	}
+}
+
+func TestDeviceCodeLifetimeLoadsAsDuration(t *testing.T) {
+	cfg := loadFrom(t, "deviceCodeLifetime: 2s\n")
+	if cfg.DeviceCodeLifetime != 2*time.Second {
+		t.Fatalf("DeviceCodeLifetime = %s, want 2s", cfg.DeviceCodeLifetime)
+	}
+}
+
 // extractConfigYAML pulls the config.yaml value out of the rendered ConfigMap.
 func extractConfigYAML(t *testing.T, rendered string) string {
 	t.Helper()
@@ -199,4 +258,27 @@ func loadFrom(t *testing.T, body string) *config.Config {
 		t.Fatalf("the chart rendered a config the loader rejects: %v\n---\n%s", err, body)
 	}
 	return cfg
+}
+
+// A seeded client's refresh_token loads whole from YAML, policies included.
+func TestRefreshTokenLoadsFromYAML(t *testing.T) {
+	cfg := loadFrom(t, `
+clients:
+  - client_id: seeded
+    name: Seeded
+    refresh_token:
+      rotation_type: rotating
+      leeway: 30
+      token_lifetime: 3600
+      policies:
+        - audience: https://api.test
+          scope: [read:things]
+`)
+	rt := cfg.Clients[0].RefreshToken
+	if rt == nil || rt.RotationType != "rotating" || rt.Leeway != 30 || rt.TokenLifetime == nil || *rt.TokenLifetime != 3600 {
+		t.Fatalf("refresh_token = %+v", rt)
+	}
+	if len(rt.Policies) != 1 || rt.Policies[0].Audience != "https://api.test" || !slices.Equal(rt.Policies[0].Scope, []string{"read:things"}) {
+		t.Fatalf("policies = %+v", rt.Policies)
+	}
 }

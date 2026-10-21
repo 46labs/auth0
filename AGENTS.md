@@ -147,7 +147,9 @@ from conflict-marker checks in pre-commit, CI, and editor diagnostics.
 - `templates/default.html` is parsed only when the process runs from the repo root; elsewhere the
   inline fallback in `pkg/templates/loader.go` is used. A template helper missing from
   `templateFuncs` fails startup, and the unit tests will not catch it because they run from
-  `pkg/server/`. `TestShippedTemplateParsesAndRenders` exists for exactly that.
+  `pkg/server/`. `TestShippedTemplateParsesAndRenders` exists for exactly that. The same holds for
+  `templates/device.html` and `TestShippedDeviceTemplateParsesAndRenders`. Login and device
+  templates resolve independently (`/config/*.html`, then `templates/`, then inline).
 - Auth0 rejects organization invitations on passwordless connections, so an org needs a
   non-passwordless enabled connection before it can be invited to.
 - Invitations carry role **ids**; `app_metadata.org_roles` holds the role **name**. Redemption
