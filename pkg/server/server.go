@@ -54,6 +54,8 @@ type refreshTokenState struct {
 	SessionID string
 	// Connection is the one signed in through.
 	Connection string
+	// Audience is the API the login asked for; refreshes keep it.
+	Audience string
 	// Scope is the scope granted at login; a refresh re-issues it, as
 	// Auth0 does when the refresh request omits scope.
 	Scope string

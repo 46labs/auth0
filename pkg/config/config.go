@@ -252,6 +252,12 @@ type RefreshTokenConfig struct {
 	Policies                  []RefreshTokenPolicy `json:"policies,omitempty" yaml:"policies,omitempty" mapstructure:"policies"`
 }
 
+// API is an API (Auth0 resource server) the tenant issues access tokens for.
+type API struct {
+	Identifier string `json:"identifier" yaml:"identifier" mapstructure:"identifier"`
+	Name       string `json:"name,omitempty" yaml:"name,omitempty" mapstructure:"name"`
+}
+
 // RefreshTokenPolicy is a multi-resource refresh token policy: the API a
 // refresh token may also mint access tokens for, and the scopes it grants.
 type RefreshTokenPolicy struct {
@@ -325,8 +331,11 @@ type Branding struct {
 }
 
 type Config struct {
-	Issuer      string
-	Audience    string
+	Issuer   string
+	Audience string
+	// APIs are further APIs a login may ask for with ?audience=, as a tenant
+	// has several; Audience is the default when the request names none.
+	APIs        []API
 	Port        int
 	CORSOrigins []string
 	// DeviceCodeLifetime bounds device authorization requests; zero means 15m.

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/46labs/auth0/pkg/config"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -398,5 +399,60 @@ func TestActions_GetUserEffectiveRolesByNames(t *testing.T) {
 	many := strings.TrimSuffix(strings.Repeat("r,", maxRoleNames+1), ",")
 	if st, tok := login(t, ts, "&organization=org_test&ask="+many); st == 200 {
 		t.Fatalf("%d names accepted: %v", maxRoleNames+1, tok)
+	}
+}
+
+// A login names the API it wants with ?audience=: the access token is for it,
+// refreshes keep it, Actions see it as event.resource_server, and an audience
+// no API has is refused. A tenant serving several apps relies on this to keep
+// one app's Action out of another's sign-ins.
+func TestActions_RequestedAudience(t *testing.T) {
+	s, ts := setupTestServer(t)
+	defer ts.Close()
+	const other = "https://other.example.test/api"
+	s.cfg.APIs = []config.API{{Identifier: other, Name: "Other"}}
+	m := mgmt{t, ts.URL}
+	m.deployBound("aud", `
+		exports.onExecutePostLogin = async (event, api) => {
+		  if (event.resource_server.identifier !== "`+other+`") return;
+		  api.accessToken.setCustomClaim("https://mock/rs", event.resource_server.identifier);
+		};`)
+
+	st, tok := loginWithScope(t, ts, "openid offline_access", "&audience="+url.QueryEscape(other))
+	if st != 200 {
+		t.Fatalf("token: %d %v", st, tok)
+	}
+	c := claims(t, tok["access_token"])
+	if c["aud"] != other || c["https://mock/rs"] != other {
+		t.Fatalf("access token for %v, action saw %v; want %s", c["aud"], c["https://mock/rs"], other)
+	}
+	resp, err := http.PostForm(ts.URL+"/oauth/token", url.Values{
+		"grant_type": {"refresh_token"}, "client_id": {"test_client_actions"}, "refresh_token": {tok["refresh_token"].(string)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var refreshed map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&refreshed)
+	if r := claims(t, refreshed["access_token"]); r["aud"] != other || r["https://mock/rs"] != other {
+		t.Fatalf("refresh changed the API: %v", r)
+	}
+
+	_, def := login(t, ts, "")
+	if d := claims(t, def["access_token"]); d["aud"] != s.cfg.Audience || d["https://mock/rs"] != nil {
+		t.Fatalf("default login: %v", d)
+	}
+
+	hc := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	r, err := hc.Get(ts.URL + "/authorize?response_type=code&client_id=test_client_actions&redirect_uri=" +
+		url.QueryEscape("http://localhost:3000/callback") + "&audience=" + url.QueryEscape("https://unknown.example.test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Body.Close()
+	loc, _ := url.Parse(r.Header.Get("Location"))
+	if loc == nil || loc.Query().Get("error") != "access_denied" {
+		t.Fatalf("unknown audience: %d %s", r.StatusCode, r.Header.Get("Location"))
 	}
 }

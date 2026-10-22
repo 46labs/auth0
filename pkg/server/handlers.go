@@ -191,6 +191,12 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Auth0 refuses an audience no API on the tenant has.
+		if aud := r.URL.Query().Get("audience"); aud != "" && !s.knownAudience(aud) {
+			s.redirectAuthorizeError(w, r, "access_denied", "Service not found: "+aud)
+			return
+		}
+
 		sessionID := s.generateID()
 		s.mu.Lock()
 		s.pending[sessionID] = r.URL.RawQuery
@@ -450,7 +456,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
 
 		// Generate new access token
-		accessClaims := s.accessTokenClaims(user, s.cfg.Audience, scope, orgID, now)
+		audience := issued.Audience
+		if audience == "" {
+			audience = s.cfg.Audience
+		}
+		accessClaims := s.accessTokenClaims(user, audience, scope, orgID, now)
 		idClaims := s.idTokenClaims(user, clientID, orgID, now)
 
 		if issued.SessionID != "" {
@@ -560,7 +570,8 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		idClaims["nonce"] = nonce
 	}
 
-	accessClaims := s.accessTokenClaims(&user, s.cfg.Audience, requestedScope, orgID, now)
+	audience := s.authorizeAudience(claimed.Query)
+	accessClaims := s.accessTokenClaims(&user, audience, requestedScope, orgID, now)
 
 	if claimed.SessionID != "" {
 		idClaims["sid"] = claimed.SessionID
@@ -593,6 +604,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			OrgID:          orgID,
 			ClientID:       claimed.ClientID,
 			IncludeIDToken: true,
+			Audience:       audience,
 			Scope:          requestedScope,
 			SessionID:      claimed.SessionID,
 			Connection:     claimed.Connection,
@@ -749,6 +761,28 @@ func writeOAuthJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Pragma", "no-cache")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// knownAudience reports whether the tenant has an API with this identifier.
+func (s *Server) knownAudience(aud string) bool {
+	if aud == s.cfg.Audience {
+		return true
+	}
+	for _, a := range s.cfg.APIs {
+		if a.Identifier == aud {
+			return true
+		}
+	}
+	return false
+}
+
+// authorizeAudience is the API an authorize request asked for, else the default.
+func (s *Server) authorizeAudience(rawQuery string) string {
+	q, _ := url.ParseQuery(rawQuery)
+	if aud := q.Get("audience"); aud != "" && s.knownAudience(aud) {
+		return aud
+	}
+	return s.cfg.Audience
 }
 
 func writeOAuthError(w http.ResponseWriter, status int, code, description string) {
