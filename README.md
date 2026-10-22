@@ -98,6 +98,10 @@ See `config.yaml` for full example with users, organizations, connections, and m
 ```yaml
 issuer: "https://auth.example.test/"
 audience: "https://api.example.test"
+# Further APIs a login may ask for with ?audience= (Auth0 resource servers).
+apis:
+  - identifier: "https://other.example.test"
+    name: Other
 port: 3001
 
 branding:
@@ -256,7 +260,7 @@ configured local user. The mock uses verification code
 `expired_token`. Clients
 should poll `/oauth/token` no faster than the returned five-second `interval`.
 An omitted `audience` is the configured one, as Auth0 treats a tenant's
-default audience; any other audience is refused.
+default audience; one of `apis` is accepted too, and any other is refused.
 
 ```bash
 curl -sS -X POST http://localhost:4646/oauth/token \
@@ -269,7 +273,7 @@ Pending and denied/expired authorization responses use HTTP 403; overly fast
 polling uses HTTP 429 with `slow_down`, which increases the required interval
 by five seconds. A successful response includes an ID token only when
 `openid` was requested and a refresh token only when `offline_access` was
-requested. The configured `audience` is authoritative, and API scopes must be
+requested. The requested `audience` is authoritative, and API scopes must be
 authorized by the matching client grant.
 
 Refreshing follows the client's refresh token rotation, as in Auth0. By default a
@@ -385,7 +389,8 @@ write-only, as in Auth0. Nothing persists across restarts: reconcile on startup.
 
 What the code gets: `event` (`user` with `app_metadata`/`user_metadata`,
 `client`, `connection`, `request` with the `/authorize` `query` and the token
-`body`, `transaction`, `organization`, `secrets`), `api.idToken.setCustomClaim`,
+`body`, `transaction`, `organization`, `secrets`, and `resource_server` with the
+API the access token is for), `api.idToken.setCustomClaim`,
 `api.accessToken.setCustomClaim`, `api.access.deny(reason)`,
 `api.user.setAppMetadata`/`setUserMetadata`, `console`, and a global `fetch`
 (Promise API; `ok`, `status`, `headers.get`, `json()`, `text()`). npm

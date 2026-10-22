@@ -8,6 +8,10 @@ data:
   config.yaml: |
     issuer: {{ .Values.config.issuer }}
     audience: {{ .Values.config.audience }}
+    {{- with .Values.config.apis }}
+    apis:
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
     port: {{ .Values.config.port }}
     {{- if .Values.logStreamCA.secretName }}
     logStreamCAFile: /config/log-stream-ca/{{ .Values.logStreamCA.key }}

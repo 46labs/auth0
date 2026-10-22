@@ -24,6 +24,10 @@ logStreamCA:
 config:
   issuer: https://auth.46labs.test/
   audience: https://api.46labs.test
+  # Further APIs a login may name with ?audience=; audience is the default.
+  # - identifier: https://other.46labs.test
+  #   name: Other
+  apis: []
   port: 3000
   corsOrigins:
     - "*"

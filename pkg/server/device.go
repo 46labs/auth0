@@ -57,7 +57,7 @@ func (s *Server) handleDeviceAuthorization(w http.ResponseWriter, r *http.Reques
 	if audience == "" {
 		audience = s.cfg.Audience
 	}
-	if audience != s.cfg.Audience {
+	if !s.knownAudience(audience) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "audience is not supported")
 		return
 	}
@@ -286,7 +286,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "invalid device code")
 		return
 	}
-	if transaction.Audience != s.cfg.Audience {
+	if !s.knownAudience(transaction.Audience) {
 		s.mu.Unlock()
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "device code is no longer valid")
 		return
@@ -385,6 +385,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 			OrgID:          orgID,
 			ClientID:       clientID,
 			IncludeIDToken: hasScope(scope, "openid"),
+			Audience:       transaction.Audience,
 			Scope:          scope,
 			SessionID:      sessionID,
 			Connection:     connection,
