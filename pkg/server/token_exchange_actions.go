@@ -95,7 +95,7 @@ func (s *Server) exchangeThroughAction(w http.ResponseWriter, r *http.Request, a
 	accessClaims := jwt.MapClaims{
 		"sub":   user.ID,
 		"iss":   s.cfg.Issuer,
-		"aud":   audience,
+		"aud":   s.accessAudience(audience, grantedScope(r.FormValue("scope"))),
 		"exp":   now.Add(time.Hour).Unix(),
 		"iat":   now.Unix(),
 		"scope": grantedScope(r.FormValue("scope")),

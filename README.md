@@ -561,6 +561,13 @@ domain is treated as verified. Ticket fields the mock cannot apply are refused w
 - `/userinfo` - UserInfo endpoint
 - `/v2/logout` - Logout endpoint
 
+An access token granted `openid` carries two audiences, the API and
+`{issuer}userinfo`, as in Auth0. `/userinfo` (GET or POST) accepts only a token
+with that audience and answers from the user store, one claim group per scope:
+`profile` (name, nickname, picture, updated_at), `email` (email,
+email_verified), and `phone` (phone_number, phone_number_verified). Anything
+else gets 401 with a `WWW-Authenticate: Bearer` challenge.
+
 ## Integration
 
 ### Docker Compose

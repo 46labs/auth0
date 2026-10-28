@@ -98,7 +98,7 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 	minted := jwt.MapClaims{
 		"sub":   sub,
 		"iss":   s.cfg.Issuer,
-		"aud":   s.cfg.Audience,
+		"aud":   s.accessAudience(s.cfg.Audience, "openid profile email"),
 		"exp":   now.Add(time.Hour).Unix(),
 		"iat":   now.Unix(),
 		"scope": "openid profile email",

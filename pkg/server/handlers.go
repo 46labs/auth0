@@ -99,7 +99,7 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 		"grant_types_supported":                 []string{"authorization_code", "client_credentials", "refresh_token", deviceCodeGrantType},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
-		"scopes_supported":                      []string{"openid", "profile", "email", "offline_access"},
+		"scopes_supported":                      []string{"openid", "profile", "email", "phone", "offline_access"},
 	})
 }
 
@@ -626,31 +626,102 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(response)
 }
 
+// userInfoURL is the tenant's /userinfo endpoint, which Auth0 also uses as
+// an access-token audience.
+func (s *Server) userInfoURL() string {
+	return strings.TrimSuffix(s.cfg.Issuer, "/") + "/userinfo"
+}
+
+// handleUserInfo answers OIDC userinfo as Auth0 does: the profile comes from
+// the user store, not the token, filtered by the token's scopes. Only an
+// access token whose audience includes /userinfo is accepted, which Auth0
+// adds when the login asked for openid.
 func (s *Server) handleUserInfo(w http.ResponseWriter, r *http.Request) {
-	auth := r.Header.Get("Authorization")
-	if len(auth) < 7 || auth[:7] != "Bearer " {
-		http.Error(w, "Invalid authorization", http.StatusUnauthorized)
+	s.setCORS(w, r)
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Auth0-Client")
+	if r.Method == http.MethodOptions {
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		w.Header().Set("Allow", "GET, POST, OPTIONS")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	unauthorized := func() {
+		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	}
+
+	tokenString, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok || tokenString == "" {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	tokenString := auth[7:]
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+	claims := jwt.MapClaims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(*jwt.Token) (interface{}, error) {
 		return &s.privateKey.PublicKey, nil
-	})
-
-	if err != nil || !token.Valid {
-		http.Error(w, "Invalid token", http.StatusUnauthorized)
+	},
+		jwt.WithValidMethods([]string{"RS256"}),
+		jwt.WithIssuer(s.cfg.Issuer),
+		jwt.WithAudience(s.userInfoURL()),
+		jwt.WithExpirationRequired(),
+	)
+	if err != nil {
+		unauthorized()
+		return
+	}
+	sub, _ := claims.GetSubject()
+	user := s.getUserByID(sub)
+	if user == nil {
+		unauthorized()
 		return
 	}
 
-	claims := token.Claims.(jwt.MapClaims)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"sub":          claims["sub"],
-		"email":        claims["email"],
-		"name":         claims["name"],
-		"phone_number": claims["phone_number"],
-	})
+	scope, _ := claims["scope"].(string)
+	writeOAuthJSON(w, http.StatusOK, userInfoClaims(user, scope))
+}
+
+// userInfoClaims are the OIDC standard claims user releases under scope.
+// Absent values are omitted, never null.
+func userInfoClaims(user *config.User, scope string) map[string]any {
+	out := map[string]any{"sub": user.ID}
+	if hasScope(scope, "profile") {
+		if user.Name != "" {
+			out["name"] = user.Name
+		}
+		if nick := nickname(user); nick != "" {
+			out["nickname"] = nick
+		}
+		if user.Picture != "" {
+			out["picture"] = user.Picture
+		}
+		if user.UpdatedAt != "" {
+			out["updated_at"] = user.UpdatedAt
+		}
+	}
+	if hasScope(scope, "email") && user.Email != "" {
+		out["email"] = user.Email
+		out["email_verified"] = user.EmailVerified
+	}
+	if hasScope(scope, "phone") && user.Phone != "" {
+		out["phone_number"] = user.Phone
+		// Matches the ID token: a passwordless sms user is verified unless
+		// the store says otherwise.
+		out["phone_number_verified"] = user.PhoneVerified == nil || *user.PhoneVerified
+	}
+	return out
+}
+
+// nickname is the default Auth0 gives a passwordless user: the email's local
+// part, or the phone number.
+func nickname(user *config.User) string {
+	if local, _, ok := strings.Cut(user.Email, "@"); ok {
+		return local
+	}
+	return user.Phone
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -713,15 +784,26 @@ func (s *Server) idTokenClaims(user *config.User, clientID, orgID string, now ti
 	return claims
 }
 
+// accessAudience is an access token's aud for an API. Auth0 adds its
+// /userinfo endpoint when openid is granted, so the one access token also
+// reads the profile.
+func (s *Server) accessAudience(audience, scope string) any {
+	if hasScope(scope, "openid") && audience != s.userInfoURL() {
+		return []string{audience, s.userInfoURL()}
+	}
+	return audience
+}
+
 // accessTokenClaims are the claims of user's access token for audience.
 func (s *Server) accessTokenClaims(user *config.User, audience, scope, orgID string, now time.Time) jwt.MapClaims {
+	granted := grantedScope(scope)
 	claims := jwt.MapClaims{
 		"sub":   user.ID,
 		"iss":   s.cfg.Issuer,
-		"aud":   audience,
+		"aud":   s.accessAudience(audience, granted),
 		"exp":   now.Add(time.Hour).Unix(),
 		"iat":   now.Unix(),
-		"scope": grantedScope(scope),
+		"scope": granted,
 	}
 	s.addOrgClaims(claims, user, orgID)
 	return claims

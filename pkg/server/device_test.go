@@ -234,8 +234,11 @@ func TestDeviceAuthorizationDiscoveryAndApproval(t *testing.T) {
 	if got := discovery["device_authorization_endpoint"]; got != ts.URL+"/oauth/device/code" {
 		t.Fatalf("device endpoint = %v", got)
 	}
+	if scopes, _ := discovery["scopes_supported"].([]any); !slices.Contains(scopes, any("phone")) {
+		t.Fatalf("scopes_supported = %v, want phone", scopes)
+	}
 
-	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid profile email offline_access")
+	issued := issueDeviceAuthorization(t, ts.URL, deviceClient, srv.cfg.Audience, "openid profile email phone offline_access")
 	if issued.ExpiresIn != 900 || issued.Interval != 5 {
 		t.Fatalf("device lifetime/interval = %d/%d, want 900/5", issued.ExpiresIn, issued.Interval)
 	}
@@ -288,7 +291,7 @@ func TestDeviceAuthorizationDiscoveryAndApproval(t *testing.T) {
 	if tokens["id_token"] == nil || tokens["refresh_token"] == nil {
 		t.Fatalf("openid/offline_access response omitted conditional tokens: %#v", tokens)
 	}
-	if got := tokens["scope"]; got != "openid profile email offline_access" {
+	if got := tokens["scope"]; got != "openid profile email phone offline_access" {
 		t.Fatalf("scope = %v", got)
 	}
 
@@ -303,7 +306,7 @@ func TestDeviceAuthorizationDiscoveryAndApproval(t *testing.T) {
 		t.Fatalf("device access token signature: %v", err)
 	}
 	claims := parsed.Claims.(jwt.MapClaims)
-	if claims["sub"] != "test_user_1" || claims["aud"] != srv.cfg.Audience {
+	if claims["sub"] != "test_user_1" || audiences(t, claims)[0] != srv.cfg.Audience {
 		t.Fatalf("device access claims = %#v", claims)
 	}
 
@@ -488,7 +491,7 @@ func TestDeviceRefreshTokenRoundTrip(t *testing.T) {
 		t.Fatalf("refreshed device access token: %v", err)
 	}
 	claims := parsed.Claims.(jwt.MapClaims)
-	if claims["aud"] != srv.cfg.Audience || claims["scope"] != "openid offline_access" {
+	if audiences(t, claims)[0] != srv.cfg.Audience || claims["scope"] != "openid offline_access" {
 		t.Fatalf("refreshed device access claims = %#v", claims)
 	}
 

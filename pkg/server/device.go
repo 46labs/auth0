@@ -455,6 +455,7 @@ func (s *Server) deviceScope(clientID, requested, audience string) (string, erro
 		"openid":         true,
 		"profile":        true,
 		"email":          true,
+		"phone":          true,
 		"offline_access": true,
 	}
 	s.mu.RLock()

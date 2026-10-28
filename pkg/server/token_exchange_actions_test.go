@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 
@@ -146,7 +147,7 @@ func TestExchangeAction_ViewAsTheTarget(t *testing.T) {
 		t.Fatalf("exchange: %d %v", st, out)
 	}
 	c := claims(t, out["access_token"])
-	if c["sub"] != "email|member" || c["org_id"] != "org_1" || c["aud"] != "https://api.example.test" {
+	if c["sub"] != "email|member" || c["org_id"] != "org_1" || !slices.Equal(audiences(t, c), []string{"https://api.example.test", "https://auth.example.test/userinfo"}) {
 		t.Fatalf("token: %v", c)
 	}
 	if c["https://mock/saw-subject-token"] != false {
