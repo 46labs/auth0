@@ -344,7 +344,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 		idClaims = s.idTokenClaims(userCopy, clientID, orgID, now)
 		idClaims["auth_time"] = now.Unix()
 	}
-	accessClaims := s.accessTokenClaims(userCopy, transaction.Audience, scope, orgID, now)
+	accessClaims := s.accessTokenClaims(userCopy, clientID, transaction.Audience, scope, orgID, now)
 	// The approval is a login, so it starts a session that every token
 	// refreshed from it keeps, as with the authorization code flow.
 	sessionID := "sess_" + s.generateID()

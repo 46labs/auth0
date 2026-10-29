@@ -568,6 +568,10 @@ with that audience and answers from the user store, one claim group per scope:
 email_verified), and `phone` (phone_number, phone_number_verified). Anything
 else gets 401 with a `WWW-Authenticate: Bearer` challenge.
 
+An access token issued to a client names it in `azp`, as Auth0's do, so an API
+can tell its own apps from third-party ones. The config-only token exchange
+stand-in, which takes no `client_id`, is the one exception.
+
 ## Integration
 
 ### Docker Compose

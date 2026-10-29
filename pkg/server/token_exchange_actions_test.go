@@ -156,6 +156,9 @@ func TestExchangeAction_ViewAsTheTarget(t *testing.T) {
 	if c["scope"] != "openid read:calls" {
 		t.Fatalf("scope: %v", c["scope"])
 	}
+	if c["azp"] != "spa_app" {
+		t.Fatalf("azp: %v", c["azp"])
+	}
 	if act, _ := c["act"].(map[string]any); act["sub"] != "email|admin" {
 		t.Fatalf("act: %v", c["act"])
 	}

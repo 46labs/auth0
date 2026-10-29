@@ -382,6 +382,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			"iat":       now.Unix(),
 			"scope":     "read:organizations write:organizations read:users write:users",
 			"gty":       "client-credentials",
+			"azp":       clientID,
 			"client_id": clientID,
 		}
 
@@ -460,7 +461,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		if audience == "" {
 			audience = s.cfg.Audience
 		}
-		accessClaims := s.accessTokenClaims(user, audience, scope, orgID, now)
+		accessClaims := s.accessTokenClaims(user, clientID, audience, scope, orgID, now)
 		idClaims := s.idTokenClaims(user, clientID, orgID, now)
 
 		if issued.SessionID != "" {
@@ -571,7 +572,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	audience := s.authorizeAudience(claimed.Query)
-	accessClaims := s.accessTokenClaims(&user, audience, requestedScope, orgID, now)
+	accessClaims := s.accessTokenClaims(&user, clientID, audience, requestedScope, orgID, now)
 
 	if claimed.SessionID != "" {
 		idClaims["sid"] = claimed.SessionID
@@ -794,11 +795,13 @@ func (s *Server) accessAudience(audience, scope string) any {
 	return audience
 }
 
-// accessTokenClaims are the claims of user's access token for audience.
-func (s *Server) accessTokenClaims(user *config.User, audience, scope, orgID string, now time.Time) jwt.MapClaims {
+// accessTokenClaims are the claims of user's access token for audience,
+// issued to clientID. Auth0 names the client in azp.
+func (s *Server) accessTokenClaims(user *config.User, clientID, audience, scope, orgID string, now time.Time) jwt.MapClaims {
 	granted := grantedScope(scope)
 	claims := jwt.MapClaims{
 		"sub":   user.ID,
+		"azp":   clientID,
 		"iss":   s.cfg.Issuer,
 		"aud":   s.accessAudience(audience, granted),
 		"exp":   now.Add(time.Hour).Unix(),
