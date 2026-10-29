@@ -97,9 +97,10 @@ func (s *Server) runPostLoginAction(b *ActionBinding, user *config.User, client 
 			}
 		})
 		ev := s.buildEvent(b.Action, b, user, client, orgID, req)
-		// The API the access token is for, as Auth0 names it.
-		if aud, ok := accessClaims["aud"].(string); ok && aud != "" {
-			ev["resource_server"] = map[string]any{"identifier": aud}
+		// The API the access token is for, as Auth0 names it. It is the first
+		// audience; /userinfo follows when openid was granted.
+		if aud, _ := accessClaims.GetAudience(); len(aud) > 0 && aud[0] != "" {
+			ev["resource_server"] = map[string]any{"identifier": aud[0]}
 		}
 		return vm.ToValue(ev), api
 	})

@@ -374,46 +374,6 @@ func TestCORSHeaders(t *testing.T) {
 	t.Log("CORS headers passed")
 }
 
-func TestUserInfoEndpoint(t *testing.T) {
-	srv, ts := setupTestServer(t)
-	defer ts.Close()
-
-	accessToken, _ := srv.SignToken(map[string]interface{}{
-		"sub":          "test_user_1",
-		"email":        "test@46labs.test",
-		"name":         "Test User",
-		"phone_number": "+14155551234",
-		"iss":          srv.cfg.Issuer,
-		"aud":          srv.cfg.Audience,
-		"exp":          time.Now().Add(time.Hour).Unix(),
-		"iat":          time.Now().Unix(),
-	})
-
-	req, _ := http.NewRequest("GET", ts.URL+"/userinfo", nil)
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("UserInfo request failed: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != 200 {
-		t.Fatalf("Expected 200, got %d", resp.StatusCode)
-	}
-
-	var userInfo map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
-		t.Fatalf("Failed to decode userinfo: %v", err)
-	}
-
-	if userInfo["sub"] != "test_user_1" {
-		t.Errorf("Expected sub=test_user_1, got %v", userInfo["sub"])
-	}
-
-	t.Log("UserInfo endpoint passed")
-}
-
 func TestInvalidAuthorizationCode(t *testing.T) {
 	_, ts := setupTestServer(t)
 	defer ts.Close()

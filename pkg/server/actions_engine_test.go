@@ -423,7 +423,7 @@ func TestActions_RequestedAudience(t *testing.T) {
 		t.Fatalf("token: %d %v", st, tok)
 	}
 	c := claims(t, tok["access_token"])
-	if c["aud"] != other || c["https://mock/rs"] != other {
+	if aud := audiences(t, c); aud[0] != other || c["https://mock/rs"] != other {
 		t.Fatalf("access token for %v, action saw %v; want %s", c["aud"], c["https://mock/rs"], other)
 	}
 	resp, err := http.PostForm(ts.URL+"/oauth/token", url.Values{
@@ -435,12 +435,12 @@ func TestActions_RequestedAudience(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	var refreshed map[string]any
 	_ = json.NewDecoder(resp.Body).Decode(&refreshed)
-	if r := claims(t, refreshed["access_token"]); r["aud"] != other || r["https://mock/rs"] != other {
+	if r := claims(t, refreshed["access_token"]); audiences(t, r)[0] != other || r["https://mock/rs"] != other {
 		t.Fatalf("refresh changed the API: %v", r)
 	}
 
 	_, def := login(t, ts, "")
-	if d := claims(t, def["access_token"]); d["aud"] != s.cfg.Audience || d["https://mock/rs"] != nil {
+	if d := claims(t, def["access_token"]); audiences(t, d)[0] != s.cfg.Audience || d["https://mock/rs"] != nil {
 		t.Fatalf("default login: %v", d)
 	}
 
