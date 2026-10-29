@@ -103,6 +103,11 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 		"iat":   now.Unix(),
 		"scope": "openid profile email",
 	}
+	// The stand-in predates client checks and its callers send no client_id;
+	// it names only a registered client.
+	if clientID := clientIDFromRequest(r); s.lookupClient(clientID) != nil {
+		minted["azp"] = clientID
+	}
 
 	orgClaim := ex.OrgClaim
 	if orgClaim == "" {

@@ -123,7 +123,7 @@ func TestUserInfo_SignedUpByEmail(t *testing.T) {
 	if !strings.HasPrefix(user.ID, "email|") {
 		t.Fatalf("new email user id %q, want email|", user.ID)
 	}
-	tok, err := srv.SignToken(srv.accessTokenClaims(user, srv.cfg.Audience, "openid email", "", time.Now()))
+	tok, err := srv.SignToken(srv.accessTokenClaims(user, "spa_app", srv.cfg.Audience, "openid email", "", time.Now()))
 	if err != nil {
 		t.Fatal(err)
 	}
