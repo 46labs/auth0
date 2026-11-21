@@ -166,6 +166,7 @@ func (s *Server) deleteConnection(w http.ResponseWriter, connID string) {
 		}
 	}
 	for id := range orphaned {
+		s.removeUserRolesLocked(id)
 		delete(s.users, id)
 	}
 	// Membership is per-organization state keyed by user, so it has to follow

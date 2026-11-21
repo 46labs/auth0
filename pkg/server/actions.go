@@ -90,7 +90,13 @@ func (s *Server) buildPostLoginContext(user *config.User, client *config.Client,
 		},
 	}
 
+	// The user's tenant role names. Left out when there are none, so a
+	// declarative ${authorization.roles} still resolves to nothing for them;
+	// buildEvent gives scripted Actions the empty array.
 	auth := map[string]any{}
+	if roles := s.tenantRoleNames(user.ID); len(roles) > 0 {
+		auth["roles"] = roles
+	}
 	if orgID != "" {
 		auth["org_id"] = orgID
 		// Prod parity: derive the org-scoped role from app_metadata.org_roles[org]

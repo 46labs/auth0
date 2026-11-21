@@ -69,6 +69,9 @@ type User struct {
 	CreatedAt     string                 `json:"created_at,omitempty" yaml:"-" mapstructure:"-"`
 	UpdatedAt     string                 `json:"updated_at,omitempty" yaml:"-" mapstructure:"-"`
 	Organizations []string               `json:"organizations,omitempty" yaml:"organizations,omitempty" mapstructure:"organizations"` // Organization IDs
+	// Roles names the tenant roles assigned at startup. Config only: Auth0's
+	// user object carries no roles, so they are read through /users/{id}/roles.
+	Roles []string `json:"-" yaml:"roles,omitempty" mapstructure:"roles"`
 }
 
 type Organization struct {

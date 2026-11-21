@@ -132,6 +132,9 @@ type Server struct {
 	clients       map[string]*config.Client
 	clientGrants  map[string]*clientGrant
 	roles         map[string]*config.Role
+	// userRoles holds each user's tenant role ids, the /users/{id}/roles
+	// assignments. Writers replace the slice, never append in place.
+	userRoles map[string][]string
 
 	orgConnections map[string][]config.OrganizationConnection
 	// keyed by org id, in creation order
@@ -196,6 +199,11 @@ func New(cfg *config.Config) (*Server, error) {
 		roles[cfg.Roles[i].ID] = &cfg.Roles[i]
 	}
 
+	userRoles, err := seedUserRoles(cfg.Users, roles)
+	if err != nil {
+		return nil, err
+	}
+
 	orgConnections := buildOrgConnections(cfg)
 
 	return &Server{
@@ -217,6 +225,7 @@ func New(cfg *config.Config) (*Server, error) {
 		clients:              clients,
 		clientGrants:         map[string]*clientGrant{},
 		roles:                roles,
+		userRoles:            userRoles,
 		orgConnections:       orgConnections,
 		invitations:          make(map[string][]config.OrganizationInvitation),
 
@@ -287,6 +296,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v2/users/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/organizations") {
 			s.handleUserOrganizations(w, r)
+			return
+		}
+		// Exactly /users/{id}/roles: a user whose id is "roles" stays a user.
+		if rest := strings.TrimPrefix(r.URL.Path, "/api/v2/users/"); strings.Count(rest, "/") == 1 && strings.HasSuffix(rest, "/roles") && rest != "/roles" {
+			s.handleUserRoles(w, r)
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/identities") {

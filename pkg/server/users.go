@@ -297,6 +297,7 @@ func (s *Server) linkUser(primaryID, provider, identityID, connectionID string) 
 		primary.Identities = append(primary.Identities, id)
 	}
 
+	s.removeUserRolesLocked(secondaryID)
 	delete(s.users, secondaryID)
 	s.removeMembershipsLocked(secondaryID)
 

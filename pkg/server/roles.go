@@ -28,8 +28,8 @@ func (s *Server) handleRoles(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleRole serves a single role by id. Subresources this mock does not
-// implement (permissions, users) must 404: truncating the path at the slash
+// handleRole serves a single role by id and its users. Subresources this mock
+// does not implement (permissions) must 404: truncating the path at the slash
 // would dispatch DELETE .../roles/{id}/permissions to deleteRole and destroy
 // the role itself, the same fall-through the organization router had.
 func (s *Server) handleRole(w http.ResponseWriter, r *http.Request) {
@@ -37,6 +37,10 @@ func (s *Server) handleRole(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	segments := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v2/roles/"), "/"), "/")
+	if len(segments) == 2 && segments[0] != "" && segments[1] == "users" {
+		s.handleRoleUsers(w, r, segments[0])
+		return
+	}
 	if len(segments) != 1 || segments[0] == "" {
 		if r.Method == http.MethodOptions {
 			return
@@ -199,6 +203,7 @@ func (s *Server) deleteRole(w http.ResponseWriter, roleID string) {
 		}
 		s.members[orgID] = members
 	}
+	s.unassignRoleLocked(roleID)
 
 	delete(s.roles, roleID)
 

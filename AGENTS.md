@@ -154,6 +154,11 @@ from conflict-marker checks in pre-commit, CI, and editor diagnostics.
   non-passwordless enabled connection before it can be invited to.
 - Invitations carry role **ids**; `app_metadata.org_roles` holds the role **name**. Redemption
   resolves one to the other.
+- Tenant roles (`/users/{id}/roles`, `/roles/{id}/users`) are kept by role id in `userRoles`,
+  apart from organization member roles. `event.authorization.roles` carries the tenant role names
+  only; organization roles reach an Action through `api.roles.getUserEffectiveRolesByNames`.
+  Shapes and statuses follow the Management API OpenAPI document and go-auth0's
+  `TestUserManager_Roles` and `TestRoleManager_Users*` recordings.
 - The role claim reads `app_metadata.org_roles[org_id]`. The flat `app_metadata.role` is legacy and
   scoped to `app_metadata.tenant_id` only.
 - `PATCH /api/v2/organizations/{id}` merges metadata where real Auth0 replaces the object. Known

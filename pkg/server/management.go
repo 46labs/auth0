@@ -914,6 +914,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, userID strin
 	}
 
 	s.removeMembershipsLocked(userID)
+	s.removeUserRolesLocked(userID)
 
 	// Delete the user
 	delete(s.users, userID)

@@ -452,8 +452,9 @@ func TestUnimplementedRoleSubresourceDoesNotDeleteRole(t *testing.T) {
 		}
 	})
 
-	t.Run("Users", func(t *testing.T) {
-		_, err := m.Role.Users(ctx, roleID)
+	// Auth0 has no DELETE on a role's users; it must not reach deleteRole.
+	t.Run("DeleteUsers", func(t *testing.T) {
+		err := m.Request(ctx, http.MethodDelete, m.URI("roles", roleID, "users"), &map[string]any{"users": []string{"test_user_1"}})
 		assertStatus(t, err, http.StatusNotFound)
 		if _, err := m.Role.Read(ctx, roleID); err != nil {
 			t.Fatalf("the role went missing: %v", err)
