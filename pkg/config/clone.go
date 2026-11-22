@@ -127,6 +127,7 @@ func (u *User) Clone() *User {
 		out.Organizations = make([]string, len(u.Organizations))
 		copy(out.Organizations, u.Organizations)
 	}
+	out.Roles = slices.Clone(u.Roles)
 	if u.Blocked != nil {
 		blocked := *u.Blocked
 		out.Blocked = &blocked

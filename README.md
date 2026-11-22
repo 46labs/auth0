@@ -19,6 +19,8 @@ Full-featured OIDC provider mock with Auth0-compatible API for local development
 - Organization invitations: create, list, read, revoke
 - Organization enabled connections (`/api/v2/organizations/:id/enabled_connections`)
 - Roles registry (`/api/v2/roles`), including `name_filter` for read-or-create by name
+- Tenant role membership: `/api/v2/users/:id/roles` (list, assign, remove) and
+  `/api/v2/roles/:id/users` (list by page or checkpoint, assign), seeded by `users[].roles`
 - Connections management (`/api/v2/connections`)
 - Clients CRUD (`/api/v2/clients`), including `initiate_login_uri` and `client_metadata`
 - User metadata updates (`/api/v2/users/:id`)
@@ -122,6 +124,8 @@ users:
       role: "admin"
     organizations:
       - "org_1"
+    roles:           # tenant role names, from `roles:` below
+      - "support"
 
 organizations:
   - id: "org_1"
@@ -144,6 +148,10 @@ members:
   - user_id: "auth0|user_1"
     org_id: "org_1"
     role: "admin"
+
+roles:
+  - id: "rol_support"
+    name: "support"
 ```
 
 ### Custom Login Template
