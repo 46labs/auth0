@@ -364,6 +364,29 @@ type Actions struct {
 	CredentialsExchange *CredentialsExchangeAction `json:"credentials_exchange,omitempty" yaml:"credentials_exchange,omitempty" mapstructure:"credentials_exchange"`
 	PostRegistration    *PostRegistrationAction    `json:"post_registration,omitempty" yaml:"post_registration,omitempty" mapstructure:"post_registration"`
 	TokenExchange       *TokenExchangeAction       `json:"token_exchange,omitempty" yaml:"token_exchange,omitempty" mapstructure:"token_exchange"`
+	// Deployed are Actions with real code, created, deployed, and bound at
+	// startup in this order, as a tenant's Actions are through the Management
+	// API. They run like Actions created there and can be changed there.
+	Deployed []DeployedAction `json:"deployed,omitempty" yaml:"deployed,omitempty" mapstructure:"deployed"`
+}
+
+// DeployedAction is one Action in Actions.Deployed.
+type DeployedAction struct {
+	Name string `json:"name" yaml:"name" mapstructure:"name"`
+	// Trigger is the trigger it is bound to: "post-login" when empty.
+	Trigger string `json:"trigger,omitempty" yaml:"trigger,omitempty" mapstructure:"trigger"`
+	Code    string `json:"code" yaml:"code" mapstructure:"code"`
+	// Runtime is empty for the mock's default.
+	Runtime string `json:"runtime,omitempty" yaml:"runtime,omitempty" mapstructure:"runtime"`
+	// Secrets are event.secrets, as Auth0 takes them: a list, so names keep
+	// their case.
+	Secrets []ActionSecret `json:"secrets,omitempty" yaml:"secrets,omitempty" mapstructure:"secrets"`
+}
+
+// ActionSecret is one of an Action's event.secrets.
+type ActionSecret struct {
+	Name  string `json:"name" yaml:"name" mapstructure:"name"`
+	Value string `json:"value" yaml:"value" mapstructure:"value"`
 }
 
 // TokenExchangeAction declares how the mock services RFC 8693 token exchange

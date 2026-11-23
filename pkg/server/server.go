@@ -206,7 +206,7 @@ func New(cfg *config.Config) (*Server, error) {
 
 	orgConnections := buildOrgConnections(cfg)
 
-	return &Server{
+	s := &Server{
 		cfg:                  cfg,
 		privateKey:           key,
 		templates:            tmpl,
@@ -235,7 +235,11 @@ func New(cfg *config.Config) (*Server, error) {
 		logStreams:        make(map[string]*logStream),
 		logDeliveryClient: logDeliveryClient(),
 		logRetryBackoff:   defaultLogStreamBackoff,
-	}, nil
+	}
+	if err := s.deployConfiguredActions(cfg.Actions.Deployed); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // buildOrgConnections seeds the enabled_connections pairings from each

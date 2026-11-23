@@ -282,3 +282,25 @@ clients:
 		t.Fatalf("policies = %+v", rt.Policies)
 	}
 }
+
+func TestDeployedActionsLoadFromYAML(t *testing.T) {
+	cfg := loadFrom(t, `
+actions:
+  deployed:
+    - name: Role claim
+      code: |
+        exports.onExecutePostLogin = async (event, api) => {
+          api.accessToken.setCustomClaim("https://example.test/role", "admin");
+        };
+      secrets:
+        - name: API
+          value: https://api.test
+`)
+	d := cfg.Actions.Deployed
+	if len(d) != 1 || d[0].Name != "Role claim" || d[0].Trigger != "" || len(d[0].Secrets) != 1 || d[0].Secrets[0] != (config.ActionSecret{Name: "API", Value: "https://api.test"}) {
+		t.Fatalf("deployed = %+v", d)
+	}
+	if !strings.Contains(d[0].Code, "setCustomClaim(\"https://example.test/role\"") || !strings.HasSuffix(d[0].Code, "};\n") {
+		t.Fatalf("code = %q", d[0].Code)
+	}
+}
