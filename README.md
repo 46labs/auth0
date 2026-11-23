@@ -387,6 +387,25 @@ curl -X PATCH http://localhost:3000/api/v2/actions/triggers/post-login/bindings 
   -d '{"bindings":[{"ref":{"type":"action_name","value":"guardian-approval"}}]}'
 ```
 
+Actions can also start deployed and bound, from config, in the order listed
+(`trigger` defaults to `post-login`):
+
+```yaml
+actions:
+  deployed:
+    - name: role-claim
+      code: |
+        exports.onExecutePostLogin = async (event, api) => {
+          api.accessToken.setCustomClaim("https://example.test/role", event.secrets.ROLE);
+        };
+      secrets:
+        - name: ROLE
+          value: admin
+```
+
+They run like Actions created through the Management API and can be changed
+there.
+
 Endpoints: `GET /api/v2/actions/triggers`; `GET|POST /api/v2/actions/actions`
 (filters `actionName`, `triggerId`, `deployed`); `GET|PATCH|DELETE
 /api/v2/actions/actions/{id}` (`?force=true` unbinds first); `POST

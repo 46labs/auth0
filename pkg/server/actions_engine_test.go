@@ -456,3 +456,57 @@ func TestActions_RequestedAudience(t *testing.T) {
 		t.Fatalf("unknown audience: %d %s", r.StatusCode, r.Header.Get("Location"))
 	}
 }
+
+func TestActions_DeployedFromConfig(t *testing.T) {
+	_, ts := setupTestServerWith(t, func(cfg *config.Config) {
+		cfg.Actions.Deployed = []config.DeployedAction{
+			{Name: "first", Code: `
+				exports.onExecutePostLogin = async (event, api) => {
+				  api.accessToken.setCustomClaim("https://mock/order", "first");
+				  api.accessToken.setCustomClaim("https://mock/secret", event.secrets.TOKEN);
+				};`, Secrets: []config.ActionSecret{{Name: "TOKEN", Value: "s3cret"}}},
+			{Name: "second", Trigger: "post-login", Code: `
+				exports.onExecutePostLogin = async (event, api) => {
+				  api.accessToken.setCustomClaim("https://mock/order", "second");
+				};`},
+		}
+	})
+	defer ts.Close()
+
+	st, tok := login(t, ts, "")
+	if st != 200 {
+		t.Fatalf("token: %d %v", st, tok)
+	}
+	// Bound in config order, so the second runs last.
+	ac := claims(t, tok["access_token"])
+	if ac["https://mock/order"] != "second" || ac["https://mock/secret"] != "s3cret" {
+		t.Fatalf("access claims: %v", ac)
+	}
+
+	// Listed through the Management API like any deployed, bound Action.
+	m := mgmt{t, ts.URL}
+	code, body := m.do(http.MethodGet, "/api/v2/actions/triggers/post-login/bindings", nil)
+	bindings, _ := body["bindings"].([]any)
+	if code != 200 || len(bindings) != 2 {
+		t.Fatalf("bindings: %d %v", code, body)
+	}
+	first, _ := bindings[0].(map[string]any)["action"].(map[string]any)
+	if first["name"] != "first" || first["all_changes_deployed"] != true {
+		t.Fatalf("first binding: %v", first)
+	}
+}
+
+func TestActions_DeployedFromConfigRejectsBadEntries(t *testing.T) {
+	for name, d := range map[string][]config.DeployedAction{
+		"unknown trigger": {{Name: "a", Trigger: "pre-login", Code: "exports.onExecutePostLogin = async () => {};"}},
+		"no name":         {{Code: "exports.onExecutePostLogin = async () => {};"}},
+		"same name":       {{Name: "a", Code: "1"}, {Name: "a", Code: "2"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := &config.Config{Issuer: "http://localhost/", Actions: config.Actions{Deployed: d}}
+			if _, err := New(cfg); err == nil {
+				t.Fatal("New accepted it")
+			}
+		})
+	}
+}

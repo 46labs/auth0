@@ -29,6 +29,11 @@ import (
 )
 
 func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
+	return setupTestServerWith(t, nil)
+}
+
+// setupTestServerWith is setupTestServer with edit applied to its config first.
+func setupTestServerWith(t *testing.T, edit func(*config.Config)) (*Server, *httptest.Server) {
 	cfg := &config.Config{
 		Issuer:      "http://localhost:4646/",
 		Audience:    "http://localhost:3000",
@@ -124,6 +129,9 @@ func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
 			Title:        "Sign In",
 			Subtitle:     "Enter your identifier",
 		},
+	}
+	if edit != nil {
+		edit(cfg)
 	}
 
 	srv, err := New(cfg)
