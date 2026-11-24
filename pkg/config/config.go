@@ -259,7 +259,27 @@ type RefreshTokenConfig struct {
 type API struct {
 	Identifier string `json:"identifier" yaml:"identifier" mapstructure:"identifier"`
 	Name       string `json:"name,omitempty" yaml:"name,omitempty" mapstructure:"name"`
+	// ProofOfPossession is the API's sender constraining, as Auth0's
+	// resource server proof_of_possession.
+	ProofOfPossession *ProofOfPossession `json:"proof_of_possession,omitempty" yaml:"proof_of_possession,omitempty" mapstructure:"proof_of_possession"`
 }
+
+// ProofOfPossession is a resource server's sender constraining: with the
+// "dpop" mechanism a token request's DPoP proof binds the tokens to its key,
+// and Required refuses a request without one.
+type ProofOfPossession struct {
+	Mechanism string `json:"mechanism" yaml:"mechanism" mapstructure:"mechanism"`
+	Required  bool   `json:"required" yaml:"required" mapstructure:"required"`
+	// RequiredFor narrows Required to public clients (spa, native) when it
+	// is "public_clients"; "all_clients" or empty is every client.
+	RequiredFor string `json:"required_for,omitempty" yaml:"required_for,omitempty" mapstructure:"required_for"`
+}
+
+// RequiredForPublicClients limits a required proof to public clients.
+const RequiredForPublicClients = "public_clients"
+
+// ProofOfPossessionDPoP is the DPoP mechanism's name.
+const ProofOfPossessionDPoP = "dpop"
 
 // RefreshTokenPolicy is a multi-resource refresh token policy: the API a
 // refresh token may also mint access tokens for, and the scopes it grants.
@@ -338,9 +358,11 @@ type Config struct {
 	Audience string
 	// APIs are further APIs a login may ask for with ?audience=, as a tenant
 	// has several; Audience is the default when the request names none.
-	APIs        []API
-	Port        int
-	CORSOrigins []string
+	APIs []API
+	// ProofOfPossession is the default Audience's sender constraining.
+	ProofOfPossession *ProofOfPossession
+	Port              int
+	CORSOrigins       []string
 	// DeviceCodeLifetime bounds device authorization requests; zero means 15m.
 	DeviceCodeLifetime time.Duration
 	Users              []User

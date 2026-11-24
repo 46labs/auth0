@@ -721,6 +721,8 @@ func TestDevicePostLoginActionUsesDeviceProtocol(t *testing.T) {
 	}
 }
 
+// A device login is a session: the ID token keeps its sid across refreshes,
+// and, as Auth0, a refresh gives the Action no event.session.
 func TestDeviceLoginIsASessionKeptAcrossRefresh(t *testing.T) {
 	srv, ts := setupTestServer(t)
 	defer ts.Close()
@@ -757,8 +759,8 @@ func TestDeviceLoginIsASessionKeptAcrossRefresh(t *testing.T) {
 	if refreshResponse.StatusCode != http.StatusOK {
 		t.Fatalf("device refresh = %d %#v", refreshResponse.StatusCode, refreshed)
 	}
-	if got := claims(t, refreshed["access_token"])["https://mock/sid"]; got != sid {
-		t.Fatalf("refreshed action sid = %v, want %s", got, sid)
+	if got := claims(t, refreshed["access_token"])["https://mock/sid"]; got != nil && got != false {
+		t.Fatalf("a refresh gave the action a session: %v", got)
 	}
 	if got := claims(t, refreshed["id_token"])["sid"]; got != sid {
 		t.Fatalf("refreshed id token sid = %v, want %s", got, sid)

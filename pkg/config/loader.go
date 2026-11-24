@@ -104,6 +104,13 @@ func Load(opts ...Option) (*Config, error) {
 		return nil, fmt.Errorf("unmarshal apis: %w", err)
 	}
 
+	if viper.IsSet("proofOfPossession") {
+		cfg.ProofOfPossession = &ProofOfPossession{}
+		if err := viper.UnmarshalKey("proofOfPossession", cfg.ProofOfPossession); err != nil {
+			return nil, fmt.Errorf("unmarshal proofOfPossession: %w", err)
+		}
+	}
+
 	if err := viper.UnmarshalKey("clients", &cfg.Clients); err != nil {
 		return nil, fmt.Errorf("unmarshal clients: %w", err)
 	}

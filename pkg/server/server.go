@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"fmt"
+	"github.com/auth0/go-jwt-middleware/v3/validator"
 	"log"
 	"net/http"
 	"strings"
@@ -62,6 +63,9 @@ type refreshTokenState struct {
 	// Family is shared by a refresh token and every token rotated from it.
 	// Auth0 revokes the whole family when a retired token is used again.
 	Family string
+	// DPoPJKT is the thumbprint of the DPoP key the token is bound to; a
+	// refresh needs a proof made with it.
+	DPoPJKT string
 }
 
 // retiredRefreshToken is a refresh token that a rotation replaced.
@@ -113,6 +117,10 @@ type Server struct {
 	// kid is privateKey's RFC 7638 thumbprint; see signingKey.
 	kid       string
 	templates *templates.Loader
+	// dpop checks token requests' DPoP proofs; dpopSeen their jti values.
+	dpop       *validator.Validator
+	dpopSeen   dpopReplay
+	dpopNonces dpopNonces
 
 	pending       map[string]string
 	authCodes     map[string]*authCode
@@ -208,7 +216,13 @@ func New(cfg *config.Config) (*Server, error) {
 
 	orgConnections := buildOrgConnections(cfg)
 
+	dpop, err := newDPoPValidator(&key.private.PublicKey)
+	if err != nil {
+		return nil, err
+	}
+
 	s := &Server{
+		dpop:                 dpop,
 		cfg:                  cfg,
 		privateKey:           key.private,
 		kid:                  key.kid,
