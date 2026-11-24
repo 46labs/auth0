@@ -84,6 +84,13 @@ func login(t *testing.T, ts *httptest.Server, extraQuery string) (int, map[strin
 }
 
 func loginWithScope(t *testing.T, ts *httptest.Server, scope, extraQuery string) (int, map[string]any) {
+	return loginWithHeader(t, ts, scope, extraQuery, nil)
+}
+
+// loginWithHeader is loginWithScope with header(nonce) on the token request.
+// A use_dpop_nonce answer is retried once with the nonce it gave, as the SDKs
+// do.
+func loginWithHeader(t *testing.T, ts *httptest.Server, scope, extraQuery string, header func(nonce string) http.Header) (int, map[string]any) {
 	redirectURI := "http://localhost:3000/callback"
 	clientID := "test_client_actions"
 	codeVerifier, codeChallenge := generatePKCE()
@@ -103,17 +110,34 @@ func loginWithScope(t *testing.T, ts *httptest.Server, scope, extraQuery string)
 	}
 	_ = resp2.Body.Close()
 	loc, _ := url.Parse(resp2.Header.Get("Location"))
-	resp3, err := hc.PostForm(ts.URL+"/oauth/token", url.Values{
-		"grant_type": {"authorization_code"}, "client_id": {clientID}, "code": {loc.Query().Get("code")},
-		"redirect_uri": {redirectURI}, "code_verifier": {codeVerifier},
-	})
-	if err != nil {
-		t.Fatal(err)
+	exchange := func(nonce string) (int, map[string]any, string) {
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/oauth/token", strings.NewReader(url.Values{
+			"grant_type": {"authorization_code"}, "client_id": {clientID}, "code": {loc.Query().Get("code")},
+			"redirect_uri": {redirectURI}, "code_verifier": {codeVerifier},
+		}.Encode()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if header != nil {
+			for k, v := range header(nonce) {
+				req.Header[k] = v
+			}
+		}
+		resp3, err := hc.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp3.Body.Close() }()
+		var out map[string]any
+		_ = json.NewDecoder(resp3.Body).Decode(&out)
+		return resp3.StatusCode, out, resp3.Header.Get("DPoP-Nonce")
 	}
-	defer func() { _ = resp3.Body.Close() }()
-	var out map[string]any
-	_ = json.NewDecoder(resp3.Body).Decode(&out)
-	return resp3.StatusCode, out
+	status, out, nonce := exchange("")
+	if status == http.StatusBadRequest && out["error"] == "use_dpop_nonce" && nonce != "" {
+		status, out, _ = exchange(nonce)
+	}
+	return status, out
 }
 
 func claims(t *testing.T, token any) jwt.MapClaims {
@@ -300,10 +324,11 @@ func TestActions_UndeployedAndThrowing(t *testing.T) {
 	}
 }
 
-// A login is one session: the Action sees its id at sign-in and again on every
-// refresh of that login, and a new login is a new session. An API can then
-// revoke a session by the claim an Action stamps into the access token.
-func TestActions_SessionIDIsStableAcrossRefresh(t *testing.T) {
+// A login is one session: the Action sees its id at sign-in, and a new login
+// is a new session. On a refresh-token exchange Auth0 gives the Action no
+// event.session, so a claim stamped from it is absent from refreshed tokens;
+// the ID token keeps its sid.
+func TestActions_SessionOnlyAtSignIn(t *testing.T) {
 	_, ts := setupTestServer(t)
 	defer ts.Close()
 	m := mgmt{t, ts.URL}
@@ -343,8 +368,11 @@ func TestActions_SessionIDIsStableAcrossRefresh(t *testing.T) {
 		t.Fatalf("refresh: %d %v", resp.StatusCode, refreshed)
 	}
 	again := claims(t, refreshed["access_token"])
-	if again["https://mock/sid"] != sid || again["https://mock/proto"] != "oauth2-refresh-token" {
-		t.Fatalf("refresh kept the session? %v (want %s)", again, sid)
+	if again["https://mock/proto"] != "oauth2-refresh-token" {
+		t.Fatalf("refresh protocol: %v", again)
+	}
+	if v, ok := again["https://mock/sid"]; ok && v != nil && v != false {
+		t.Fatalf("a refresh gave the Action a session: %v", again)
 	}
 
 	_, other := login(t, ts, "")

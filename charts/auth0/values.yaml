@@ -36,6 +36,11 @@ config:
   # - identifier: https://other.46labs.test
   #   name: Other
   apis: []
+  # The default audience's sender constraining, as Auth0's resource server
+  # proof_of_possession; an API in apis takes proof_of_possession the same way.
+  # proofOfPossession:
+  #   mechanism: dpop
+  #   required: true
   port: 3000
   corsOrigins:
     - "*"

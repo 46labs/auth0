@@ -272,6 +272,20 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 		return
 	}
 
+	// The proof is checked before the transaction is consumed, so a refused
+	// one leaves it for the retry.
+	s.mu.RLock()
+	peeked, peekOK := s.deviceCodes[deviceCode]
+	audience := ""
+	if peekOK {
+		audience = peeked.Audience
+	}
+	s.mu.RUnlock()
+	grant, ok := s.tokenDPoP(w, r, client, audience, "")
+	if !ok {
+		return
+	}
+
 	now := time.Now()
 	s.mu.Lock()
 	s.pruneDeviceCodesLocked(now)
@@ -356,6 +370,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 	if !allowed {
 		return
 	}
+	tokenType := grant.tokenType(accessClaims)
 
 	accessTokenString, err := s.SignToken(accessClaims)
 	if err != nil {
@@ -365,7 +380,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 
 	response := map[string]any{
 		"access_token": accessTokenString,
-		"token_type":   "Bearer",
+		"token_type":   tokenType,
 		"expires_in":   3600,
 		"scope":        grantedScope(scope),
 	}
@@ -390,6 +405,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 			SessionID:      sessionID,
 			Connection:     connection,
 			Family:         refreshToken,
+			DPoPJKT:        grant.jkt,
 		}
 		s.mu.Unlock()
 		response["refresh_token"] = refreshToken

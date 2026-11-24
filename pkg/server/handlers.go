@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"encoding/json"
 	"io"
 	"maps"
@@ -85,7 +86,7 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w, r)
 	w.Header().Set("Content-Type", "application/json")
 
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	doc := map[string]interface{}{
 		"issuer":                                s.cfg.Issuer,
 		"authorization_endpoint":                s.cfg.Issuer + "authorize",
 		"token_endpoint":                        s.cfg.Issuer + "oauth/token",
@@ -98,7 +99,12 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      []string{"openid", "profile", "email", "phone", "offline_access"},
-	})
+	}
+	// Advertised only when an API takes DPoP: present, it must be an array.
+	if s.dpopEnabled() {
+		doc["dpop_signing_alg_values_supported"] = dpopSigningAlgs
+	}
+	_ = json.NewEncoder(w).Encode(doc)
 }
 
 func (s *Server) handleJWKS(w http.ResponseWriter, r *http.Request) {
@@ -328,7 +334,8 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w, r)
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Auth0-Client")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Auth0-Client, DPoP")
+	w.Header().Set("Access-Control-Expose-Headers", "DPoP-Nonce")
 
 	if r.Method == "OPTIONS" {
 		return
@@ -362,6 +369,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// A request naming no API is for the default one, whose DPoP rules hold.
+		grant, ok := s.tokenDPoP(w, r, client, cmp.Or(audience, s.cfg.Audience), "")
+		if !ok {
+			return
+		}
 		now := time.Now()
 		accessClaims := jwt.MapClaims{
 			"sub":       clientID,
@@ -384,6 +396,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		// metadata, which is how an M2M credential carries an organization when
 		// the grant cannot enter an organization context.
 		s.applyCredentialsExchange(client, accessClaims)
+		tokenType := grant.tokenType(accessClaims)
 
 		accessTokenString, err := s.SignToken(accessClaims)
 		if err != nil {
@@ -394,7 +407,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token": accessTokenString,
-			"token_type":   "Bearer",
+			"token_type":   tokenType,
 			"expires_in":   86400,
 			"scope":        "read:organizations write:organizations read:users write:users",
 		})
@@ -450,13 +463,25 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		if audience == "" {
 			audience = s.cfg.Audience
 		}
+		grant, ok := s.tokenDPoP(w, r, s.lookupClient(clientID), audience, s.refreshKey(issued))
+		if !ok {
+			return
+		}
 		accessClaims := s.accessTokenClaims(user, clientID, audience, scope, orgID, now)
 		idClaims := s.idTokenClaims(user, clientID, orgID, now)
 
 		if issued.SessionID != "" {
 			idClaims["sid"] = issued.SessionID
 		}
-		if !s.postLogin(w, r, user, clientID, orgID, "", "oauth2-refresh-token", issued.SessionID, issued.Connection, strings.Fields(scope), idClaims, accessClaims) {
+		// Auth0 gives a post-login Action no event.session on a refresh-token
+		// exchange, so none is passed here.
+		if !s.postLogin(w, r, user, clientID, orgID, "", "oauth2-refresh-token", "", issued.Connection, strings.Fields(scope), idClaims, accessClaims) {
+			return
+		}
+		tokenType := grant.tokenType(accessClaims)
+		// A proof binds a refresh token that was not bound yet, as Auth0 does.
+		if !s.bindRefreshKey(issued, grant.jkt) {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_dpop_proof", "the refresh token was bound to another key")
 			return
 		}
 
@@ -474,7 +499,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 
 		response := map[string]interface{}{
 			"access_token": accessTokenString,
-			"token_type":   "Bearer",
+			"token_type":   tokenType,
 			"expires_in":   3600,
 			"scope":        grantedScope(scope),
 		}
@@ -510,6 +535,19 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 
 	// Handle authorization_code flow (existing logic)
 	code := r.FormValue("code")
+
+	// The proof is checked before the code is claimed, so a refused one (a
+	// nonce challenge among them) leaves the code for the retry.
+	s.mu.RLock()
+	peeked, peekOK := s.authCodes[code]
+	s.mu.RUnlock()
+	var grant dpopGrant
+	if peekOK {
+		var ok bool
+		if grant, ok = s.tokenDPoP(w, r, s.lookupClient(clientID), s.authorizeAudience(peeked.Query), authorizeJKT(peeked.Query)); !ok {
+			return
+		}
+	}
 
 	// Claim the code atomically: codes are single-use, so a concurrent second
 	// exchange must lose rather than race the delete. The client check sits
@@ -571,6 +609,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if !allowed {
 		return
 	}
+	tokenType := grant.tokenType(accessClaims)
 
 	idTokenString, err := s.SignToken(idClaims)
 	if err != nil {
@@ -599,6 +638,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			SessionID:      claimed.SessionID,
 			Connection:     claimed.Connection,
 			Family:         refreshToken,
+			DPoPJKT:        grant.jkt,
 		}
 		s.mu.Unlock()
 	}
@@ -607,7 +647,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
 		"access_token": accessTokenString,
 		"id_token":     idTokenString,
-		"token_type":   "Bearer",
+		"token_type":   tokenType,
 		"expires_in":   3600,
 	}
 	if refreshToken != "" {
@@ -629,7 +669,7 @@ func (s *Server) userInfoURL() string {
 func (s *Server) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w, r)
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Auth0-Client")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Auth0-Client, DPoP")
 	if r.Method == http.MethodOptions {
 		return
 	}
@@ -643,8 +683,13 @@ func (s *Server) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 	}
 
-	tokenString, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || tokenString == "" {
+	authorization := r.Header.Get("Authorization")
+	tokenString, bearer := strings.CutPrefix(authorization, "Bearer ")
+	dpopToken, isDPoP := strings.CutPrefix(authorization, "DPoP ")
+	if isDPoP {
+		tokenString = dpopToken
+	}
+	if (!bearer && !isDPoP) || tokenString == "" {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -662,6 +707,14 @@ func (s *Server) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		unauthorized()
 		return
+	}
+	// A bound token is DPoP with its proof, never bearer (RFC 9449 7.1).
+	if jkt := tokenJKT(claims); jkt != "" || isDPoP {
+		if !isDPoP || jkt == "" || s.resourceDPoP(r, tokenString, jkt, s.userInfoURL()) != nil {
+			w.Header().Set("WWW-Authenticate", `DPoP algs="ES256", error="invalid_dpop_proof"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 	}
 	sub, _ := claims.GetSubject()
 	user := s.getUserByID(sub)
@@ -861,4 +914,10 @@ func (s *Server) authorizeAudience(rawQuery string) string {
 
 func writeOAuthError(w http.ResponseWriter, status int, code, description string) {
 	writeOAuthJSON(w, status, map[string]string{"error": code, "error_description": description})
+}
+
+// authorizeJKT is the dpop_jkt an authorize request bound its code to.
+func authorizeJKT(rawQuery string) string {
+	q, _ := url.ParseQuery(rawQuery)
+	return q.Get("dpop_jkt")
 }

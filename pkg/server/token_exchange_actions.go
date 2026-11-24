@@ -48,7 +48,7 @@ func (s *Server) profileAction(subjectType string) *Action {
 // exchangeThroughAction services a token exchange the way Auth0 does once a
 // profile matches: the profile's Action decides the user, organization and
 // actor, Auth0 checks them, post-login runs, and the token is issued.
-func (s *Server) exchangeThroughAction(w http.ResponseWriter, r *http.Request, a *Action) {
+func (s *Server) exchangeThroughAction(w http.ResponseWriter, r *http.Request, a *Action, grant dpopGrant) {
 	var sub string
 	audience := exchangeAudience(r, s.cfg.Audience)
 	failWith := func(status int, code, description string) {
@@ -115,6 +115,7 @@ func (s *Server) exchangeThroughAction(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 
+	tokenType := grant.tokenType(accessClaims)
 	signed, err := s.SignToken(accessClaims)
 	if err != nil {
 		http.Error(w, "Token generation failed", http.StatusInternalServerError)
@@ -125,7 +126,7 @@ func (s *Server) exchangeThroughAction(w http.ResponseWriter, r *http.Request, a
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"access_token":      signed,
 		"issued_token_type": accessTokenType,
-		"token_type":        "Bearer",
+		"token_type":        tokenType,
 		"expires_in":        3600,
 	})
 }

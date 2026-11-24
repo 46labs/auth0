@@ -22,10 +22,21 @@ const (
 // org_id to the target, and carries a delegated `act` claim for audit. All
 // consumer-specific claim names come from config; this code stays generic.
 func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
+	client := s.lookupClient(clientIDFromRequest(r))
 	// A profile for the subject token type routes the exchange to its Action,
-	// as in Auth0; the configured stand-in serves tenants without one.
+	// as in Auth0; the configured stand-in serves tenants without one. The
+	// proof is checked against the API each one mints for: the Action the
+	// requested audience, the stand-in the default one.
 	if a := s.profileAction(r.FormValue("subject_token_type")); a != nil {
-		s.exchangeThroughAction(w, r, a)
+		grant, ok := s.tokenDPoP(w, r, client, exchangeAudience(r, s.cfg.Audience), "")
+		if !ok {
+			return
+		}
+		s.exchangeThroughAction(w, r, a, grant)
+		return
+	}
+	grant, ok := s.tokenDPoP(w, r, client, s.cfg.Audience, "")
+	if !ok {
 		return
 	}
 	ex := s.cfg.Actions.TokenExchange
@@ -136,6 +147,7 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 		minted["act"] = map[string]interface{}{"sub": sub}
 	}
 
+	tokenType := grant.tokenType(minted)
 	signed, err := s.SignToken(minted)
 	if err != nil {
 		fail(http.StatusInternalServerError, "Token generation failed", "Token generation failed")
@@ -157,7 +169,7 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"access_token":      signed,
 		"issued_token_type": accessTokenType,
-		"token_type":        "Bearer",
+		"token_type":        tokenType,
 		"expires_in":        3600,
 	})
 }
