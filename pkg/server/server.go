@@ -110,7 +110,9 @@ type deviceTransaction struct {
 type Server struct {
 	cfg        *config.Config
 	privateKey *rsa.PrivateKey
-	templates  *templates.Loader
+	// kid is privateKey's RFC 7638 thumbprint; see signingKey.
+	kid       string
+	templates *templates.Loader
 
 	pending       map[string]string
 	authCodes     map[string]*authCode
@@ -155,7 +157,7 @@ type Server struct {
 }
 
 func New(cfg *config.Config) (*Server, error) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := loadSigningKey(cfg.SigningKeyFile)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +210,8 @@ func New(cfg *config.Config) (*Server, error) {
 
 	s := &Server{
 		cfg:                  cfg,
-		privateKey:           key,
+		privateKey:           key.private,
+		kid:                  key.kid,
 		templates:            tmpl,
 		pending:              make(map[string]string),
 		authCodes:            make(map[string]*authCode),
@@ -531,6 +534,6 @@ func (s *Server) updateUserMetadata(userID string, appMetadata *config.AppMetada
 
 func (s *Server) SignToken(claims map[string]interface{}) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims(claims))
-	token.Header["kid"] = "key-1"
+	token.Header["kid"] = s.kid
 	return token.SignedString(s.privateKey)
 }

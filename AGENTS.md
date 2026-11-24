@@ -175,3 +175,8 @@ from conflict-marker checks in pre-commit, CI, and editor diagnostics.
   `security` filter whatever was sent, the Mixpanel password reads back as `********`, EventBridge and
   Event Grid generate their partner source and topic and refuse a sink update. Neither source shows a
   `JSONOBJECT` delivery body; the mock sends `{"logs": [...]}`. PEE uses `JSONARRAY`.
+- The signing key's `kid` is its RFC 7638 thumbprint (`pkg/server/signing_key.go`); never a fixed
+  string. A fixed `kid` with a per-start key made cached verifiers check new tokens against the old
+  key. `SignToken`, `/.well-known/jwks.json` and Actions' `getSigningKey` read the same `Server.kid`.
+- Token verification tests run Auth0's own API SDK, go-jwt-middleware (v3 current, v2 as PEE pins
+  it), against a restarted Server at one issuer URL (`TestSDKAcrossRestart`).

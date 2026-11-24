@@ -91,6 +91,7 @@ AUDIENCE=https://api.example.com
 PORT=3000
 CORSORIGINS=https://app.example.com,https://admin.example.com
 DEVICECODELIFETIME=15m
+SIGNING_KEY_FILE=/keys/tls.key
 ```
 
 ### YAML Configuration
@@ -153,6 +154,43 @@ roles:
   - id: "rol_support"
     name: "support"
 ```
+
+### Signing Key
+
+Tokens are RS256. The key's `kid` is its RFC 7638 thumbprint, so a new key always has a new
+`kid`, and `/.well-known/jwks.json` carries Auth0's `Cache-Control: max-age=15`.
+
+With no key configured, each start generates one. Verifiers recover from a restart the way
+they recover from an Auth0 key rotation: go-jwt-middleware v3 within 15 seconds (it honours
+max-age), jose and express-oauth2-jwt-bearer within 30 (their refetch cooldown), go-oidc at
+once. Tokens issued before the restart stop verifying, and a verifier on a fixed cache TTL
+(go-jwt-middleware v2) waits out its TTL.
+
+To keep the key across restarts, give it one: `signingKeyFile` in config or
+`SIGNING_KEY_FILE` in the environment, a PEM RSA private key (PKCS#1 or PKCS#8). A configured
+file that is missing or unusable fails startup. In the chart, set `signingKey.secretName`
+(and `signingKey.key`, default `tls.key`). A cert-manager Certificate can issue it:
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: auth0-signing
+spec:
+  secretName: auth0-signing
+  commonName: auth0-signing
+  duration: 87600h
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    rotationPolicy: Never
+  issuerRef:
+    name: selfsigned
+    kind: ClusterIssuer
+```
+
+`rotationPolicy: Never` keeps the key through renewals. The key is read at startup, so a
+changed Secret takes effect on the next restart, with a new `kid`.
 
 ### Custom Login Template
 

@@ -44,7 +44,7 @@ func (s *Server) signSubject(t *testing.T, claims jwt.MapClaims) string {
 	claims["exp"] = time.Now().Add(time.Hour).Unix()
 	claims["iat"] = time.Now().Unix()
 	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
-	tok.Header["kid"] = "key-1"
+	tok.Header["kid"] = s.kid
 	str, err := tok.SignedString(s.privateKey)
 	if err != nil {
 		t.Fatalf("sign subject: %v", err)

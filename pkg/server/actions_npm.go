@@ -87,7 +87,7 @@ func (s *Server) signingKey(vm *goja.Runtime, uri, kid string) (goja.Value, erro
 	if uri != s.jwksURI() {
 		return goja.Undefined(), errors.New("jwks-rsa in the auth0 mock serves only this tenant's key set, " + s.jwksURI() + ", not " + uri)
 	}
-	if kid != "key-1" {
+	if kid != s.kid {
 		return goja.Undefined(), errors.New("Unable to find a signing key that matches '" + kid + "'")
 	}
 	der, err := x509.MarshalPKIXPublicKey(&s.privateKey.PublicKey)

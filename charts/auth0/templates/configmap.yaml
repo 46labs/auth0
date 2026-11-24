@@ -16,6 +16,9 @@ data:
     {{- if .Values.logStreamCA.secretName }}
     logStreamCAFile: /config/log-stream-ca/{{ .Values.logStreamCA.key }}
     {{- end }}
+    {{- if .Values.signingKey.secretName }}
+    signingKeyFile: /config/signing-key/{{ .Values.signingKey.key }}
+    {{- end }}
     {{- with .Values.config.deviceCodeLifetime }}
     deviceCodeLifetime: {{ . | quote }}
     {{- end }}
