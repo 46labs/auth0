@@ -21,6 +21,14 @@ logStreamCA:
   secretName: ""
   key: ca.crt
 
+# Signing key, so tokens and cached key sets survive restarts. A Secret
+# holding a PEM RSA private key (PKCS#1 or PKCS#8) under key; tls.key fits a
+# cert-manager Certificate with privateKey.algorithm RSA and rotationPolicy
+# Never. Empty generates a key at each start, and its kid changes with it.
+signingKey:
+  secretName: ""
+  key: tls.key
+
 config:
   issuer: https://auth.46labs.test/
   audience: https://api.46labs.test

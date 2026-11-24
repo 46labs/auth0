@@ -354,6 +354,10 @@ type Config struct {
 	Clients                 []Client
 	Branding                Branding
 	Actions                 Actions
+	// SigningKeyFile is a PEM RSA private key (PKCS#1 or PKCS#8) to sign
+	// tokens with, so the key and its kid survive restarts. Empty generates a
+	// key at startup.
+	SigningKeyFile string
 	// LogStreamCAFile is a PEM CA bundle trusted when delivering to log
 	// streams, on top of the system pool. Empty uses the system pool alone.
 	LogStreamCAFile string

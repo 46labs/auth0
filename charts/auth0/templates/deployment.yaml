@@ -54,6 +54,11 @@ spec:
           mountPath: /config/device.html
           subPath: device.html
         {{- end }}
+        {{- if .Values.signingKey.secretName }}
+        - name: signing-key
+          mountPath: /config/signing-key
+          readOnly: true
+        {{- end }}
         {{- if .Values.logStreamCA.secretName }}
         - name: log-stream-ca
           mountPath: /config/log-stream-ca
@@ -72,6 +77,16 @@ spec:
       - name: custom-device
         configMap:
           name: {{ include "auth0.fullname" . }}-device
+      {{- end }}
+      {{- if .Values.signingKey.secretName }}
+      - name: signing-key
+        secret:
+          secretName: {{ .Values.signingKey.secretName }}
+          # Required: the key is read once at startup, and starting without
+          # it would sign with a throwaway key.
+          items:
+          - key: {{ .Values.signingKey.key | quote }}
+            path: {{ .Values.signingKey.key | quote }}
       {{- end }}
       {{- if .Values.logStreamCA.secretName }}
       - name: log-stream-ca

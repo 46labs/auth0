@@ -1,7 +1,7 @@
 # Builder runs on the native host arch (BUILDPLATFORM). Go cross-compiles to
 # the target arch via GOARCH=$TARGETARCH — no QEMU emulation needed.
 # CGO_ENABLED=0 keeps the binary pure-Go, which is what makes cross-compile free.
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 
 ARG TARGETARCH
 

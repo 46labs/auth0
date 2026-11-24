@@ -40,6 +40,9 @@ func WithBranding(b Branding) Option {
 }
 
 func Load(opts ...Option) (*Config, error) {
+	// AutomaticEnv alone reads SIGNINGKEYFILE; the readable name is bound too.
+	_ = viper.BindEnv("signingKeyFile", "SIGNING_KEY_FILE", "SIGNINGKEYFILE")
+
 	// A missing file is fine; a malformed one is not. Swallowing this left the
 	// server running with no file-backed users, organizations or clients and
 	// no indication why. Returned rather than fatal, so importing this package
@@ -57,6 +60,7 @@ func Load(opts ...Option) (*Config, error) {
 		Port:            viper.GetInt("port"),
 		CORSOrigins:     viper.GetStringSlice("corsOrigins"),
 		LogStreamCAFile: viper.GetString("logStreamCAFile"),
+		SigningKeyFile:  viper.GetString("signingKeyFile"),
 		// A unitless value would read as nanoseconds, so a duration needs a unit.
 		DeviceCodeLifetime: viper.GetDuration("deviceCodeLifetime"),
 		Branding: Branding{

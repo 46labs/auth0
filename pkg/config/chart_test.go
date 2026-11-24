@@ -213,6 +213,60 @@ func TestChartMountsCustomTemplates(t *testing.T) {
 	}
 }
 
+// TestChartSigningKey checks the signing key Secret is mounted where the
+// rendered config points, and that nothing is mounted without one.
+func TestChartSigningKey(t *testing.T) {
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm not installed")
+	}
+	chart := filepath.Join("..", "..", "charts", "auth0")
+
+	t.Run("configured", func(t *testing.T) {
+		out, err := exec.Command(helm, "template", "t", chart,
+			"--set", "signingKey.secretName=auth0-signing").CombinedOutput()
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		cfg := loadFrom(t, extractConfigYAML(t, string(out)))
+		if cfg.SigningKeyFile != "/config/signing-key/tls.key" {
+			t.Errorf("SigningKeyFile = %q", cfg.SigningKeyFile)
+		}
+		for _, want := range []string{"mountPath: /config/signing-key", "secretName: auth0-signing", `key: "tls.key"`} {
+			if !strings.Contains(string(out), want) {
+				t.Errorf("rendered chart lacks %q", want)
+			}
+		}
+		volume := string(out)[strings.Index(string(out), "- name: signing-key\n        secret:"):]
+		if end := strings.Index(volume[1:], "- name:"); end != -1 {
+			volume = volume[:end+1]
+		}
+		if strings.Contains(volume, "optional: true") {
+			t.Errorf("signing key Secret is optional; the mock would start with a throwaway key:\n%s", volume)
+		}
+	})
+
+	t.Run("unset", func(t *testing.T) {
+		out, err := exec.Command(helm, "template", "t", chart).CombinedOutput()
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		if strings.Contains(string(out), "signing-key") {
+			t.Error("signing key mounted without a Secret")
+		}
+		if cfg := loadFrom(t, extractConfigYAML(t, string(out))); cfg.SigningKeyFile != "" {
+			t.Errorf("SigningKeyFile = %q, want empty", cfg.SigningKeyFile)
+		}
+	})
+}
+
+func TestSigningKeyFileFromEnv(t *testing.T) {
+	t.Setenv("SIGNING_KEY_FILE", "/keys/tls.key")
+	if cfg := loadFrom(t, "issuer: https://auth.example.test/\n"); cfg.SigningKeyFile != "/keys/tls.key" {
+		t.Errorf("SigningKeyFile = %q, want the SIGNING_KEY_FILE value", cfg.SigningKeyFile)
+	}
+}
+
 func TestDeviceCodeLifetimeLoadsAsDuration(t *testing.T) {
 	cfg := loadFrom(t, "deviceCodeLifetime: 2s\n")
 	if cfg.DeviceCodeLifetime != 2*time.Second {

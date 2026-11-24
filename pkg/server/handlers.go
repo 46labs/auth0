@@ -1,11 +1,9 @@
 package server
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"maps"
-	"math/big"
 	"net/http"
 	"net/url"
 	"slices"
@@ -107,19 +105,10 @@ func (s *Server) handleJWKS(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w, r)
 	w.Header().Set("Content-Type", "application/json")
 
-	pub := &s.privateKey.PublicKey
-	jwk := map[string]interface{}{
-		"kty": "RSA",
-		"kid": "key-1",
-		"use": "sig",
-		"alg": "RS256",
-		"n":   base64.RawURLEncoding.EncodeToString(pub.N.Bytes()),
-		"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes()),
-	}
-
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"keys": []interface{}{jwk},
-	})
+	// Auth0's own header. Verifiers that refresh on a timer (go-jwt-middleware
+	// honours max-age) then pick up a new key within seconds, not minutes.
+	w.Header().Set("Cache-Control", "public, max-age=15, stale-while-revalidate=15, stale-if-error=86400")
+	_ = json.NewEncoder(w).Encode(s.jwks())
 }
 
 // redirectAuthorizeError reports failure through the application's
