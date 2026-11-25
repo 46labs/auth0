@@ -47,6 +47,12 @@ type postLoginRequest struct {
 	LoginHint   string
 	// SessionID is the login session, the same across refreshes of it.
 	SessionID string
+	// NoTenantOrg stops the stored tenant standing in for an organization
+	// the login did not name: the client denies organizations.
+	NoTenantOrg bool
+	// TenantOrg marks an organization taken from the user's stored tenant
+	// rather than named by the login: the event keeps tenant roles.
+	TenantOrg bool
 	// Connection is the one signed in through.
 	Connection string
 	// Actor and Metadata are a token exchange's, as its Action set them.
@@ -55,47 +61,80 @@ type postLoginRequest struct {
 }
 
 // postLogin runs the declarative claims block and then every deployed
-// post-login Action. It answers the token request itself when an Action
-// denies or fails, and reports whether the caller may go on to issue tokens.
+// post-login Action for a token request (a refresh, a device code, an
+// exchange, or a code minted without the login UI). It answers the request
+// itself when an Action denies or fails, or asks for a second factor the
+// session has not passed (a token request cannot prompt), and reports
+// whether the caller may go on to issue tokens.
 func (s *Server) postLogin(w http.ResponseWriter, r *http.Request, user *config.User, clientID, orgID, authorizeQuery, protocol, sessionID, connection string, requestedScopes []string, idClaims, accessClaims jwt.MapClaims, with ...func(*postLoginRequest)) bool {
-	client := s.lookupClient(clientID)
-	s.applyPostLoginExact(user, client, loginOrg(user, orgID, protocol), idClaims, accessClaims)
 	req := requestFromToken(r, authorizeQuery, protocol, requestedScopes)
 	req.SessionID = sessionID
 	req.Connection = connection
 	for _, f := range with {
 		f(&req)
 	}
+	mfa, denied := s.runPostLogin(user, clientID, orgID, protocol, req, idClaims, accessClaims)
+	if denied == nil && mfa && !s.sessionPassedMFA(req.SessionID) {
+		denied = &errAccessDenied{reason: "Multi-factor authentication required"}
+	}
+	if denied != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "access_denied", "error_description": denied.reason})
+		return false
+	}
+	return true
+}
+
+// runPostLogin runs the declarative claims block and every deployed
+// post-login Action, in binding order, until one denies or fails. It
+// reports whether an Action called api.multifactor.enable.
+func (s *Server) runPostLogin(user *config.User, clientID, orgID, protocol string, req postLoginRequest, idClaims, accessClaims jwt.MapClaims) (mfa bool, denied *errAccessDenied) {
+	client := s.lookupClient(clientID)
+	eventOrg := orgID
+	if !req.NoTenantOrg {
+		eventOrg = loginOrg(user, orgID, protocol)
+	}
+	s.applyPostLoginExact(user, client, eventOrg, idClaims, accessClaims)
 	for _, b := range s.actions.listBindings(TriggerPostLogin) {
 		if b.Action.DeployedVersion == nil {
 			continue // bound but not deployed: Auth0 skips it too
 		}
-		if err := s.runPostLoginAction(b, user, client, orgID, req, idClaims, accessClaims); err != nil {
-			var denied *errAccessDenied
+		err := s.runPostLoginAction(b, user, client, orgID, req, idClaims, accessClaims, &mfa)
+		if err != nil {
 			if !errors.As(err, &denied) {
 				// A throwing Action fails the login, as in Auth0.
 				log.Printf("action %q failed: %v", b.Action.Name, err)
 				denied = &errAccessDenied{reason: fmt.Sprintf("action %s failed: %v", b.Action.Name, err)}
 			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "access_denied", "error_description": denied.reason})
-			return false
+			return mfa, denied
 		}
 	}
-	return true
+	return mfa, nil
+}
+
+// sessionPassedMFA reports whether the login session passed a second factor.
+func (s *Server) sessionPassedMFA(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.mfaSessions[sessionID]
+	return ok
 }
 
 // runPostLoginAction runs one post-login Action. It returns *errAccessDenied
-// when the code called api.access.deny.
-func (s *Server) runPostLoginAction(b *ActionBinding, user *config.User, client *config.Client, orgID string, req postLoginRequest, idClaims, accessClaims jwt.MapClaims) error {
+// when the code called api.access.deny. api.multifactor.enable sets *mfa:
+// on for a provider, off for none; the last call of the login wins.
+func (s *Server) runPostLoginAction(b *ActionBinding, user *config.User, client *config.Client, orgID string, req postLoginRequest, idClaims, accessClaims jwt.MapClaims, mfa *bool) error {
 	var denied *errAccessDenied
 	err := s.runAction(b.Action, b, "onExecutePostLogin", func(vm *goja.Runtime) (goja.Value, goja.Value) {
 		api := s.newActionAPI(vm, user, orgID, idClaims, accessClaims, func(reason string) {
 			if denied == nil {
 				denied = &errAccessDenied{reason: reason}
 			}
-		})
+		}, func(on bool) { *mfa = on })
 		ev := s.buildEvent(b.Action, b, user, client, orgID, req)
 		// The API the access token is for, as Auth0 names it. It is the first
 		// audience; /userinfo follows when openid was granted.
@@ -193,7 +232,7 @@ func loadHandler(vm *goja.Runtime, a *Action, export string) (goja.Callable, err
 
 // newActionAPI is the `api` object: claims, denial, metadata, and the
 // user's roles in the login's organization (orgID, empty for none).
-func (s *Server) newActionAPI(vm *goja.Runtime, user *config.User, orgID string, idClaims, accessClaims jwt.MapClaims, deny func(string)) *goja.Object {
+func (s *Server) newActionAPI(vm *goja.Runtime, user *config.User, orgID string, idClaims, accessClaims jwt.MapClaims, deny func(string), multifactor func(on bool)) *goja.Object {
 	claimSetter := func(claims jwt.MapClaims) *goja.Object {
 		o := vm.NewObject()
 		_ = o.Set("setCustomClaim", func(name string, value goja.Value) { claims[name] = value.Export() })
@@ -214,7 +253,26 @@ func (s *Server) newActionAPI(vm *goja.Runtime, user *config.User, orgID string,
 		}
 		return vm.ToValue(p)
 	})
+	// api.multifactor.enable(provider, options) asks for a second factor
+	// after the Actions run. The mock prompts for its one-time code
+	// whatever the provider.
+	mfaAPI := vm.NewObject()
+	_ = mfaAPI.Set("enable", func(call goja.FunctionCall) goja.Value {
+		provider := call.Argument(0).String()
+		switch provider {
+		case "any", "duo", "google-authenticator", "guardian":
+			multifactor(true)
+		case "none":
+			// Off for this login, also after an earlier call asked.
+			multifactor(false)
+		default:
+			// An unsupported provider fails the Action, as in Auth0.
+			panic(vm.NewTypeError("api.multifactor.enable: unsupported provider " + provider))
+		}
+		return goja.Undefined()
+	})
 	api := vm.NewObject()
+	_ = api.Set("multifactor", mfaAPI)
 	_ = api.Set("idToken", claimSetter(idClaims))
 	_ = api.Set("accessToken", claimSetter(accessClaims))
 	_ = api.Set("access", access)
@@ -375,8 +433,25 @@ func fetchResponse(vm *goja.Runtime, resp *http.Response, data []byte) *goja.Obj
 // authorization, and client context the declarative block sees, plus what
 // only code can use (request, transaction, secrets, organization).
 func (s *Server) buildEvent(a *Action, b *ActionBinding, user *config.User, client *config.Client, orgID string, req postLoginRequest) map[string]any {
-	orgID = loginOrg(user, orgID, req.Protocol)
+	named := orgID
+	if !req.NoTenantOrg {
+		orgID = loginOrg(user, orgID, req.Protocol)
+	}
 	ev := s.buildPostLoginContext(user, client, orgID)
+	// A login to an organization sees the member's roles in it, not the
+	// user's tenant roles, as in Auth0.
+	if auth, ok := ev["authorization"].(map[string]any); ok && named != "" && !req.TenantOrg {
+		// From the membership itself, not app_metadata.org_roles.
+		roles := []any{}
+		s.mu.RLock()
+		for _, m := range s.members[orgID] {
+			if m.UserID == user.ID && m.Role != "" {
+				roles = append(roles, m.Role)
+			}
+		}
+		s.mu.RUnlock()
+		auth["roles"] = roles
+	}
 	u := ev["user"].(map[string]any)
 	u["email_verified"] = user.EmailVerified
 	u["picture"] = user.Picture
@@ -429,7 +504,16 @@ func (s *Server) buildEvent(a *Action, b *ActionBinding, user *config.User, clie
 	ev["tenant"] = map[string]any{"id": "mock"}
 	ev["secrets"] = secretValues(a, b)
 	ev["stats"] = map[string]any{"logins_count": 1}
-	ev["authentication"] = map[string]any{"methods": []any{map[string]any{"name": "passwordless", "timestamp": time.Now().UTC().Format(time.RFC3339)}}}
+	methods := []any{map[string]any{"name": "passwordless", "timestamp": time.Now().UTC().Format(time.RFC3339)}}
+	if session := req.SessionID; session != "" {
+		s.mu.RLock()
+		at, ok := s.mfaSessions[session]
+		s.mu.RUnlock()
+		if ok {
+			methods = append(methods, map[string]any{"name": "mfa", "timestamp": at.UTC().Format(time.RFC3339)})
+		}
+	}
+	ev["authentication"] = map[string]any{"methods": methods}
 	if orgID != "" {
 		s.mu.RLock()
 		org := s.organizations[orgID]

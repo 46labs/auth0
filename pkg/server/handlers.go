@@ -157,6 +157,25 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		// Validate before rendering the page, so a revoked or expired ticket
 		// fails immediately rather than after a code is entered. The invited
 		// address becomes the login hint, as Auth0 prefills it.
+		// A client that requires an organization without prompting for one
+		// needs it named up front, before any credential is entered.
+		if _, invited := ticketFromQuery(r.URL.Query()); !invited && r.URL.Query().Get("organization") == "" {
+			if c := s.lookupClient(r.URL.Query().Get("client_id")); c != nil && c.OrganizationUsage == orgUsageRequire && c.OrganizationRequireBehavior != orgBehaviorPostLogin {
+				s.redirectAuthorizeError(w, r, "invalid_request", errOrganizationMissing)
+				return
+			}
+		}
+
+		// An explicit deny refuses an organization login, invitations
+		// included. Unset is left permissive (Auth0's default is deny) for
+		// configs that predate the setting.
+		if _, invited := ticketFromQuery(r.URL.Query()); invited || r.URL.Query().Get("organization") != "" {
+			if c := s.lookupClient(r.URL.Query().Get("client_id")); c != nil && c.OrganizationUsage == "deny" {
+				s.redirectAuthorizeError(w, r, "invalid_request", "parameter organization is not allowed for this client")
+				return
+			}
+		}
+
 		if ticket, ok := ticketFromQuery(r.URL.Query()); ok {
 			s.mu.Lock()
 			inv, err := s.lookupInvitation(ticket, time.Now())
@@ -219,6 +238,12 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			identifier = r.FormValue("email")
 		}
 		code := r.FormValue("code")
+
+		// The organization picker and the second factor post back here.
+		if r.FormValue("organization") != "" || r.FormValue("mfa_code") != "" {
+			s.continueLogin(w, r, sessionID)
+			return
+		}
 
 		s.mu.RLock()
 		originalQuery, exists := s.pending[sessionID]
@@ -290,35 +315,19 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			code := s.generateID()
-			state := &authCode{
-				User:          *user,
-				CodeChallenge: params.Get("code_challenge"),
-				Nonce:         params.Get("nonce"),
-				Scope:         params.Get("scope"),
-				ClientID:      params.Get("client_id"),
-				OrgID:         orgID,
-				ConnectionID:  connectionID,
-				Connection:    resolved,
-				Query:         originalQuery,
-				SessionID:     "sess_" + s.generateID(),
-				LoginLog:      s.loginLog(r, withConnection(logParams, resolved), "s", "Successful login", user, identifier, orgID),
-			}
-
-			s.mu.Lock()
-			s.authCodes[code] = state
-			delete(s.pending, sessionID)
-			s.recordLoginLocked(user.ID, identifier, resolved)
-			s.mu.Unlock()
-
-			query := redirectURL.Query()
-			query.Set("code", code)
-			if st := params.Get("state"); st != "" {
-				query.Set("state", st)
-			}
-			redirectURL.RawQuery = query.Encode()
-
-			http.Redirect(w, r, redirectURL.String(), http.StatusFound)
+			_, invited := ticketFromQuery(params)
+			s.completeLogin(w, r, sessionID, &loginTx{
+				User:       user,
+				Resolved:   resolved,
+				Params:     params,
+				Query:      originalQuery,
+				LogParams:  logParams,
+				Identifier: identifier,
+				OrgID:      orgID,
+				Connection: connectionID,
+				Invited:    invited,
+				SessionID:  "sess_" + s.generateID(),
+			})
 			return
 		}
 
@@ -348,7 +357,9 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	// Handle client_credentials flow for M2M
 	if grantType == "client_credentials" {
 		clientSecret := r.FormValue("client_secret")
-		audience := r.FormValue("audience")
+		// A request naming no API is for the default one, for its grant and
+		// its token alike.
+		audience := cmp.Or(r.FormValue("audience"), s.cfg.Audience)
 		organization := r.FormValue("organization")
 
 		// A copy, since updates mutate the stored client under the write lock.
@@ -374,6 +385,30 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
+		// A grant for the audience decides the scopes, as in Auth0. Without
+		// one the mock keeps its historical Management API scopes, which
+		// existing consumers rely on.
+		scope := "read:organizations write:organizations read:users write:users"
+		if g, ok := s.grantFor(clientID, audience); ok {
+			scope = strings.Join(g.Scope, " ")
+			// A requested scope narrows the grant; one the grant lacks is
+			// refused, as in Auth0.
+			if requested := strings.Fields(r.FormValue("scope")); len(requested) > 0 {
+				var missing []string
+				for _, sc := range requested {
+					if !slices.Contains(g.Scope, sc) {
+						missing = append(missing, sc)
+					}
+				}
+				if len(missing) > 0 {
+					writeOAuthJSON(w, http.StatusForbidden, map[string]string{"error": "access_denied",
+						"error_description": "Client has not been granted scopes: " + strings.Join(missing, ", ")})
+					return
+				}
+				scope = strings.Join(requested, " ")
+			}
+		}
+
 		now := time.Now()
 		accessClaims := jwt.MapClaims{
 			"sub":       clientID,
@@ -381,7 +416,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			"aud":       audience,
 			"exp":       now.Add(24 * time.Hour).Unix(),
 			"iat":       now.Unix(),
-			"scope":     "read:organizations write:organizations read:users write:users",
+			"scope":     scope,
 			"gty":       "client-credentials",
 			"azp":       clientID,
 			"client_id": clientID,
@@ -409,7 +444,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			"access_token": accessTokenString,
 			"token_type":   tokenType,
 			"expires_in":   86400,
-			"scope":        "read:organizations write:organizations read:users write:users",
+			"scope":        scope,
 		})
 		return
 	}
@@ -448,7 +483,9 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 
 		// The org is the one the original login was scoped to.
 		orgID := issued.OrgID
-		if orgID == "" {
+		// Only a login that never settled its organization takes the stored
+		// tenant; one that settled on none keeps none.
+		if orgID == "" && !issued.NoTenantOrg && !issued.OrgResolved {
 			orgID = user.AppMetadata.TenantID()
 		}
 
@@ -475,7 +512,12 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		}
 		// Auth0 gives a post-login Action no event.session on a refresh-token
 		// exchange, so none is passed here.
-		if !s.postLogin(w, r, user, clientID, orgID, "", "oauth2-refresh-token", "", issued.Connection, strings.Fields(scope), idClaims, accessClaims) {
+		if !s.postLogin(w, r, user, clientID, orgID, "", "oauth2-refresh-token", "", issued.Connection, strings.Fields(scope), idClaims, accessClaims,
+			func(req *postLoginRequest) {
+				// A settled empty organization stays empty in the Actions too.
+				req.TenantOrg = !issued.OrgNamed
+				req.NoTenantOrg = issued.NoTenantOrg || (issued.OrgResolved && issued.OrgID == "")
+			}) {
 			return
 		}
 		tokenType := grant.tokenType(accessClaims)
@@ -565,6 +607,10 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid code", 400)
 		return
 	}
+	if !claimed.IssuedAt.IsZero() && time.Since(claimed.IssuedAt) > authCodeLifetime {
+		writeOAuthJSON(w, http.StatusForbidden, map[string]any{"error": "invalid_grant", "error_description": "Invalid authorization code"})
+		return
+	}
 	if wrongClient {
 		http.Error(w,
 			`{"error":"invalid_grant","error_description":"the code was issued to a different client"}`,
@@ -573,42 +619,36 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user := claimed.User
-	nonce, hasNonce := claimed.Nonce, claimed.Nonce != ""
 	requestedScope := claimed.Scope
-
-	// The scoped organization wins over the stored tenant, so a member of
-	// several gets a token for the one they logged in to.
 	orgID := claimed.OrgID
 	if orgID == "" {
 		orgID = user.AppMetadata.TenantID()
 	}
-
-	// Post-Login Action parity, and it reads back the latest AppMetadata.
-	if seeded := s.seedOrgRoles(user.ID, orgID); seeded != nil {
-		user = *seeded
-	} else if latestUser := s.getUserByID(user.ID); latestUser != nil {
-		user = *latestUser
+	// A login-page code fixed its organization, possibly none, when its
+	// claims were built.
+	if claimed.AccessClaims != nil {
+		orgID = claimed.TokenOrg
 	}
 
-	now := time.Now()
-
-	idClaims := s.idTokenClaims(&user, clientID, orgID, now)
-	idClaims["auth_time"] = now.Unix()
-	if hasNonce {
-		idClaims["nonce"] = nonce
+	// A login through the login page ran its post-login Actions there, as
+	// Auth0's does; a code minted without it runs them now.
+	idClaims, accessClaims, audience := claimed.IDClaims, claimed.AccessClaims, claimed.Audience
+	if accessClaims != nil {
+		// Issued now: the login's claims, with this exchange's times.
+		now := time.Now()
+		reissue(idClaims, now)
+		reissue(accessClaims, now)
 	}
-
-	audience := s.authorizeAudience(claimed.Query)
-	accessClaims := s.accessTokenClaims(&user, clientID, audience, requestedScope, orgID, now)
-
-	if claimed.SessionID != "" {
-		idClaims["sid"] = claimed.SessionID
+	if accessClaims == nil {
+		user, idClaims, accessClaims, audience = s.loginTokenClaims(user, clientID, orgID, claimed.Query,
+			requestedScope, claimed.Nonce, claimed.SessionID, time.Now())
+		if !s.postLogin(w, r, &user, clientID, orgID, claimed.Query, "oidc-basic-profile", claimed.SessionID, claimed.Connection, nil, idClaims, accessClaims,
+			func(req *postLoginRequest) { req.TenantOrg = claimed.OrgID == "" }) {
+			s.emitPendingLogin(claimed.LoginLog, false)
+			return
+		}
 	}
-	allowed := s.postLogin(w, r, &user, clientID, orgID, claimed.Query, "oidc-basic-profile", claimed.SessionID, claimed.Connection, nil, idClaims, accessClaims)
-	s.emitPendingLogin(claimed.LoginLog, allowed)
-	if !allowed {
-		return
-	}
+	s.emitPendingLogin(claimed.LoginLog, true)
 	tokenType := grant.tokenType(accessClaims)
 
 	idTokenString, err := s.SignToken(idClaims)
@@ -629,8 +669,12 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		refreshToken = s.newRefreshToken()
 		s.mu.Lock()
 		s.refreshTokens[refreshToken] = &refreshTokenState{
-			UserID:         user.ID,
-			OrgID:          orgID,
+			UserID:   user.ID,
+			OrgID:    orgID,
+			OrgNamed: claimed.OrgID != "",
+			// A login-page code settled its organization, possibly none.
+			OrgResolved:    claimed.AccessClaims != nil,
+			NoTenantOrg:    claimed.NoTenantOrg,
 			ClientID:       claimed.ClientID,
 			IncludeIDToken: true,
 			Audience:       audience,
@@ -920,4 +964,32 @@ func writeOAuthError(w http.ResponseWriter, status int, code, description string
 func authorizeJKT(rawQuery string) string {
 	q, _ := url.ParseQuery(rawQuery)
 	return q.Get("dpop_jkt")
+}
+
+// reissue moves a token's iat and exp to now, keeping its lifetime and
+// every other claim (auth_time stays the login's). Claims built in-process
+// hold Unix seconds as int64; decoded ones as float64.
+func reissue(claims jwt.MapClaims, now time.Time) {
+	iat, ok1 := unixSeconds(claims["iat"])
+	exp, ok2 := unixSeconds(claims["exp"])
+	if !ok1 || !ok2 {
+		return
+	}
+	claims["iat"] = now.Unix()
+	claims["exp"] = now.Unix() + (exp - iat)
+}
+
+func unixSeconds(v any) (int64, bool) {
+	switch t := v.(type) {
+	case int64:
+		return t, true
+	case int:
+		return int64(t), true
+	case float64:
+		return int64(t), true
+	case json.Number:
+		n, err := t.Int64()
+		return n, err == nil
+	}
+	return 0, false
 }

@@ -221,6 +221,15 @@ type Client struct {
 	JWTConfig    map[string]interface{} `json:"jwt_configuration,omitempty" yaml:"jwt_configuration,omitempty" mapstructure:"jwt_configuration"`
 	// login initiation endpoint; invitation_url is resolved against it
 	InitiateLoginURI string `json:"initiate_login_uri,omitempty" yaml:"initiate_login_uri,omitempty" mapstructure:"initiate_login_uri"`
+	// OIDCConformant is Auth0's oidc_conformant; nil is unset.
+	OIDCConformant *bool `json:"oidc_conformant,omitempty" yaml:"oidc_conformant,omitempty" mapstructure:"oidc_conformant"`
+	// OrganizationUsage is deny (default), allow, or require: whether a
+	// login to this application names an organization.
+	OrganizationUsage string `json:"organization_usage,omitempty" yaml:"organization_usage,omitempty" mapstructure:"organization_usage"`
+	// OrganizationRequireBehavior, with OrganizationUsage require, is
+	// no_prompt (default: the login must name one) or post_login_prompt
+	// (the user picks one of their organizations after signing in).
+	OrganizationRequireBehavior string `json:"organization_require_behavior,omitempty" yaml:"organization_require_behavior,omitempty" mapstructure:"organization_require_behavior"`
 	// ClientMetadata is arbitrary key/value data on the application. A
 	// credentials-exchange action reads it to stamp claims on M2M tokens, which
 	// is how a machine credential carries an organization: Auth0 reserves the
@@ -230,6 +239,13 @@ type Client struct {
 	// RefreshToken is stored whole; rotation_type and leeway drive behaviour.
 	// Without it the client is non-rotating, as Auth0's default is.
 	RefreshToken *RefreshTokenConfig `json:"refresh_token,omitempty" yaml:"refresh_token,omitempty" mapstructure:"refresh_token"`
+}
+
+// ClientGrant authorizes one client for one API with a set of scopes.
+type ClientGrant struct {
+	ClientID string   `json:"client_id" yaml:"client_id" mapstructure:"client_id"`
+	Audience string   `json:"audience" yaml:"audience" mapstructure:"audience"`
+	Scope    []string `json:"scope" yaml:"scope" mapstructure:"scope"`
 }
 
 // Refresh token rotation types, as Auth0 names them.
@@ -374,8 +390,11 @@ type Config struct {
 	Roles                   []Role
 	Members                 []OrganizationMember
 	Clients                 []Client
-	Branding                Branding
-	Actions                 Actions
+	// ClientGrants authorize clients for APIs, as Auth0's client grants:
+	// a client-credentials token for an audience carries its grant's scopes.
+	ClientGrants []ClientGrant
+	Branding     Branding
+	Actions      Actions
 	// SigningKeyFile is a PEM RSA private key (PKCS#1 or PKCS#8) to sign
 	// tokens with, so the key and its kid survive restarts. Empty generates a
 	// key at startup.

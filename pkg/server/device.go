@@ -62,6 +62,18 @@ func (s *Server) handleDeviceAuthorization(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	orgID := r.FormValue("organization")
+	if c := s.lookupClient(clientID); c != nil {
+		if orgID != "" && c.OrganizationUsage == "deny" {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_request", "parameter organization is not allowed for this client")
+			return
+		}
+		// The device page has no organization prompt, so a client that
+		// requires one must name it here.
+		if orgID == "" && c.OrganizationUsage == orgUsageRequire {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_request", errOrganizationMissing)
+			return
+		}
+	}
 	if orgID != "" {
 		s.mu.RLock()
 		_, knownOrganization := s.organizations[orgID]
@@ -339,7 +351,12 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 	}
 	userCopy := user.Clone()
 	orgID := transaction.OrgID
-	if orgID == "" {
+	// A client that denies organizations gets none, not the stored tenant.
+	denies := false
+	if c := s.clients[transaction.ClientID]; c != nil && c.OrganizationUsage == "deny" {
+		denies = true
+	}
+	if orgID == "" && !denies {
 		orgID = userCopy.AppMetadata.TenantID()
 	}
 	scope := transaction.Scope
@@ -365,7 +382,8 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 	if hasScope(scope, "openid") {
 		idClaims["sid"] = sessionID
 	}
-	allowed := s.postLogin(w, r, userCopy, clientID, orgID, "", "oauth2-device-code", sessionID, connection, strings.Fields(scope), idClaims, accessClaims)
+	allowed := s.postLogin(w, r, userCopy, clientID, orgID, "", "oauth2-device-code", sessionID, connection, strings.Fields(scope), idClaims, accessClaims,
+		func(req *postLoginRequest) { req.TenantOrg, req.NoTenantOrg = transaction.OrgID == "", denies })
 	s.emitPendingLogin(loginLog, allowed)
 	if !allowed {
 		return
@@ -398,6 +416,9 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request, clien
 		s.refreshTokens[refreshToken] = &refreshTokenState{
 			UserID:         userCopy.ID,
 			OrgID:          orgID,
+			OrgNamed:       transaction.OrgID != "",
+			NoTenantOrg:    denies,
+			OrgResolved:    true,
 			ClientID:       clientID,
 			IncludeIDToken: hasScope(scope, "openid"),
 			Audience:       transaction.Audience,

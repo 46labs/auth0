@@ -1028,6 +1028,26 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request) {
 		writeAuth0Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	var sentOrg struct {
+		Usage    *string `json:"organization_usage"`
+		Behavior *string `json:"organization_require_behavior"`
+	}
+	_ = json.Unmarshal(body, &sentOrg)
+	if err := validateOrgWrite(sentOrg.Usage, sentOrg.Behavior); err != nil {
+		writeAuth0Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Unset stays unset (organization logins permitted), unlike Auth0's
+	// deny default: consumers provision clients through this API and then
+	// log in to organizations without setting it. Known divergence.
+	if err := validateOrgSettings(client.OrganizationUsage, client.OrganizationRequireBehavior); err != nil {
+		writeAuth0Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateOIDCForPrompt(client.OrganizationRequireBehavior, client.OIDCConformant); err != nil {
+		writeAuth0Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	client.RefreshToken = sent.RefreshToken.apply(nil)
 	if len(client.ClientMetadata) > 0 {
 		patch := make(map[string]any, len(client.ClientMetadata))
@@ -1106,18 +1126,63 @@ func (s *Server) updateClient(w http.ResponseWriter, r *http.Request, clientID s
 		InitiateLoginURI *string            `json:"initiate_login_uri"`
 		ClientMetadata   *map[string]any    `json:"client_metadata"`
 		RefreshToken     *refreshTokenPatch `json:"refresh_token"`
+		// Organization login settings, as the SDK's Client sends them.
+		OrganizationUsage           *string `json:"organization_usage"`
+		OrganizationRequireBehavior *string `json:"organization_require_behavior"`
+		OIDCConformant              *bool   `json:"oidc_conformant"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil || json.Unmarshal(body, &updates) != nil {
 		s.mu.Unlock()
 		http.Error(w, `{"error":"invalid_body"}`, http.StatusBadRequest)
 		return
 	}
+	// A key sent as null resets the setting, which a nil pointer cannot
+	// tell apart from an absent key.
+	var present map[string]json.RawMessage
+	_ = json.Unmarshal(body, &present)
+	isNull := func(key string) bool {
+		v, ok := present[key]
+		return ok && string(v) == "null"
+	}
+	resetUsage, resetBehavior := isNull("organization_usage"), isNull("organization_require_behavior")
 
 	// Validate the whole patch before applying any of it: a rejected request
 	// must not leave earlier fields written.
 	if updates.Name != nil && *updates.Name == "" {
 		s.mu.Unlock()
 		writeAuth0Error(w, http.StatusBadRequest, "name cannot be empty")
+		return
+	}
+	if err := validateOrgWrite(updates.OrganizationUsage, updates.OrganizationRequireBehavior); err != nil {
+		s.mu.Unlock()
+		writeAuth0Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	usage, behavior, oidc := client.OrganizationUsage, client.OrganizationRequireBehavior, client.OIDCConformant
+	if updates.OrganizationUsage != nil {
+		usage = *updates.OrganizationUsage
+	}
+	if resetUsage {
+		usage = ""
+	}
+	if updates.OrganizationRequireBehavior != nil {
+		behavior = *updates.OrganizationRequireBehavior
+	}
+	if resetBehavior {
+		behavior = ""
+	}
+	if updates.OIDCConformant != nil {
+		oidc = updates.OIDCConformant
+	}
+	if err := validateOIDCForPrompt(behavior, oidc); err != nil {
+		s.mu.Unlock()
+		writeAuth0Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateOrgSettings(usage, behavior); err != nil {
+		s.mu.Unlock()
+		writeAuth0Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	metadata, err := mergeClientMetadata(client.ClientMetadata, updates.ClientMetadata)
@@ -1166,6 +1231,7 @@ func (s *Server) updateClient(w http.ResponseWriter, r *http.Request, clientID s
 	if updates.RefreshToken != nil {
 		client.RefreshToken = updates.RefreshToken.apply(client.RefreshToken)
 	}
+	client.OrganizationUsage, client.OrganizationRequireBehavior, client.OIDCConformant = usage, behavior, oidc
 	response := client.Clone()
 	s.mu.Unlock()
 
