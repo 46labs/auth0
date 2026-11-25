@@ -8,6 +8,7 @@ import (
 	"github.com/auth0/go-jwt-middleware/v3/validator"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -42,13 +43,40 @@ type authCode struct {
 	// post-login Action has run: Auth0 logs a denied login as a failure. Nil
 	// for codes minted without the login UI.
 	LoginLog map[string]any
+	// IDClaims and AccessClaims are the tokens' claims as the login's
+	// post-login Actions left them: Auth0 runs them during the login, so the
+	// exchange issues these. Nil for codes minted without the login UI, whose
+	// Actions run at the exchange.
+	IDClaims     jwt.MapClaims
+	AccessClaims jwt.MapClaims
+	Audience     string
+	// NoTenantOrg: the client denies organizations, so its refreshes never
+	// take the stored tenant.
+	NoTenantOrg bool
+	// TokenOrg is the organization the login's claims were built for, which
+	// binds its refresh tokens; empty for codes minted without the login UI.
+	TokenOrg string
+	// IssuedAt bounds the code's life (authCodeLifetime); zero for codes
+	// minted without the login UI.
+	IssuedAt time.Time
 }
+
+// authCodeLifetime is how long an authorization code can be exchanged.
+const authCodeLifetime = 10 * time.Minute
 
 // refreshTokenState carries the bindings of the login that issued the token,
 // so a refresh cannot re-scope it to another client or organization.
 type refreshTokenState struct {
-	UserID         string
-	OrgID          string
+	UserID string
+	OrgID  string
+	// OrgNamed reports that the login named OrgID (or chose it), rather
+	// than the user's stored tenant supplying it.
+	OrgNamed bool
+	// NoTenantOrg: the client denies organizations.
+	NoTenantOrg bool
+	// OrgResolved: the login settled OrgID, empty included, so a refresh
+	// never takes the stored tenant in its place.
+	OrgResolved    bool
 	ClientID       string
 	IncludeIDToken bool
 	// SessionID is the login session the token was issued in.
@@ -122,7 +150,13 @@ type Server struct {
 	dpopSeen   dpopReplay
 	dpopNonces dpopNonces
 
-	pending       map[string]string
+	pending map[string]string
+	// logins are sign-ins past the code, waiting on the organization
+	// picker or the second factor, by login page session.
+	logins map[string]*loginTx
+	// mfaSessions are login sessions that passed a second factor: Actions
+	// see it in event.authentication.methods, there and on refresh.
+	mfaSessions   map[string]time.Time
 	authCodes     map[string]*authCode
 	refreshTokens map[string]*refreshTokenState
 	// retiredRefreshTokens are the tokens rotations replaced, for reuse detection.
@@ -221,6 +255,43 @@ func New(cfg *config.Config) (*Server, error) {
 		return nil, err
 	}
 
+	for i := range cfg.Clients {
+		c := &cfg.Clients[i]
+		if err := validateOrgSettings(c.OrganizationUsage, c.OrganizationRequireBehavior); err != nil {
+			return nil, fmt.Errorf("client %s: %w", c.ClientID, err)
+		}
+		if err := validateOIDCForPrompt(c.OrganizationRequireBehavior, c.OIDCConformant); err != nil {
+			return nil, fmt.Errorf("client %s: %w", c.ClientID, err)
+		}
+	}
+	grants := make(map[string]*clientGrant, len(cfg.ClientGrants))
+	paired := make(map[[2]string]bool, len(cfg.ClientGrants))
+	for i, g := range cfg.ClientGrants {
+		// Checked as the Management API checks a new grant.
+		if g.ClientID == "" || g.Audience == "" {
+			return nil, fmt.Errorf("clientGrants[%d]: client_id and audience are required", i)
+		}
+		if _, ok := clients[g.ClientID]; !ok {
+			return nil, fmt.Errorf("clientGrants[%d]: client %s is not configured", i, g.ClientID)
+		}
+		if g.Audience != cfg.Audience && !slices.ContainsFunc(cfg.APIs, func(a config.API) bool { return a.Identifier == g.Audience }) {
+			return nil, fmt.Errorf("clientGrants[%d]: no API %s (audience or apis)", i, g.Audience)
+		}
+		// One grant per client and API, as the Management API enforces.
+		if pair := [2]string{g.ClientID, g.Audience}; paired[pair] {
+			return nil, fmt.Errorf("clientGrants: %s has two grants for %s", g.ClientID, g.Audience)
+		} else {
+			paired[pair] = true
+		}
+		// The server's own copy: config stays the caller's.
+		scope := slices.Clone(g.Scope)
+		if scope == nil {
+			scope = []string{}
+		}
+		id := fmt.Sprintf("cgr_seed_%d", i)
+		grants[id] = &clientGrant{ID: id, ClientID: g.ClientID, Audience: g.Audience, Scope: scope}
+	}
+
 	s := &Server{
 		dpop:                 dpop,
 		cfg:                  cfg,
@@ -228,6 +299,8 @@ func New(cfg *config.Config) (*Server, error) {
 		kid:                  key.kid,
 		templates:            tmpl,
 		pending:              make(map[string]string),
+		logins:               make(map[string]*loginTx),
+		mfaSessions:          make(map[string]time.Time),
 		authCodes:            make(map[string]*authCode),
 		actions:              newActionStore(),
 		teps:                 &tokenExchangeProfiles{profiles: map[string]*tokenExchangeProfile{}},
@@ -240,7 +313,7 @@ func New(cfg *config.Config) (*Server, error) {
 		connections:          connections,
 		members:              members,
 		clients:              clients,
-		clientGrants:         map[string]*clientGrant{},
+		clientGrants:         grants,
 		roles:                roles,
 		userRoles:            userRoles,
 		orgConnections:       orgConnections,

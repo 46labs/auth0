@@ -137,3 +137,15 @@ func clientSubPath(path string) (clientID, sub string) {
 	}
 	return rest, ""
 }
+
+// grantFor returns the client's grant for audience.
+func (s *Server) grantFor(clientID, audience string) (clientGrant, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, g := range s.clientGrants {
+		if g.ClientID == clientID && g.Audience == audience {
+			return *g, true
+		}
+	}
+	return clientGrant{}, false
+}

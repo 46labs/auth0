@@ -184,3 +184,56 @@ func TestClientCredentialsWithOrganization(t *testing.T) {
 		}
 	})
 }
+
+// TestClientCredentialsScopeFromGrant: a seeded grant for the requested
+// audience decides the token's scopes, as in Auth0; another audience keeps
+// the mock's historical scopes.
+func TestClientCredentialsScopeFromGrant(t *testing.T) {
+	_, ts := setupTestServerWith(t, func(cfg *config.Config) {
+		cfg.APIs = append(cfg.APIs, config.API{Identifier: "https://api.example.test"})
+		cfg.ClientGrants = []config.ClientGrant{{
+			ClientID: "mgmt_client_dev",
+			Audience: "https://api.example.test",
+			Scope:    []string{"devices:read", "devices:write"},
+		}}
+	})
+	defer ts.Close()
+
+	token := func(t *testing.T, audience string) (string, string) {
+		t.Helper()
+		resp, err := http.PostForm(ts.URL+"/oauth/token", url.Values{
+			"grant_type":    {"client_credentials"},
+			"client_id":     {"mgmt_client_dev"},
+			"client_secret": {"mgmt_secret_dev"},
+			"audience":      {audience},
+		})
+		if err != nil {
+			t.Fatalf("token request: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status %d", resp.StatusCode)
+		}
+		var body struct {
+			AccessToken string `json:"access_token"`
+			Scope       string `json:"scope"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		tok, _, err := jwt.NewParser().ParseUnverified(body.AccessToken, jwt.MapClaims{})
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		return tok.Claims.(jwt.MapClaims)["scope"].(string), body.Scope
+	}
+
+	claim, resp := token(t, "https://api.example.test")
+	if claim != "devices:read devices:write" || resp != claim {
+		t.Errorf("granted audience: claim %q, response %q", claim, resp)
+	}
+	claim, _ = token(t, "http://localhost:3000")
+	if claim != "read:organizations write:organizations read:users write:users" {
+		t.Errorf("ungranted audience: claim %q", claim)
+	}
+}

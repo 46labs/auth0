@@ -39,6 +39,10 @@ Full-featured OIDC provider mock with Auth0-compatible API for local development
   organization, applies the invitation's role and metadata, and consumes the ticket
 - `app_metadata.org_roles[org_id]` seeded from the member role on login, mirroring the
   production Post-Login Action
+- A client's `organization_usage: require` with `organization_require_behavior:
+  post_login_prompt`: after sign-in the user picks one of their organizations (one
+  membership signs straight in; none is refused with Auth0's error). `no_prompt`
+  requires the `organization` parameter.
 
 ### Developer Experience
 - Dynamic login UI supporting both email and SMS
@@ -153,6 +157,20 @@ members:
 roles:
   - id: "rol_support"
     name: "support"
+
+clients:
+  - client_id: "api_client"
+    name: "API client"
+    client_secret: "api_secret"
+    grant_types: ["client_credentials"]
+
+# A client-credentials token for a granted audience carries the grant's
+# scopes, as in Auth0. Without a grant for the audience the token keeps
+# the mock's Management API scopes.
+clientGrants:
+  - client_id: "api_client"
+    audience: "https://api.example.test"
+    scope: ["devices:read", "devices:write"]
 ```
 
 ### Signing Key
@@ -409,7 +427,16 @@ exports.onExecutePostLogin = async (event, api) => {
 Alongside the declarative block above, the mock runs real Action code. A
 controller built on `go-auth0` (or plain HTTP) creates, deploys, and binds
 Actions exactly as against a tenant, and the deployed JavaScript runs at the
-`post-login` trigger on the `authorization_code` and `refresh_token` flows.
+`post-login` trigger. As in Auth0, a login through the login page runs it during
+the login, before the code is issued: a denial sends the browser back with
+`error=access_denied`. Refresh, device, and exchange grants run it at the token
+endpoint.
+
+`api.multifactor.enable(provider, options)` asks for a second factor after the
+Actions run: the login page prompts for a one-time code (`123456`, for any of
+Auth0's providers; `none` turns it off, an unknown provider fails the Action).
+A refresh runs without the browser session, so its Actions do not see the second
+factor, and one that asks for it there is refused: a token request cannot prompt.
 
 ```sh
 # create (built synchronously), deploy, bind

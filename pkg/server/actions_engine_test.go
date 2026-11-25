@@ -110,6 +110,11 @@ func loginWithHeader(t *testing.T, ts *httptest.Server, scope, extraQuery string
 	}
 	_ = resp2.Body.Close()
 	loc, _ := url.Parse(resp2.Header.Get("Location"))
+	// A denied login goes back to the application with the error, as in
+	// Auth0; it is reported here as the token endpoint would have.
+	if e := loc.Query().Get("error"); e != "" {
+		return http.StatusForbidden, map[string]any{"error": e, "error_description": loc.Query().Get("error_description")}
+	}
 	exchange := func(nonce string) (int, map[string]any, string) {
 		req, err := http.NewRequest(http.MethodPost, ts.URL+"/oauth/token", strings.NewReader(url.Values{
 			"grant_type": {"authorization_code"}, "client_id": {clientID}, "code": {loc.Query().Get("code")},

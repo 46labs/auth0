@@ -191,6 +191,10 @@ func (c *Client) Clone() *Client {
 	out := *c
 	out.JWTConfig = cloneAnyMap(c.JWTConfig)
 	out.ClientMetadata = maps.Clone(c.ClientMetadata)
+	if c.OIDCConformant != nil {
+		v := *c.OIDCConformant
+		out.OIDCConformant = &v
+	}
 
 	if c.Callbacks != nil {
 		out.Callbacks = make([]string, len(c.Callbacks))

@@ -156,13 +156,24 @@ from conflict-marker checks in pre-commit, CI, and editor diagnostics.
   resolves one to the other.
 - Tenant roles (`/users/{id}/roles`, `/roles/{id}/users`) are kept by role id in `userRoles`,
   apart from organization member roles. `event.authorization.roles` carries the tenant role names
-  only; organization roles reach an Action through `api.roles.getUserEffectiveRolesByNames`.
+  for a login that names no organization; for an organization login it carries the member's roles
+  in that organization instead, as Auth0 does (seen on a production tenant: a tenant-level role
+  is absent there, a membership role present). `api.roles.getUserEffectiveRolesByNames` stays the
+  way to read both.
   Shapes and statuses follow the Management API OpenAPI document and go-auth0's
   `TestUserManager_Roles` and `TestRoleManager_Users*` recordings.
 - The role claim reads `app_metadata.org_roles[org_id]`. The flat `app_metadata.role` is legacy and
   scoped to `app_metadata.tenant_id` only.
 - `PATCH /api/v2/organizations/{id}` merges metadata where real Auth0 replaces the object. Known
   divergence, not yet fixed.
+- A client without `organization_usage` permits organization logins, where Auth0's default is
+  `deny`: consumers provision clients through the Management API and log in to organizations
+  without setting it. An explicit `deny` is enforced. Known divergence, kept on purpose.
+- `POST /api/v2/client-grants` accepts an audience no configured API has, where Auth0 answers 404:
+  consumers and tests grant APIs the mock config does not list. Seeded `clientGrants` are checked
+  against `audience` and `apis` at startup. Known divergence, kept on purpose.
+- The device page has no organization prompt: a device request for a client that requires an
+  organization must name one, whatever its `organization_require_behavior`.
 - The mock never sends email. `send_invitation_email` is accepted and logged.
 - Log stream records follow Auth0's tenant-log schema (`docs/tenant-logs/<category>/<type>`).
   `secte` carries `organization_id` only when the exchange sets the organization natively, and
